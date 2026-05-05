@@ -1,14 +1,13 @@
-```python
 import csv
 import re
-from collections import Counter
 from datetime import datetime
+from collections import defaultdict
 
-DATA_PATH = "../data/transactions.csv"
+DATA_PATH = "data/transactions.csv"
 
 
 # =========================
-# ■ 文字正規化（検索用）
+# ■ 正規化
 # =========================
 def normalize(text):
     if not text:
@@ -20,184 +19,246 @@ def normalize(text):
 
 
 # =========================
-# ■ 日付取得（BOM・ズレ対応）
+# ■ tokenize（N-gram）
 # =========================
-def get_date(row):
-    for k in row.keys():
-        key = k.strip().lower().replace("\ufeff", "")
-        if key == "date":
-            return str(row[k]).strip()
-    return ""
+def tokenize(text):
+    text = normalize(text)
+    tokens = re.split(r"[ 　/()（）・\-_]", text)
 
+    ngrams = []
+    for t in tokens:
+        if len(t) >= 2:
+            for i in range(len(t)-1):
+                ngrams.append(t[i:i+2])
 
-# =========================
-# ■ 日付フォーマット
-# =========================
-def format_date(date_str):
-    try:
-        date_str = str(date_str).strip()
-
-        if len(date_str) == 8:
-            d = datetime.strptime(date_str, "%Y%m%d")
-        else:
-            d = datetime.strptime(date_str, "%Y-%m-%d")
-
-        return d.strftime("%Y-%m-%d")
-    except:
-        return "----"
+    return list(set([t for t in tokens if t] + ngrams))
 
 
 # =========================
-# ■ 日付スコア（新しいほど優遇）
-# =========================
-def get_date_score(date_str):
-    try:
-        if len(date_str) == 8:
-            d = datetime.strptime(date_str, "%Y%m%d")
-        else:
-            d = datetime.strptime(date_str, "%Y-%m-%d")
-
-        days = (datetime.now() - d).days
-        return max(0, 30 - days)
-    except:
-        return 0
-
-
-# =========================
-# ■ CSV読込（完成版）
+# ■ CSV読み込み → 伝票化
 # =========================
 def load_data():
-    records = []
+    rows = []
 
     with open(DATA_PATH, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-
         for row in reader:
             fixed = {}
-
             for k, v in row.items():
                 key = k.strip().lower().replace("\ufeff", "")
                 fixed[key] = str(v).strip()
+            rows.append(fixed)
 
-            # ★ 検索用と表示用を分離
-            fixed["description_raw"] = fixed.get("description", "")
-            fixed["description"] = normalize(fixed.get("description", ""))
+    # 仮グループ（簡易：日付＋description）
+    groups = defaultdict(list)
 
-            fixed["debit"] = normalize(fixed.get("debit", ""))
-            fixed["credit"] = normalize(fixed.get("credit", ""))
+    for r in rows:
+        key = r.get("date") + "_" + r.get("description", "")
+        groups[key].append(r)
 
-            records.append(fixed)
+    records = []
+
+    for k, g in groups.items():
+        tokens = []
+        for r in g:
+            tokens += tokenize(r.get("description", ""))
+
+        records.append({
+            "v_id": k,
+            "rows": g,
+            "tokens": list(set(tokens))
+        })
 
     return records
 
 
 # =========================
-# ■ 完全一致マップ
+# ■ 検索
 # =========================
-def build_exact_map(records):
-    m = {}
-    for r in records:
-        desc = r.get("description", "")
-        if desc:
-            m[desc] = r
-    return m
-
-
-# =========================
-# ■ 頻度
-# =========================
-def build_frequency(records):
-    c = Counter()
-    for r in records:
-        key = (r.get("debit", ""), r.get("credit", ""))
-        c[key] += 1
-    return c
-
-
-# =========================
-# ■ 検索エンジン
-# =========================
-def search(records, keyword, exact_map, freq_map):
-    keyword = normalize(keyword)
-
-    # 完全一致
-    if keyword in exact_map:
-        return [exact_map[keyword]]
-
-    keywords = keyword.split()
+def search(records, keyword):
     results = []
 
-    for r in records:
-        desc = r.get("description", "")
-        debit = r.get("debit", "")
-        credit = r.get("credit", "")
+    query_tokens = tokenize(keyword)
 
-        full = f"{desc} {debit} {credit}"
-
+    for rec in records:
         score = 0
 
-        for kw in keywords:
-            if desc.startswith(kw):
-                score += 80
-
-            if kw in full:
-                score += 50
-
-            score += full.count(kw) * 15
-
-        # 頻度スコア
-        score += freq_map.get((debit, credit), 0) * 5
-
-        # 金額スコア
-        try:
-            amount = int(r.get("amount", 0))
-            score += amount * 0.00001
-        except:
-            pass
-
-        # 日付スコア
-        date_val = get_date(r)
-        score += get_date_score(date_val)
+        for kw in query_tokens:
+            for t in rec["tokens"]:
+                if kw == t:
+                    score += 100
+                elif kw in t or t in kw:
+                    score += 40
 
         if score > 0:
-            results.append((score, r))
+            results.append((score, rec))
 
-    results.sort(reverse=True, key=lambda x: x[0])
-    return [r for score, r in results[:5]]
+    results.sort(reverse=True)
+    return [r for s, r in results[:5]]
+
+
+# =========================
+# ■ 候補表示
+# =========================
+def select_result(results):
+    if not results:
+        print("該当なし")
+        return None
+
+    print("\n候補:")
+
+    for i, rec in enumerate(results, 1):
+        print(f"\n{i}. =====")
+
+        for r in rec["rows"]:
+            print(
+                f"{r.get('debit')} / {r.get('credit')} | {r.get('amount')}"
+            )
+
+    print("\n" + "-" * 40)
+
+    choice = input("番号選択（Enterスキップ）：")
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(results):
+            return results[idx]
+
+    return None
+
+
+# =========================
+# ■ 複合入力
+# =========================
+def input_confirm():
+    print("\n==== 伝票入力 ====")
+
+    entries = []
+
+    while True:
+        debit = input("借方（Enterで終了）：")
+        if debit == "":
+            break
+
+        credit = input("貸方：")
+        amount = input("金額：")
+
+        entries.append({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "debit": debit,
+            "credit": credit,
+            "amount": amount
+        })
+
+    return entries
+
+
+# =========================
+# ■ 一覧表示
+# =========================
+def show_entries(entries):
+    print("\n==== 入力済一覧 ====")
+
+    for i, doc in enumerate(entries, 1):
+        print(f"\n{i}件目")
+
+        for r in doc:
+            print(f"{r['debit']} / {r['credit']} | {r['amount']}")
+
+
+# =========================
+# ■ 修正
+# =========================
+def edit_entry(entries):
+    show_entries(entries)
+
+    idx = input("\n修正する番号：")
+
+    if idx.isdigit():
+        i = int(idx) - 1
+        if 0 <= i < len(entries):
+            print("再入力してください")
+            entries[i] = input_confirm()
+
+
+# =========================
+# ■ 削除
+# =========================
+def delete_entry(entries):
+    show_entries(entries)
+
+    idx = input("\n削除する番号：")
+
+    if idx.isdigit():
+        i = int(idx) - 1
+        if 0 <= i < len(entries):
+            entries.pop(i)
+            print("削除しました")
+
+
+# =========================
+# ■ CSV出力
+# =========================
+def export_csv(entries):
+    if not entries:
+        print("データなし")
+        return
+
+    with open("output.csv", "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "debit", "credit", "amount"])
+
+        for doc in entries:
+            for r in doc:
+                writer.writerow([
+                    r["date"],
+                    r["debit"],
+                    r["credit"],
+                    r["amount"]
+                ])
+
+    print("\n✅ CSV出力完了")
 
 
 # =========================
 # ■ メイン
 # =========================
 if __name__ == "__main__":
-    data = load_data()
+    records = load_data()
 
-    exact_map = build_exact_map(data)
-    freq_map = build_frequency(data)
+    confirmed = []
 
     while True:
-        keyword = input("検索ワード：").strip()
+        print("\n==== メニュー ====")
+        print("1：検索して入力")
+        print("2：一覧確認")
+        print("3：修正")
+        print("4：削除")
+        print("5：CSV出力して終了")
 
-        if keyword == "":
-            print("終了")
+        mode = input("> ")
+
+        if mode == "5":
             break
 
-        results = search(data, keyword, exact_map, freq_map)
+        elif mode == "2":
+            show_entries(confirmed)
 
-        print("\n候補:")
+        elif mode == "3":
+            edit_entry(confirmed)
 
-        if not results:
-            print("該当なし")
+        elif mode == "4":
+            delete_entry(confirmed)
 
-        for r in results:
-            date_val = get_date(r)
+        elif mode == "1":
+            keyword = input("検索ワード：")
 
-            print(
-                f"{format_date(date_val)} | "
-                f"{r.get('description_raw','')} | "
-                f"{r.get('debit','')} / {r.get('credit','')} | "
-                f"{r.get('amount','')}"
-            )
+            results = search(records, keyword)
+            select_result(results)
 
-        print("-" * 50)
-```
+            doc = input_confirm()
+            confirmed.append(doc)
+
+            print("✔ 保存済")
+
+    export_csv(confirmed)
