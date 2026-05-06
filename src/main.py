@@ -1,10 +1,9 @@
 import csv
 import re
-from datetime import datetime
-from collections import defaultdict
+import unicodedata
+import copy
 
 DATA_PATH = "data/transactions.csv"
-
 
 # =========================
 # ■ 正規化
@@ -12,14 +11,19 @@ DATA_PATH = "data/transactions.csv"
 def normalize(text):
     if not text:
         return ""
-    text = str(text).lower()
-    text = text.replace("　", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+
+    text = unicodedata.normalize("NFKC", str(text)).lower()
+
+    text = "".join(
+        chr(ord(c) - 0x60) if "ァ" <= c <= "ン" else c
+        for c in text
+    )
+
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # =========================
-# ■ tokenize（N-gram）
+# ■ tokenize
 # =========================
 def tokenize(text):
     text = normalize(text)
@@ -35,230 +39,370 @@ def tokenize(text):
 
 
 # =========================
-# ■ CSV読み込み → 伝票化
+# ■ 金額変換
 # =========================
-def load_data():
-    rows = []
+def to_int(v):
+    try:
+        return int(float(v))
+    except:
+        return 0
 
-    with open(DATA_PATH, encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            fixed = {}
-            for k, v in row.items():
-                key = k.strip().lower().replace("\ufeff", "")
-                fixed[key] = str(v).strip()
-            rows.append(fixed)
 
-    # 仮グループ（簡易：日付＋description）
-    groups = defaultdict(list)
+# =========================
+# ■ 部門
+# =========================
+def get_department(r):
+    return r.get("借方部門名") or r.get("貸方部門名") or ""
 
-    for r in rows:
-        key = r.get("date") + "_" + r.get("description", "")
-        groups[key].append(r)
+
+# =========================
+# ■ 伝票分割（最重要）
+# =========================
+def split_records(rows):
 
     records = []
+    current = []
 
-    for k, g in groups.items():
-        tokens = []
-        for r in g:
-            tokens += tokenize(r.get("description", ""))
+    d_sum = 0
+    c_sum = 0
+    last_date = None
 
-        records.append({
-            "v_id": k,
-            "rows": g,
-            "tokens": list(set(tokens))
-        })
+    for r in rows:
+
+        d = to_int(r.get("借方金額"))
+        c = to_int(r.get("貸方金額"))
+
+        date = r.get("伝票日付")
+
+        if last_date and date != last_date and current:
+            records.append(current)
+            current = []
+            d_sum = c_sum = 0
+
+        current.append(r)
+
+        d_sum += d
+        c_sum += c
+
+        if d_sum == c_sum and d_sum > 0:
+            records.append(current)
+            current = []
+            d_sum = c_sum = 0
+
+        last_date = date
+
+    if current:
+        records.append(current)
 
     return records
 
 
 # =========================
+# ■ 資金複合分解（完全版）
+# =========================
+def explode_fukugo(rows):
+
+    if not any("資金複合" in (r.get("借方科目名","") + r.get("貸方科目名","")) for r in rows):
+        return rows
+
+    base = None
+
+    for r in rows:
+        d = r.get("借方科目名")
+        c = r.get("貸方科目名")
+
+        if c == "資金複合" and d != "資金複合":
+            base = d
+        elif d == "資金複合" and c != "資金複合":
+            base = c
+
+    if not base:
+        return rows
+
+    new_rows = []
+
+    for r in rows:
+
+        d = r.get("借方科目名")
+        c = r.get("貸方科目名")
+
+        d_amt = to_int(r.get("借方金額"))
+        c_amt = to_int(r.get("貸方金額"))
+
+        # 分解
+        if d == "資金複合" and c != "資金複合":
+            new_rows.append({
+                **r,
+                "借方科目名": base,
+                "貸方科目名": c,
+                "借方金額": c_amt,
+                "貸方金額": c_amt
+            })
+
+        elif c == "資金複合" and d != "資金複合":
+            new_rows.append({
+                **r,
+                "借方科目名": d,
+                "貸方科目名": base,
+                "借方金額": d_amt,
+                "貸方金額": d_amt
+            })
+
+        elif d == base and c == "資金複合":
+            continue
+
+        else:
+            new_rows.append(r)
+
+    return new_rows
+
+
+# =========================
+# ■ 科目マップ
+# =========================
+def build_account_map(rows):
+    mp = {}
+    for r in rows:
+        if r.get("借方科目名") and r.get("借方科目"):
+            mp[r["借方科目名"]] = r["借方科目"]
+        if r.get("貸方科目名") and r.get("貸方科目"):
+            mp[r["貸方科目名"]] = r["貸方科目"]
+    return mp
+
+
+# =========================
+# ■ データ読込
+# =========================
+def load_data():
+
+    raw = []
+
+    with open(DATA_PATH, encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            raw.append({k.strip(): str(v).strip() for k,v in row.items()})
+
+    groups = split_records(raw)
+    name_to_code = build_account_map(raw)
+
+    records = []
+
+    for g in groups:
+
+        g = explode_fukugo(g)
+
+        tokens = []
+
+        for r in g:
+            text = (
+                r.get("摘要","") + " " +
+                r.get("借方科目名","") + " " +
+                r.get("貸方科目名","") + " " +
+                r.get("取引先","")
+            )
+            tokens += tokenize(text)
+
+        records.append({
+            "rows": g,
+            "tokens": list(set(tokens))
+        })
+
+    return records, name_to_code
+
+
+# =========================
+# ■ スコア
+# =========================
+def calculate_score(rec, keyword, dept, amount):
+
+    score = 0
+    tokens = rec["tokens"]
+
+    q = tokenize(keyword)
+    match = 0
+
+    for kw in q:
+        for t in tokens:
+            if kw == t:
+                score += 120
+                match += 1
+            elif kw in t:
+                score += 50
+
+    if match >= 2:
+        score += 150
+
+    if dept:
+        for r in rec["rows"]:
+            if dept in get_department(r):
+                score += 120
+                break
+
+    if amount:
+        total = sum(
+            to_int(r.get("借方金額")) or to_int(r.get("貸方金額"))
+            for r in rec["rows"]
+        )
+        if total == amount:
+            score += 200
+
+    return score
+
+
+# =========================
 # ■ 検索
 # =========================
-def search(records, keyword):
-    results = []
+def search(records, keyword, dept, amount):
 
-    query_tokens = tokenize(keyword)
+    res = []
 
     for rec in records:
-        score = 0
+        s = calculate_score(rec, keyword, dept, amount)
+        if s > 50:
+            res.append((s, rec))
 
-        for kw in query_tokens:
-            for t in rec["tokens"]:
-                if kw == t:
-                    score += 100
-                elif kw in t or t in kw:
-                    score += 40
-
-        if score > 0:
-            results.append((score, rec))
-
-    results.sort(reverse=True)
-    return [r for s, r in results[:5]]
+    return sorted(res, key=lambda x: x[0], reverse=True)[:5]
 
 
 # =========================
-# ■ 候補表示
+# ■ 表示
 # =========================
-def select_result(results):
-    if not results:
-        print("該当なし")
-        return None
+def show_results(results):
 
     print("\n候補:")
 
-    for i, rec in enumerate(results, 1):
-        print(f"\n{i}. =====")
+    for i,(score,rec) in enumerate(results,1):
+
+        print(f"\n{i}. ★スコア:{score}")
+
+        d_sum = c_sum = 0
 
         for r in rec["rows"]:
+
+            d = to_int(r.get("借方金額"))
+            c = to_int(r.get("貸方金額"))
+
+            d_sum += d
+            c_sum += c
+
             print(
-                f"{r.get('debit')} / {r.get('credit')} | {r.get('amount')}"
+                f"{r.get('伝票日付')} | "
+                f"{r.get('摘要')} | "
+                f"{r.get('借方科目名')} {d} / "
+                f"{r.get('貸方科目名')} {c} | "
+                f"{get_department(r)}"
             )
 
-    print("\n" + "-" * 40)
+        print(f"--- 合計：借方={d_sum} / 貸方={c_sum}")
 
-    choice = input("番号選択（Enterスキップ）：")
-
-    if choice.isdigit():
-        idx = int(choice) - 1
-        if 0 <= idx < len(results):
-            return results[idx]
-
-    return None
+        if d_sum == c_sum:
+            print("→ 貸借一致")
+        else:
+            print("⚠ 不一致")
 
 
 # =========================
-# ■ 複合入力
+# ■ 編集（必須）
 # =========================
-def input_confirm():
-    print("\n==== 伝票入力 ====")
+def edit_entry(rows, name_to_code):
 
-    entries = []
+    rows = copy.deepcopy(rows)
 
-    while True:
-        debit = input("借方（Enterで終了）：")
-        if debit == "":
-            break
+    print("\n=== 編集（必須）===")
 
-        credit = input("貸方：")
-        amount = input("金額：")
+    for i,r in enumerate(rows,1):
 
-        entries.append({
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "debit": debit,
-            "credit": credit,
-            "amount": amount
-        })
+        print(f"\n--- 行{i} ---")
 
-    return entries
+        r["摘要"] = input(f"摘要({r['摘要']}): ") or r["摘要"]
 
+        while True:
+            d = input(f"借方({r['借方科目名']}): ") or r["借方科目名"]
+            if d in name_to_code:
+                r["借方科目名"] = d
+                break
+            print("⚠ 未登録")
 
-# =========================
-# ■ 一覧表示
-# =========================
-def show_entries(entries):
-    print("\n==== 入力済一覧 ====")
+        while True:
+            c = input(f"貸方({r['貸方科目名']}): ") or r["貸方科目名"]
+            if c in name_to_code:
+                r["貸方科目名"] = c
+                break
+            print("⚠ 未登録")
 
-    for i, doc in enumerate(entries, 1):
-        print(f"\n{i}件目")
+        amt = input(f"金額({r.get('借方金額') or r.get('貸方金額')}): ")
+        if amt:
+            if r.get("借方金額"):
+                r["借方金額"] = amt
+            else:
+                r["貸方金額"] = amt
 
-        for r in doc:
-            print(f"{r['debit']} / {r['credit']} | {r['amount']}")
-
-
-# =========================
-# ■ 修正
-# =========================
-def edit_entry(entries):
-    show_entries(entries)
-
-    idx = input("\n修正する番号：")
-
-    if idx.isdigit():
-        i = int(idx) - 1
-        if 0 <= i < len(entries):
-            print("再入力してください")
-            entries[i] = input_confirm()
-
-
-# =========================
-# ■ 削除
-# =========================
-def delete_entry(entries):
-    show_entries(entries)
-
-    idx = input("\n削除する番号：")
-
-    if idx.isdigit():
-        i = int(idx) - 1
-        if 0 <= i < len(entries):
-            entries.pop(i)
-            print("削除しました")
+    return rows
 
 
 # =========================
 # ■ CSV出力
 # =========================
-def export_csv(entries):
-    if not entries:
-        print("データなし")
-        return
+def export_csv(entries, name_to_code):
 
-    with open("output.csv", "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(["date", "debit", "credit", "amount"])
+    with open("output.csv","w",newline="",encoding="cp932") as f:
+
+        w = csv.writer(f)
+        w.writerow(["伝票日付","借方科目","貸方科目","金額"])
 
         for doc in entries:
             for r in doc:
-                writer.writerow([
-                    r["date"],
-                    r["debit"],
-                    r["credit"],
-                    r["amount"]
+
+                w.writerow([
+                    r["伝票日付"],
+                    name_to_code.get(r["借方科目名"],""),
+                    name_to_code.get(r["貸方科目名"],""),
+                    r.get("借方金額") or r.get("貸方金額")
                 ])
 
-    print("\n✅ CSV出力完了")
+    print("CSV出力完了")
 
 
 # =========================
 # ■ メイン
 # =========================
 if __name__ == "__main__":
-    records = load_data()
+
+    records, name_to_code = load_data()
 
     confirmed = []
 
     while True:
+
         print("\n==== メニュー ====")
-        print("1：検索して入力")
-        print("2：一覧確認")
-        print("3：修正")
-        print("4：削除")
-        print("5：CSV出力して終了")
+        print("1：検索")
+        print("2：CSV出力して終了")
 
-        mode = input("> ")
-
-        if mode == "5":
+        if input("> ") == "2":
             break
 
-        elif mode == "2":
-            show_entries(confirmed)
+        dept = input("部門：")
+        kw = input("検索ワード：")
+        amt = input("金額：")
 
-        elif mode == "3":
-            edit_entry(confirmed)
+        amt = int(re.sub(r"[^\d]","",amt)) if amt else None
 
-        elif mode == "4":
-            delete_entry(confirmed)
+        res = search(records, kw, dept, amt)
 
-        elif mode == "1":
-            keyword = input("検索ワード：")
+        show_results(res)
 
-            results = search(records, keyword)
-            select_result(results)
+        idx = input("番号選択：")
 
-            doc = input_confirm()
-            confirmed.append(doc)
+        if not idx.isdigit():
+            continue
 
-            print("✔ 保存済")
+        selected = res[int(idx)-1][1]
 
-    export_csv(confirmed)
+        edited = edit_entry(selected["rows"], name_to_code)
+
+        print("\n登録しますか？ (y/n)")
+        if input("> ").lower()=="y":
+            confirmed.append(edited)
+            print("✔ 登録完了")
+
+    export_csv(confirmed, name_to_code)
