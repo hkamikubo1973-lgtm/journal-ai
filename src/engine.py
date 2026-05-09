@@ -421,6 +421,21 @@ def build_account_map(rows):
 
     return mp
 
+# =========================================
+# テンプレ読込
+# =========================================
+TEMPLATE_PATH = "data/templates.csv"
+
+def load_templates():
+    templates = []
+    try:
+        with open(TEMPLATE_PATH, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                templates.append(r)
+    except:
+        pass
+    return templates
 
 # =========================================
 # 伝票総額
@@ -626,30 +641,55 @@ def calculate_score(
 
     year_weight = {
 
-        0: 1.0,
-        1: 0.8,
-        2: 0.6,
+       2026: 1.0,
+       2025: 1.0,
+       2024: 0.8,
+       2023: 0.6,
+       2022: 0.5,
+       2021: 0.4
 
-    }.get(diff, 0.4)
+    }.get(diff, 0.3)
 
     score *= year_weight
 
     return int(score)
 
+# =========================================
+# テンプレ検索
+# =========================================
+def search_templates(templates, keyword, dept):
+
+    results = []
+
+    for t in templates:
+
+        kw = t.get("keyword", "")
+        dept_t = t.get("dept", "")
+
+        if kw and kw in keyword:
+
+            score = 1000 + int(t.get("priority", 5)) * 100
+
+            if dept and dept == dept_t:
+                score += 200
+
+            results.append((score, t))
+
+    return results
 
 # =========================================
 # 検索
 # =========================================
-def search(
-    records,
-    keyword,
-    dept,
-    amount,
-    freq
-):
+def search(records, keyword, dept, amount, freq):
 
-    res = []
+    templates = load_templates()
 
+    results = []
+
+    # テンプレ優先
+    results += search_templates(templates, keyword, dept)
+
+    # 通常検索
     for rec in records:
 
         s = calculate_score(
@@ -661,13 +701,49 @@ def search(
         )
 
         if s > 50:
-
-            res.append(
-                (s, rec)
-            )
+            results.append((s, rec))
 
     return sorted(
-        res,
+        results,
         key=lambda x: x[0],
         reverse=True
     )[:5]
+
+# =========================================
+# 金額サジェスト（安全版）
+# =========================================
+def get_amount_suggestions(records, debit, credit, limit=5):
+
+    candidates = []
+
+    for rec in records:
+
+        for r in rec["rows"]:
+
+            d = r.get("借方科目名")
+            c = r.get("貸方科目名")
+
+            if d == debit and c == credit:
+
+                amt = to_int(r.get("借方金額"))
+
+                if amt > 0:
+
+                    candidates.append({
+                        "amount": amt,
+                        "date": r.get("伝票日付", "")
+                    })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x["date"], reverse=True)
+
+    recent = [c["amount"] for c in candidates[:limit]]
+
+    avg = int(sum(c["amount"] for c in candidates) / len(candidates))
+
+    return {
+        "recent": recent,
+        "avg": avg
+    }
