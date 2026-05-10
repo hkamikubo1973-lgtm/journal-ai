@@ -1,15 +1,10 @@
 # =========================================
-# app.py
-# 仕訳検索システム Streamlit版
-# Epson CSV対応強化版
-# 完全修正版
+# 仕訳検索システム（安定版・編集対応）
 # =========================================
 
 import streamlit as st
 import pandas as pd
 import copy
-from engine import get_amount_suggestions
-
 from datetime import datetime
 
 from engine import (
@@ -17,16 +12,67 @@ from engine import (
     search,
     get_department,
     to_int,
+    get_amount_suggestions
 )
+
+def split_journal(rows):
+
+    debits = []
+    credits = []
+
+    for r in rows:
+        d_amt = to_int(r.get("借方金額"))
+        c_amt = to_int(r.get("貸方金額"))
+
+        if d_amt > 0:
+            debits.append((r, d_amt))
+
+        if c_amt > 0:
+            credits.append((r, c_amt))
+
+    # =====================================
+    # ★ 分解して良い条件
+    # =====================================
+    # 1対多 or 多対1 かつ片側が1行のみ
+    if len(debits) == 1 and len(credits) > 1:
+
+        d_row, _ = debits[0]
+        result = []
+
+        for c_row, c_amt in credits:
+            new = copy.deepcopy(d_row)
+            new["貸方科目名"] = c_row.get("貸方科目名", "")
+            new["貸方補助科目名"] = c_row.get("貸方補助科目名", "")
+            new["貸方金額"] = str(c_amt)
+            new["借方金額"] = str(c_amt)
+            result.append(new)
+
+        return result
+
+    elif len(credits) == 1 and len(debits) > 1:
+
+        c_row, _ = credits[0]
+        result = []
+
+        for d_row, d_amt in debits:
+            new = copy.deepcopy(d_row)
+            new["貸方科目名"] = c_row.get("貸方科目名", "")
+            new["貸方補助科目名"] = c_row.get("貸方補助科目名", "")
+            new["貸方金額"] = str(d_amt)
+            new["借方金額"] = str(d_amt)
+            result.append(new)
+
+        return result
+
+    # =====================================
+    # ★ それ以外は絶対分解しない
+    # =====================================
+    return rows
 
 # =========================================
 # 初期設定
 # =========================================
-st.set_page_config(
-    page_title="仕訳検索システム",
-    layout="wide"
-)
-
+st.set_page_config(page_title="仕訳検索", layout="wide")
 st.title("📘 仕訳検索システム")
 
 # =========================================
@@ -38,12 +84,7 @@ def cached_load():
 
 records, name_to_code, freq = cached_load()
 
-# =========================================
-# マスタ
-# =========================================
-account_master = sorted(
-    list(name_to_code.keys())
-)
+account_master = sorted(list(name_to_code.keys()))
 
 department_master = sorted(
     list(set(
@@ -54,737 +95,334 @@ department_master = sorted(
     ))
 )
 
-# =========================================
-# 補助科目マスタ
-# =========================================
 sub_master = sorted(
     list(set(
-
         r.get("借方補助科目名", "")
         for rec in records
         for r in rec["rows"]
-        if r.get("借方補助科目名", "")
-
     ) | set(
-
         r.get("貸方補助科目名", "")
         for rec in records
         for r in rec["rows"]
-        if r.get("貸方補助科目名", "")
-
     ))
 )
 
 # =========================================
-# session_state
+# セッション
 # =========================================
-if "searched" not in st.session_state:
-    st.session_state.searched = False
-
 if "results" not in st.session_state:
     st.session_state.results = []
 
 if "confirmed" not in st.session_state:
     st.session_state.confirmed = []
 
-if "process_date" not in st.session_state:
-    st.session_state.process_date = datetime.today()
-
-if "template_selected" not in st.session_state:
-    st.session_state.template_selected = None
-
 # =========================================
-# サイドバー（検索＋テンプレ）
+# サイドバー（検索）
 # =========================================
-
-# -------------------------------
-# 検索
-# -------------------------------
 st.sidebar.header("🔍 検索")
 
-dept = st.sidebar.selectbox(
-    "部門",
-    [""] + department_master,
-    key="search_dept"
-)
-
-keyword = st.sidebar.text_input(
-    "検索ワード",
-    "",
-    key="search_keyword"
-)
-
-amount_str = st.sidebar.text_input(
-    "金額",
-    "",
-    key="search_amount"
-)
+dept = st.sidebar.selectbox("部門（任意）", [""] + department_master)
+keyword = st.sidebar.text_input("キーワード")
+amount_str = st.sidebar.text_input("金額")
 
 amount = None
-
-if amount_str.strip():
+if amount_str:
     try:
         amount = int(amount_str.replace(",", ""))
     except:
-        st.sidebar.error("金額が不正です")
+        st.sidebar.error("金額エラー")
 
-
-# -------------------------------
-# テンプレ登録
-# -------------------------------
-st.sidebar.divider()
-st.sidebar.header("📌 テンプレ登録")
-
-with st.sidebar.expander("テンプレを追加"):
-
-    t_name = st.text_input(
-        "テンプレ名",
-        key="tpl_name"
-    )
-
-    t_kw = st.text_input(
-        "検索キーワード",
-        key="tpl_keyword"
-    )
-
-    t_dept = st.selectbox(
-        "部門",
-        [""] + department_master,
-        key="tpl_dept"
-    )
-
-    t_debit = st.selectbox(
-        "借方科目",
-        account_master,
-        key="tpl_debit"
-    )
-
-    t_credit = st.selectbox(
-        "貸方科目",
-        account_master,
-        key="tpl_credit"
-    )
-
-    t_amount = st.text_input(
-        "金額（任意）",
-        key="tpl_amount"
-    )
-
-    t_priority = st.number_input(
-        "優先度（大きいほど上）",
-        min_value=1,
-        max_value=10,
-        value=5,
-        key="tpl_priority"
-    )
-
-    # -------------------------------
-    # 保存処理
-    # -------------------------------
-    if st.button("テンプレ保存", key="tpl_save"):
-
-        if not t_kw:
-            st.warning("キーワードは必須です")
-        else:
-            import pandas as pd
-            import os
-
-            new_row = {
-                "template_name": t_name,
-                "keyword": t_kw,
-                "dept": t_dept,
-                "debit": t_debit,
-                "credit": t_credit,
-                "amount": t_amount,
-                "priority": t_priority
-            }
-
-            file_path = "data/templates.csv"
-
-            if os.path.exists(file_path):
-                df = pd.read_csv(file_path)
-                df = pd.concat([df, pd.DataFrame([new_row])])
-            else:
-                df = pd.DataFrame([new_row])
-
-            df.to_csv(
-                file_path,
-                index=False,
-                encoding="utf-8-sig"
-            )
-
-            st.success("テンプレ保存完了")
-            st.rerun()
-
-# =========================================
-# 処理日
-# =========================================
-st.subheader("📅 登録処理日")
-
-process_date_obj = st.date_input(
-
-    "登録日",
-
-    value=st.session_state.process_date,
-
-    key="global_process_date"
-)
-
-st.session_state.process_date = process_date_obj
-
-process_date = process_date_obj.strftime(
-    "%Y%m%d"
-)
-
-st.caption(
-    f"登録される伝票日付：{process_date}"
-)
-
-st.divider()
-
-# =========================================
-# 検索
-# =========================================
 if st.sidebar.button("検索"):
-
-    st.session_state.searched = True
-
     st.session_state.results = search(
         records,
         keyword,
-        dept,
+        dept if dept else None,
         amount,
         freq
     )
 
 # =========================================
-# 初期画面
+# 日付
 # =========================================
-if not st.session_state.searched:
+st.subheader("📅 伝票日付")
 
-    st.info("左から検索してください")
+process_date_obj = st.date_input("日付", datetime.today())
+process_date = process_date_obj.strftime("%Y%m%d")
+
+st.divider()
 
 # =========================================
 # 検索結果
 # =========================================
+results = st.session_state.results
+
+if not results:
+    st.info("検索してください")
+
 else:
 
-    results = st.session_state.results
+    st.success(f"{len(results)}件ヒット")
 
-    if not results:
+    for idx, (score, rec) in enumerate(results, 1):
 
-        st.warning("候補なし")
+        if not isinstance(rec, dict) or "rows" not in rec:
+            continue
 
-    else:
+        # =========================================
+        # ★ ここが重要：仕訳分解
+        # =========================================
+        rows = split_journal(rec["rows"])
 
-        st.success(
-            f"{len(results)}件ヒット"
-        )
+        doc_id = f"{idx}_{rows[0].get('摘要','')}"
 
-        # =====================================
-        # 候補ループ
-        # =====================================
-        for idx, (score, rec) in enumerate(results, 1):
+        with st.expander(f"{idx}. ★{score} {rows[0].get('摘要','')}"):
 
-            # ==============================
-            # 🔵 通常仕訳（既存処理）
-            # ==============================
-            if isinstance(rec, dict) and "rows" in rec:
+            edited_rows = []
+            d_sum = 0
+            c_sum = 0
 
-                rows = rec["rows"]
+            for r_idx, r in enumerate(rows):
 
-                doc_id = (
-                    str(rows[0].get("伝票日付", ""))
-                    + "_"
-                    + str(rows[0].get("摘要", ""))
-                    + "_"
-                    + str(idx)
-                )
+                st.markdown(f"### 行 {r_idx+1}")
 
-                d_sum = sum(
-                    to_int(r.get("借方金額"))
-                    for r in rows
-                )
+                col1, col2 = st.columns(2)
 
-                c_sum = sum(
-                    to_int(r.get("貸方金額"))
-                    for r in rows
-                )
-
-                title = (
-                    f"{idx}. "
-                    f"★スコア:{score} ｜ "
-                    f"{rows[0].get('摘要','')}"
-                )
-
-                # =====================================
-                # expander
-                # =====================================
-                with st.expander(title):
-
-                    st.info(
-                        f"元伝票日付："
-                        f"{rows[0].get('伝票日付','')}"
+                # =================================
+                # 借方
+                # =================================
+                with col1:
+                    default_debit = r.get("借方科目名", "")
+                    debit = st.selectbox(
+                        "借方",
+                        account_master,
+                        index=account_master.index(default_debit)
+                        if default_debit in account_master else 0,
+                        key=f"d_{doc_id}_{r_idx}"
                     )
 
-                    col1, col2, col3 = st.columns(3)
-
-                    with col1:
-                        st.write(f"💴 借方合計：{d_sum:,}")
-
-                    with col2:
-                        st.write(f"💴 貸方合計：{c_sum:,}")
-
-                    with col3:
-                        if d_sum == c_sum:
-                            st.success("貸借一致")
-                        else:
-                            st.error("貸借不一致")
-
-                    st.divider()
-
-                    # =================================
-                    # 編集
-                    # =================================
-                    edited_rows = []
-
-                    template = st.session_state.get("template_selected")
-
-                    for r_idx, r in enumerate(rows):
-
-                        st.markdown(f"### 行 {r_idx+1}")
-
-                        c1, c2 = st.columns(2)
-
-                        # ===== 借方 =====
-                        with c1:
-                            default_debit = r.get("借方科目名","")
-
-                            if template and r_idx == 0:
-                                default_debit = template.get("debit", default_debit)
-
-                            debit = st.selectbox(
-                                "借方科目",
-                                account_master,
-                                index=(
-                                    account_master.index(default_debit)
-                                    if default_debit in account_master
-                                    else 0
-                                ),
-                                key=f"d_{doc_id}_{r_idx}"
-                            )
-
-                        # ===== 貸方 =====
-                        with c2:
-                            default_credit = r.get("貸方科目名","")
-
-                            if template and r_idx == 0:
-                                default_credit = template.get("credit", default_credit)
-
-                            credit = st.selectbox(
-                                "貸方科目",
-                                account_master,
-                                index=(
-                                    account_master.index(default_credit)
-                                    if default_credit in account_master
-                                    else 0
-                                ),
-                                key=f"c_{doc_id}_{r_idx}"
-                            )
-
-                        # ===== サジェスト =====
-                        suggest = get_amount_suggestions(
-                            records,
-                            debit,
-                            credit
-                        )
-
-                        if suggest:
-                            st.caption("📊 過去参考")
-
-                            col_s1, col_s2 = st.columns(2)
-
-                            with col_s1:
-                                st.write(f"平均：{suggest['avg']:,}")
-
-                            with col_s2:
-                                st.write(
-                                    "直近："
-                                    + ", ".join(
-                                        f"{v:,}" for v in suggest["recent"][:3]
-                                    )
-                                )
-
-                        # ===== 金額 =====
-                        amt = st.number_input(
-                            "金額",
-                            min_value=0,
-                            value=to_int(r.get("借方金額")),
-                            key=f"amt_{doc_id}_{r_idx}"
-                        )
-
-                        # ===== 摘要 =====
-                        memo = st.text_input(
-                            "摘要",
-                            value=r.get("摘要",""),
-                            key=f"m_{doc_id}_{r_idx}"
-                        )
-
-                        # ===== 保存用 =====
-                        new_row = copy.deepcopy(r)
-
-                        new_row["伝票日付"] = process_date
-                        new_row["摘要"] = memo
-                        new_row["借方科目名"] = debit
-                        new_row["貸方科目名"] = credit
-                        new_row["借方金額"] = str(amt)
-                        new_row["貸方金額"] = str(amt)
-
-                        edited_rows.append(new_row)
-
-                        st.divider()
-
-                    # 登録
-                    if st.button(f"登録_{doc_id}"):
-
-                        st.session_state.confirmed.append(
-                           copy.deepcopy(edited_rows)
-                        )
-
-                        st.success("登録完了")
-
-            # ==============================
-            # 🔴 テンプレ
-            # ==============================
-            else:
-
-                title = f"{idx}. ★テンプレ:{score}"
-
-                with st.expander(title):
-
-                    st.info(
-                        f"テンプレ：{rec.get('template_name','')}"
+                # =================================
+                # 貸方
+                # =================================
+                with col2:
+                    default_credit = r.get("貸方科目名", "")
+                    credit = st.selectbox(
+                        "貸方",
+                        account_master,
+                        index=account_master.index(default_credit)
+                        if default_credit in account_master else 0,
+                        key=f"c_{doc_id}_{r_idx}"
                     )
 
-                    st.write(
-                        f"{rec.get('debit','')} / "
-                        f"{rec.get('credit','')}"
+                # =================================
+                # 補助科目
+                # =================================
+                col3, col4 = st.columns(2)
+
+                with col3:
+                    default_ds = r.get("借方補助科目名", "")
+                    debit_sub = st.selectbox(
+                        "借方補助",
+                        [""] + sub_master,
+                        index=([""] + sub_master).index(default_ds)
+                        if default_ds in ([""] + sub_master) else 0,
+                        key=f"ds_{doc_id}_{r_idx}"
                     )
 
-                    if st.button(f"テンプレ使用_{idx}"):
+                with col4:
+                    default_cs = r.get("貸方補助科目名", "")
+                    credit_sub = st.selectbox(
+                        "貸方補助",
+                        [""] + sub_master,
+                        index=([""] + sub_master).index(default_cs)
+                        if default_cs in ([""] + sub_master) else 0,
+                        key=f"cs_{doc_id}_{r_idx}"
+                    )
 
-                        st.session_state.template_selected = rec
+                # =================================
+                # 金額サジェスト
+                # =================================
+                suggest = get_amount_suggestions(records, debit, credit)
 
-                        st.success("テンプレをフォームに反映しました")
+                if suggest:
+                    st.caption(
+                        f"平均:{suggest['avg']:,} / "
+                        f"直近:{', '.join(str(v) for v in suggest['recent'][:3])}"
+                    )
+                    default_amt = suggest["avg"]
+                else:
+                    default_amt = to_int(r.get("借方金額"))
+
+                amt = st.number_input(
+                    "金額",
+                    min_value=0,
+                    value=default_amt,
+                    key=f"amt_{doc_id}_{r_idx}"
+                )
+
+                # =================================
+                # 摘要
+                # =================================
+                memo = st.text_input(
+                    "摘要",
+                    value=r.get("摘要", ""),
+                    key=f"m_{doc_id}_{r_idx}"
+                )
+
+                # =================================
+                # 合計
+                # =================================
+                d_sum += amt
+                c_sum += amt
+
+                # =================================
+                # 保存データ
+                # =================================
+                new_row = copy.deepcopy(r)
+
+                new_row["伝票日付"] = process_date
+                new_row["借方科目名"] = debit
+                new_row["借方補助科目名"] = debit_sub
+                new_row["貸方科目名"] = credit
+                new_row["貸方補助科目名"] = credit_sub
+                new_row["借方金額"] = str(amt)
+                new_row["貸方金額"] = str(amt)
+                new_row["摘要"] = memo
+
+                edited_rows.append(new_row)
+
+                st.divider()
+
+            # =========================
+            # チェック
+            # =========================
+            if d_sum != c_sum:
+                st.error("❌ 貸借不一致")
+
+            if process_date_obj > datetime.today().date():
+                st.warning("⚠️ 未来日付")
+
+            # =========================
+            # 登録ボタン
+            # =========================
+            if st.button("登録", key=f"save_{doc_id}"):
+
+                if d_sum != c_sum:
+                    st.error("登録不可")
+                else:
+                    st.session_state.confirmed.append(
+                        copy.deepcopy(edited_rows)
+                    )
+                    st.success("✔ 登録しました")
 
 # =========================================
-# 登録済一覧
+# 登録済（ここが本体）
 # =========================================
 if st.session_state.confirmed:
 
     st.divider()
+    st.header("📦 登録済仕訳（編集可能）")
 
-    st.header("📦 登録済仕訳")
+    for doc_idx, doc in enumerate(st.session_state.confirmed):
 
-    delete_target = None
-
-    for doc_idx, doc in enumerate(
-        st.session_state.confirmed
-    ):
-
-        with st.expander(
-            f"登録済伝票 {doc_idx+1}"
-        ):
+        with st.expander(f"伝票 {doc_idx+1}"):
 
             edited_doc = []
 
             for row_idx, r in enumerate(doc):
 
-                st.markdown(
-                    f"### 行 {row_idx+1}"
-                )
+                st.markdown(f"### 行 {row_idx+1}")
 
-                st.write(
-                    f"伝票日付："
-                    f"{r.get('伝票日付','')}"
-                )
+                col1, col2 = st.columns(2)
 
-                c1, c2 = st.columns(2)
-
-                with c1:
-
+                with col1:
                     debit = st.selectbox(
-
-                        "借方科目",
-
+                        "借方",
                         account_master,
-
-                        index=(
-                            account_master.index(
-                                r.get(
-                                    "借方科目名",
-                                    ""
-                                )
-                            )
-                            if r.get(
-                                "借方科目名",
-                                ""
-                            ) in account_master
-                            else 0
-                        ),
-
+                        index=account_master.index(r["借方科目名"]) if r["借方科目名"] in account_master else 0,
                         key=f"conf_d_{doc_idx}_{row_idx}"
                     )
 
-                with c2:
-
+                with col2:
                     credit = st.selectbox(
-
-                        "貸方科目",
-
+                        "貸方",
                         account_master,
-
-                        index=(
-                            account_master.index(
-                                r.get(
-                                    "貸方科目名",
-                                    ""
-                                )
-                            )
-                            if r.get(
-                                "貸方科目名",
-                                ""
-                            ) in account_master
-                            else 0
-                        ),
-
+                        index=account_master.index(r["貸方科目名"]) if r["貸方科目名"] in account_master else 0,
                         key=f"conf_c_{doc_idx}_{row_idx}"
                     )
 
-                c3, c4 = st.columns(2)
+                # ===== 補助科目 =====
+                col3, col4 = st.columns(2)
 
-                with c3:
-
+                with col3:
                     debit_sub = st.selectbox(
-
                         "借方補助",
-
                         [""] + sub_master,
-
-                        index=(
-                            ([""] + sub_master).index(
-                                r.get(
-                                    "借方補助科目名",
-                                    ""
-                                )
-                            )
-                            if r.get(
-                                "借方補助科目名",
-                                ""
-                            ) in ([""] + sub_master)
-                            else 0
-                        ),
-
+                        index=([""] + sub_master).index(
+                            r.get("借方補助科目名", "")
+                        ) if r.get("借方補助科目名", "") in ([""] + sub_master) else 0,
                         key=f"conf_ds_{doc_idx}_{row_idx}"
                     )
 
-                with c4:
-
+                with col4:
                     credit_sub = st.selectbox(
-
                         "貸方補助",
-
                         [""] + sub_master,
-
-                        index=(
-                            ([""] + sub_master).index(
-                                r.get(
-                                    "貸方補助科目名",
-                                    ""
-                                )
-                            )
-                            if r.get(
-                                "貸方補助科目名",
-                                ""
-                            ) in ([""] + sub_master)
-                            else 0
-                        ),
-
+                        index=([""] + sub_master).index(
+                            r.get("貸方補助科目名", "")
+                        ) if r.get("貸方補助科目名", "") in ([""] + sub_master) else 0,
                         key=f"conf_cs_{doc_idx}_{row_idx}"
                     )
 
-                # =================================
-                # 金額サジェスト（登録済用）
-                # =================================
-                suggest = get_amount_suggestions(
-                    records,
-                    debit,
-                    credit
-                )
-
-                if suggest:
-
-                    st.caption("📊 過去参考")
-
-                    col_s1, col_s2 = st.columns(2)
-
-                    with col_s1:
-                        st.write(f"平均：{suggest['avg']:,}")
-
-                    with col_s2:
-                        st.write(
-                            "直近："
-                            + ", ".join(
-                                f"{v:,}" for v in suggest["recent"][:3]
-                            )
-                        )
-
                 amt = st.number_input(
-
                     "金額",
-
-                    min_value=0,
-
-                    value=to_int(
-                        r.get("借方金額")
-                    ),
-
+                    value=to_int(r["借方金額"]),
                     key=f"conf_amt_{doc_idx}_{row_idx}"
                 )
 
                 memo = st.text_input(
-
                     "摘要",
-
-                    value=r.get(
-                        "摘要",
-                        ""
-                    ),
-
+                    value=r.get("摘要",""),
                     key=f"conf_m_{doc_idx}_{row_idx}"
                 )
 
-                # -----------------------------
-                # 更新データ
-                # -----------------------------
                 new_row = copy.deepcopy(r)
-
-                new_row["摘要"] = memo
-
                 new_row["借方科目名"] = debit
-                new_row["借方補助科目名"] = debit_sub
-
                 new_row["貸方科目名"] = credit
+                new_row["借方補助科目名"] = debit_sub
                 new_row["貸方補助科目名"] = credit_sub
-
                 new_row["借方金額"] = str(amt)
                 new_row["貸方金額"] = str(amt)
+                new_row["摘要"] = memo
 
                 edited_doc.append(new_row)
 
-                st.divider()
+            colA, colB = st.columns(2)
 
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                if st.button(
-
-                    "更新保存",
-
-                    key=f"update_{doc_idx}"
-                ):
-
-                    st.session_state.confirmed[
-                        doc_idx
-                    ] = copy.deepcopy(
-                        edited_doc
-                    )
-
-                    st.success(
-                        "更新しました"
-                    )
-
+            with colA:
+                if st.button("更新保存", key=f"update_{doc_idx}"):
+                    st.session_state.confirmed[doc_idx] = edited_doc
+                    st.success("更新しました")
                     st.rerun()
 
-            with col2:
+            with colB:
+                if st.button("削除", key=f"delete_{doc_idx}"):
+                    st.session_state.confirmed.pop(doc_idx)
+                    st.rerun()
 
-                if st.button(
-
-                    "削除",
-
-                    key=f"delete_{doc_idx}"
-                ):
-
-                    delete_target = doc_idx
-
-    # =====================================
-    # 削除実行
-    # =====================================
-    if delete_target is not None:
-
-        st.session_state.confirmed.pop(
-            delete_target
-        )
-
-        st.success("削除しました")
-
-        st.rerun()
-
-    # =====================================
-    # CSV出力
-    # =====================================
+    # =========================================
+    # CSV
+    # =========================================
     st.divider()
-
-    st.header("📄 CSV出力")
+    st.header("📄 CSV")
 
     all_rows = []
-
     for doc in st.session_state.confirmed:
+        all_rows.extend(doc)
 
-        for r in doc:
+    df = pd.DataFrame(all_rows).fillna("")
 
-            all_rows.append(r)
+    st.dataframe(df)
 
-    # =====================================
-    # DataFrame化
-    # =====================================
-    out_df = pd.DataFrame(all_rows)
+    csv = df.to_csv(index=False).encode("cp932")
 
-    # =====================================
-    # NaN除去
-    # =====================================
-    out_df = out_df.fillna("")
-
-    # =====================================
-    # 表示
-    # =====================================
-    st.dataframe(
-
-        out_df,
-
-        use_container_width=True,
-
-        hide_index=True
-    )
-
-    # =====================================
-    # CSV生成
-    # =====================================
-    csv_data = out_df.to_csv(
-        index=False
-    ).encode("cp932")
-
-    # =====================================
-    # ダウンロード
-    # =====================================
-    st.download_button(
-
-        label="CSVダウンロード",
-
-        data=csv_data,
-
-        file_name="output.csv",
-
-        mime="text/csv"
-    )
+    st.download_button("CSVダウンロード", csv, "output.csv")
