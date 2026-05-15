@@ -563,7 +563,7 @@ def load_data():
 
 
 # =========================================
-# スコア
+# スコア（完全版・安全強化）
 # =========================================
 def calculate_score(
     rec,
@@ -574,7 +574,6 @@ def calculate_score(
 ):
 
     score = 0
-
     tokens = rec["tokens"]
 
     q = tokenize(keyword)
@@ -582,9 +581,9 @@ def calculate_score(
     match = 0
 
     for kw in q:
-
         for t in tokens:
 
+            # 完全一致
             if kw == t:
 
                 rare_bonus = max(
@@ -600,7 +599,8 @@ def calculate_score(
 
                 match += 1
 
-            elif kw in t:
+            # 部分一致
+            elif kw in t or t in kw:
 
                 score += 50
 
@@ -609,46 +609,32 @@ def calculate_score(
 
     # 部門
     if dept:
-
         for r in rec["rows"]:
-
             if dept in get_department(r):
-
                 score += 120
                 break
 
     # 金額
     if amount:
-
-        total = get_voucher_total(
-            rec["rows"]
-        )
-
+        total = get_voucher_total(rec["rows"])
         if total == amount:
             score += 200
 
-    # 年度重み
+    # =========================================
+    # 年度（相対化）
+    # =========================================
     current_year = datetime.now().year
 
-    diff = (
-        current_year
-        -
-        rec.get(
-            "year",
-            current_year
-        )
-    )
+    diff = current_year - rec.get("year", current_year)
 
-    year_weight = {
-
-       2026: 1.0,
-       2025: 1.0,
-       2024: 0.8,
-       2023: 0.6,
-       2022: 0.5,
-       2021: 0.4
-
-    }.get(diff, 0.3)
+    if diff <= 1:
+        year_weight = 1.0
+    elif diff == 2:
+        year_weight = 0.8
+    elif diff == 3:
+        year_weight = 0.6
+    else:
+        year_weight = 0.4
 
     score *= year_weight
 
@@ -747,3 +733,131 @@ def get_amount_suggestions(records, debit, credit, limit=5):
         "recent": recent,
         "avg": avg
     }
+
+# =========================================
+# CSV更新（完全版・安全設計）
+# =========================================
+
+import os
+
+OUTPUT_PATH = "data/transactions.csv"
+
+
+def clean_row(r):
+    """
+    1行の整形（超重要）
+    """
+
+    new = {}
+
+    for k, v in r.items():
+
+        if v is None:
+            v = ""
+
+        v = str(v).strip()
+
+        # 空白統一
+        v = re.sub(r"\s+", " ", v)
+
+        new[k.strip()] = v
+
+    return new
+
+
+def is_valid_row(r):
+    """
+    壊れデータ除外
+    """
+
+    d = to_int(r.get("借方金額"))
+    c = to_int(r.get("貸方金額"))
+
+    # 両方ゼロはNG
+    if d == 0 and c == 0:
+        return False
+
+    # 日付なしNG
+    if not r.get("伝票日付"):
+        return False
+
+    return True
+
+
+def normalize_rows(rows):
+    """
+    行単位整形
+    """
+
+    result = []
+
+    for r in rows:
+
+        r = clean_row(r)
+
+        if not is_valid_row(r):
+            continue
+
+        result.append(r)
+
+    return result
+
+
+def append_to_csv(new_rows):
+    """
+    CSVへ上追加（最重要）
+    """
+
+    if not new_rows:
+        return
+
+    # 既存読込
+    existing = []
+
+    if os.path.exists(OUTPUT_PATH):
+
+        with open(OUTPUT_PATH, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                existing.append(r)
+
+    # ヘッダー取得
+    if existing:
+        fieldnames = list(existing[0].keys())
+    else:
+        fieldnames = list(new_rows[0].keys())
+
+    # 上に追加
+    combined = new_rows + existing
+
+    # 書き込み
+    with open(OUTPUT_PATH, "w", newline="", encoding="utf-8-sig") as f:
+
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+        writer.writeheader()
+
+        for r in combined:
+            writer.writerow(r)
+
+
+def update_search_csv(confirmed_docs):
+    """
+    メイン処理
+    confirmed（登録済）をCSVへ反映
+    """
+
+    all_rows = []
+
+    for doc in confirmed_docs:
+
+        # 伝票単位で整形
+        rows = normalize_rows(doc)
+
+        if not rows:
+            continue
+
+        all_rows.extend(rows)
+
+    # CSVへ追加
+    append_to_csv(all_rows)
