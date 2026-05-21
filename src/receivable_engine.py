@@ -282,8 +282,71 @@ def update_receivables(receivables_df, matched_result):
             encoding="utf-8-sig"
         )
 
+        save_receivable_history(matched_result)
+
         print("未収更新完了")
 
     except Exception as e:
 
         print("未収更新エラー:", e)
+
+# =========================================
+# 消込履歴保存
+# =========================================
+def save_receivable_history(matched_result):
+
+    try:
+
+        import os
+        from datetime import datetime
+
+        history_path = "data/receivables/receivable_history.csv"
+
+        history_rows = []
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for item in matched_result:
+
+            row = {
+                "日時": now,
+                "コード": item.get("コード", ""),
+                "得意先名": item.get("得意先名", ""),
+                "消込額": item.get("消込額", ""),
+                "元残高": item.get("元残高", ""),
+                "消込後残高": item.get("消込後残高", ""),
+                "状態": item.get("状態", "")
+            }
+
+            history_rows.append(row)
+
+        new_df = pd.DataFrame(history_rows)
+
+        # 履歴CSV存在確認
+        if os.path.exists(history_path):
+
+            old_df = pd.read_csv(
+                history_path,
+                dtype=str
+            ).fillna("")
+
+            save_df = pd.concat(
+                [old_df, new_df],
+                ignore_index=True
+            )
+
+        else:
+
+            save_df = new_df
+
+        save_df.to_csv(
+            history_path,
+            index=False,
+            encoding="utf-8-sig"
+        )
+
+        print("消込履歴保存完了")
+
+    except Exception as e:
+
+        print("履歴保存エラー:", e)
