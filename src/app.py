@@ -371,7 +371,7 @@ else:
 
     st.success(f"{len(results)}件ヒット")
 
-    for idx, (score, rec) in enumerate(results, 1):
+    for idx, (score, rec, score_detail) in enumerate(results, 1):
 
         if not isinstance(rec, dict):
             continue

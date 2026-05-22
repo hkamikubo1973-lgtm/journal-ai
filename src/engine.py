@@ -574,6 +574,8 @@ def calculate_score(
 ):
 
     score = 0
+    score_detail = []
+
     tokens = rec["tokens"]
 
     q = tokenize(keyword)
@@ -591,10 +593,12 @@ def calculate_score(
                     50 - freq.get(kw, 0)
                 )
 
-                score += (
-                    120
-                    +
-                    rare_bonus
+                add_score = 120 + rare_bonus
+
+                score += add_score
+
+                score_detail.append(
+                    f"完全一致:{kw} +{add_score}"
                 )
 
                 match += 1
@@ -604,14 +608,27 @@ def calculate_score(
 
                 score += 50
 
+                score_detail.append(
+                    f"部分一致:{kw} +50"
+                )
+
     if match >= 2:
+
         score += 150
+
+        score_detail.append(
+            "複数キーワード一致 +150"
+        )
 
     # 部門
     if dept:
         for r in rec["rows"]:
             if dept in get_department(r):
                 score += 120
+
+                score_detail.append(
+                    f"部門一致:{dept} +120"
+                )
                 break
 
     # 金額
@@ -619,6 +636,10 @@ def calculate_score(
         total = get_voucher_total(rec["rows"])
         if total == amount:
             score += 200
+
+            score_detail.append(
+                f"金額一致:{amount} +200"
+            )
 
     # =========================================
     # 年度（相対化）
@@ -638,7 +659,7 @@ def calculate_score(
 
     score *= year_weight
 
-    return int(score)
+    return int(score), score_detail
 
 # =========================================
 # テンプレ検索
@@ -678,7 +699,7 @@ def search(records, keyword, dept, amount, freq):
     # 通常検索
     for rec in records:
 
-        s = calculate_score(
+        s, score_detail = calculate_score(
             rec,
             keyword,
             dept,
@@ -687,7 +708,9 @@ def search(records, keyword, dept, amount, freq):
         )
 
         if s > 50:
-            results.append((s, rec))
+            results.append(
+                (s, rec, score_detail)
+            )
 
     return sorted(
         results,
