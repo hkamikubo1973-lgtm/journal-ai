@@ -76,6 +76,25 @@ EPSON_COLUMNS = [
 ]
 
 # =========================================
+# 伝票合計
+# =========================================
+def get_voucher_total(rows):
+
+    total = 0
+
+    for r in rows:
+
+        try:
+            total += int(
+                str(r.get("借方金額", 0))
+                .replace(",", "")
+            )
+        except:
+            pass
+
+    return total
+
+# =========================================
 # 伝票分割
 # =========================================
 def split_journal(rows):
@@ -383,9 +402,20 @@ else:
 
         doc_id = f"{idx}_{id(rec)}"
 
-        with st.expander(
-            f"{idx}. ★{score} {rows[0].get('摘要','')}"
-        ):
+        summary = (
+            f"{idx}. ★{score} "
+            f"{rows[0].get('摘要','')}"
+            f"　{len(rows)}行"
+            f"　¥{get_voucher_total(rows):,}"
+        )
+
+        with st.expander(summary):
+
+            with st.expander("検索理由"):
+                for d in score_detail:
+                    st.write("・", d)
+
+            st.divider()
 
             edited_rows = []
 
