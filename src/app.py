@@ -76,6 +76,32 @@ EPSON_COLUMNS = [
 ]
 
 # =========================================
+# 科目マスタ（仮）
+# =========================================
+ACCOUNT_MASTER = {
+
+    "114": "普通預金",
+    "1241": "資金複合",
+    "511": "売上高",
+    "613": "消耗品費",
+    "711": "旅費交通費",
+    "801": "未払金",
+
+}
+
+# =========================================
+# 科目名変換
+# =========================================
+def get_account_name(code):
+
+    code = str(code)
+
+    return ACCOUNT_MASTER.get(
+        code,
+        code
+    )
+
+# =========================================
 # 伝票合計
 # =========================================
 def get_voucher_total(rows):
@@ -412,8 +438,38 @@ else:
         with st.expander(summary):
 
             with st.expander("検索理由"):
-                for d in score_detail:
-                    st.write("・", d)
+
+                full_match_count = len([
+                    d for d in score_detail
+                    if "完全一致" in d
+                ])
+
+                partial_match_count = len([
+                    d for d in score_detail
+                    if "部分一致" in d
+                ])
+
+                if full_match_count:
+                    st.write(
+                        f"✅ 完全一致 {full_match_count}件"
+                    )
+
+                if partial_match_count:
+                    st.write(
+                        f"✅ 部分一致 {partial_match_count}件"
+                    )
+
+                if any(
+                    "部門一致" in d
+                    for d in score_detail
+                ):
+                    st.write("✅ 部門一致")
+
+                if any(
+                    "複数キーワード一致" in d
+                    for d in score_detail
+                ):
+                    st.write("✅ 複数キーワード一致")
 
             st.divider()
 
@@ -424,48 +480,70 @@ else:
 
             for r_idx, r in enumerate(rows):
 
-                st.markdown(f"### 行 {r_idx+1}")
+                debit_account = get_account_name(
+                    r.get("借方科目", "")
+                )
 
-                col1, col2 = st.columns(2)
+                credit_account = get_account_name(
+                    r.get("貸方科目", "")
+                )
+                amount_value = to_int(
+                    r.get("借方金額", 0)
+                )
 
-                # =====================================
-                # 借方 / 貸方
-                # =====================================
-                with col1:
+                row_summary = (
+                    f"{r_idx+1}行目 "
+                    f"🔵[借] {debit_account} "
+                    f"/ "
+                    f"🔴[貸] {credit_account} "
+                    f"/ ¥{amount_value:,}"
+                )
 
-                    default_debit = r.get(
-                        "借方科目名",
-                        ""
-                    )
+                with st.expander(
+                    row_summary,
+                    expanded=False
+                ):
 
-                    debit = st.selectbox(
-                        "借方",
-                        account_master,
-                        index=(
-                            account_master.index(default_debit)
-                            if default_debit in account_master
-                            else 0
-                        ),
-                        key=f"d_{doc_id}_{r_idx}"
-                    )
+                    col1, col2 = st.columns(2)
 
-                with col2:
+                    # =====================================
+                    # 借方 / 貸方
+                    # =====================================
+                    with col1:
 
-                    default_credit = r.get(
-                        "貸方科目名",
-                        ""
-                    )
+                        default_debit = r.get(
+                            "借方科目名",
+                            ""
+                        )
 
-                    credit = st.selectbox(
-                        "貸方",
-                        account_master,
-                        index=(
-                            account_master.index(default_credit)
-                            if default_credit in account_master
-                            else 0
-                        ),
-                        key=f"c_{doc_id}_{r_idx}"
-                    )
+                        debit = st.selectbox(
+                            "借方",
+                            account_master,
+                            index=(
+                                account_master.index(default_debit)
+                                if default_debit in account_master
+                                else 0
+                            ),
+                            key=f"d_{doc_id}_{r_idx}"
+                        )
+
+                    with col2:
+
+                        default_credit = r.get(
+                            "貸方科目名",
+                            ""
+                        )
+
+                        credit = st.selectbox(
+                            "貸方",
+                            account_master,
+                            index=(
+                                account_master.index(default_credit)
+                                if default_credit in account_master
+                                else 0
+                            ),
+                            key=f"c_{doc_id}_{r_idx}"
+                        )
 
                 # =====================================
                 # 補助
@@ -567,14 +645,15 @@ else:
 
                 edited_rows.append(new_row)
 
-                st.divider()
+                if d_sum != c_sum:
+                    st.error(
+                        f"借貸不一致: 借方¥{d_sum:,} / 貸方¥{c_sum:,}"
+                    )
+                else:
+                    st.success("借貸一致")
 
-            # =====================================
-            # 貸借確認
-            # =====================================
-            if d_sum != c_sum:
-                st.error("❌ 貸借不一致")
-
+            st.divider()
+            
             # =====================================
             # 未来日付
             # =====================================
