@@ -404,6 +404,30 @@ process_date = process_date_obj.strftime("%Y%m%d")
 st.divider()
 
 # =========================================
+# OCR読込
+# =========================================
+st.subheader("📄 OCR読込")
+
+uploaded_file = st.file_uploader(
+    "画像 / PDF アップロード",
+    type=["jpg", "jpeg", "png", "pdf"]
+)
+
+if uploaded_file:
+
+    st.success(
+        f"アップロード: {uploaded_file.name}"
+    )
+
+    st.info(
+        "OCR連携は今後実装予定"
+    )
+
+st.divider()
+
+st.divider()
+
+# =========================================
 # 検索結果
 # =========================================
 results = st.session_state.results
