@@ -355,7 +355,9 @@ st.session_state.company_name = company_name
 
 st.sidebar.divider()
 
-
+# -----------------------------------------
+# 検索
+# -----------------------------------------
 st.sidebar.header("🔍 検索")
 
 dept = st.sidebar.selectbox(
@@ -363,7 +365,22 @@ dept = st.sidebar.selectbox(
     [""] + department_master
 )
 
-keyword = st.sidebar.text_input("キーワード")
+if "keyword_input" not in st.session_state:
+    st.session_state["keyword_input"] = ""
+
+# OCR値反映
+if "ocr_keyword" in st.session_state:
+
+    st.session_state["keyword_input"] = (
+        st.session_state["ocr_keyword"]
+    )
+
+    del st.session_state["ocr_keyword"]
+
+keyword = st.sidebar.text_input(
+    "キーワード",
+    key="keyword_input"
+)
 
 amount_str = st.sidebar.text_input("金額")
 
@@ -379,15 +396,30 @@ if amount_str:
     except:
         st.sidebar.error("金額エラー")
 
-if st.sidebar.button("検索"):
+search_clicked = st.sidebar.button("検索")
+
+# =========================================
+# OCR自動検索
+# =========================================
+auto_search = st.session_state.get(
+    "ocr_auto_search",
+    False
+)
+
+# =========================================
+# 検索実行
+# =========================================
+if search_clicked or auto_search:
 
     st.session_state.results = search(
         records,
-        keyword,
+        st.session_state["keyword_input"],
         dept if dept else None,
         amount,
         freq
     )
+
+    st.session_state["ocr_auto_search"] = False
 
 # =========================================
 # 日付
@@ -413,20 +445,72 @@ uploaded_file = st.file_uploader(
     type=["jpg", "jpeg", "png", "pdf"]
 )
 
+current_file = None
+
 if uploaded_file:
+    current_file = uploaded_file.name
+
+if "last_uploaded_file" not in st.session_state:
+    st.session_state["last_uploaded_file"] = ""
+
+if current_file != st.session_state["last_uploaded_file"]:
+
+    st.session_state["ocr_done"] = False
+    st.session_state["last_uploaded_file"] = current_file
+
+# =========================================
+# OCR実行
+# =========================================
+if uploaded_file and not st.session_state.get("ocr_done", False):
 
     st.success(
         f"アップロード: {uploaded_file.name}"
     )
 
-    st.info(
-        "OCR連携は今後実装予定"
+    st.info("OCR解析中...")
+
+    # =========================================
+    # ダミーOCR結果
+    # =========================================
+    ocr_result = {
+        "company": "太陽インキ製造㈱",
+        "amount": "194400",
+        "memo": "5月分請求"
+    }
+
+    # OCR済み
+    st.session_state["ocr_done"] = True
+
+    st.success("OCR解析完了")
+
+    st.write(
+        "会社名:",
+        ocr_result["company"]
     )
 
-st.divider()
+    st.write(
+        "金額:",
+        f"¥{int(ocr_result['amount']):,}"
+    )
+
+    st.write(
+        "摘要:",
+        ocr_result["memo"]
+    )
+
+    # =========================================
+    # OCR → 検索キーワード
+    # =========================================
+    st.session_state["ocr_keyword"] = (
+        ocr_result["company"]
+    )
+
+    # OCR後自動検索ON
+    st.session_state["ocr_auto_search"] = True
+
+    st.rerun()
 
 st.divider()
-
 # =========================================
 # 検索結果
 # =========================================
