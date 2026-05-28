@@ -10,6 +10,17 @@ import copy
 
 from collections import Counter
 from datetime import datetime
+from columns import SEARCH_COLUMNS
+from columns import (
+    COL_DATE,
+    COL_DEBIT,
+    COL_CREDIT,
+    COL_DEBIT_SUB,
+    COL_CREDIT_SUB,
+    COL_DEBIT_AMOUNT,
+    COL_CREDIT_AMOUNT,
+    COL_SUMMARY,
+)
 
 DATA_PATH = "data/transactions.csv"
 
@@ -134,11 +145,11 @@ def split_records(rows):
     for r in rows:
 
         d = to_int(
-            r.get("借方金額")
+            r.get(COL_DEBIT_AMOUNT)
         )
 
         c = to_int(
-            r.get("貸方金額")
+            r.get(COL_CREDIT_AMOUNT)
         )
 
         date = r.get("伝票日付")
@@ -192,9 +203,9 @@ def explode_fukugo(rows):
 
         "資金複合" in (
 
-            r.get("借方科目名", "")
+            r.get(COL_DEBIT, "")
             +
-            r.get("貸方科目名", "")
+            r.get(COL_CREDIT, "")
 
         )
 
@@ -212,15 +223,15 @@ def explode_fukugo(rows):
 
     for r in rows:
 
-        d = r.get("借方科目名")
-        c = r.get("貸方科目名")
+        d = r.get(COL_DEBIT)
+        c = r.get(COL_CREDIT)
 
         d_amt = to_int(
-            r.get("借方金額")
+            r.get(COL_DEBIT_AMOUNT)
         )
 
         c_amt = to_int(
-            r.get("貸方金額")
+            r.get(COL_CREDIT_AMOUNT)
         )
 
         # =====================================
@@ -400,7 +411,7 @@ def build_account_map(rows):
     for r in rows:
 
         if (
-            r.get("借方科目名")
+            r.get(COL_DEBIT)
             and
             r.get("借方科目")
         ):
@@ -410,7 +421,7 @@ def build_account_map(rows):
             ] = r["借方科目"]
 
         if (
-            r.get("貸方科目名")
+            r.get(COL_CREDIT)
             and
             r.get("貸方科目")
         ):
@@ -443,12 +454,12 @@ def load_templates():
 def get_voucher_total(rows):
 
     d_total = sum(
-        to_int(r.get("借方金額"))
+        to_int(r.get(COL_DEBIT_AMOUNT))
         for r in rows
     )
 
     c_total = sum(
-        to_int(r.get("貸方金額"))
+        to_int(r.get(COL_CREDIT_AMOUNT))
         for r in rows
     )
 
@@ -502,19 +513,9 @@ def load_data():
 
         for r in g:
 
-            text = (
-
-                r.get("摘要", "")
-                + " " +
-
-                r.get("借方科目名", "")
-                + " " +
-
-                r.get("貸方科目名", "")
-                + " " +
-
-                r.get("取引先", "")
-
+            text = " ".join(
+                str(r.get(col, ""))
+                for col in SEARCH_COLUMNS
             )
 
             tokens += tokenize(text)
@@ -664,7 +665,7 @@ def calculate_score(
 # =========================================
 # テンプレ検索
 # =========================================
-def search_templates(templates, keyword, dept):
+#def search_templates(templates, keyword, dept):
 
     results = []
 
@@ -689,12 +690,12 @@ def search_templates(templates, keyword, dept):
 # =========================================
 def search(records, keyword, dept, amount, freq):
 
-    templates = load_templates()
+    #templates = load_templates()
 
     results = []
 
     # テンプレ優先
-    results += search_templates(templates, keyword, dept)
+    #results += search_templates(templates, keyword, dept)
 
     # 通常検索
     for rec in records:
@@ -729,12 +730,12 @@ def get_amount_suggestions(records, debit, credit, limit=5):
 
         for r in rec["rows"]:
 
-            d = r.get("借方科目名")
-            c = r.get("貸方科目名")
+            d = r.get(COL_DEBIT)
+            c = r.get(COL_CREDIT)
 
             if d == debit and c == credit:
 
-                amt = to_int(r.get("借方金額"))
+                amt = to_int(r.get(COL_DEBIT_AMOUNT))
 
                 if amt > 0:
 
@@ -793,8 +794,8 @@ def is_valid_row(r):
     壊れデータ除外
     """
 
-    d = to_int(r.get("借方金額"))
-    c = to_int(r.get("貸方金額"))
+    d = to_int(r.get(COL_DEBIT_AMOUNT))
+    c = to_int(r.get(COL_CREDIT_AMOUNT))
 
     # 両方ゼロはNG
     if d == 0 and c == 0:

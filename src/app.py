@@ -24,56 +24,23 @@ from engine import (
     update_search_csv
 )
 
-# =========================================
-# エプソンCSV列
-# =========================================
-EPSON_COLUMNS = [
-    "月種別",
-    "種類",
-    "形式",
-    "作成方法",
-    "付箋",
-    "伝票日付",
-    "伝票番号",
-    "伝票摘要",
-    "枝番",
-    "借方部門",
-    "借方部門名",
-    "借方科目",
-    "借方科目名",
-    "借方補助",
-    "借方補助科目名",
-    "借方金額",
-    "借方消費税コード",
-    "借方消費税業種",
-    "借方消費税税率",
-    "借方資金区分",
-    "借方任意項目１",
-    "借方任意項目２",
-    "借方インボイス情報",
-    "貸方部門",
-    "貸方部門名",
-    "貸方科目",
-    "貸方科目名",
-    "貸方補助",
-    "貸方補助科目名",
-    "貸方金額",
-    "貸方消費税コード",
-    "貸方消費税業種",
-    "貸方消費税税率",
-    "貸方資金区分",
-    "貸方任意項目１",
-    "貸方任意項目２",
-    "貸方インボイス情報",
-    "摘要",
-    "期日",
-    "証番号",
-    "入力マシン",
-    "入力ユーザ",
-    "入力アプリ",
-    "入力会社",
-    "入力日付",
-]
+from columns import (
+    EPSON_COLUMNS,
+    SEARCH_COLUMNS,
+    EDIT_COLUMNS,
+    DISPLAY_COLUMNS,
+)
+
+from columns import (
+    COL_DATE,
+    COL_DEBIT,
+    COL_CREDIT,
+    COL_DEBIT_SUB,
+    COL_CREDIT_SUB,
+    COL_DEBIT_AMOUNT,
+    COL_CREDIT_AMOUNT,
+    COL_SUMMARY,
+)
 
 # =========================================
 # 科目マスタ（仮）
@@ -112,7 +79,7 @@ def get_voucher_total(rows):
 
         try:
             total += int(
-                str(r.get("借方金額", 0))
+                str(r.get(COL_DEBIT_AMOUNT, 0))
                 .replace(",", "")
             )
         except:
@@ -130,8 +97,8 @@ def split_journal(rows):
 
     for r in rows:
 
-        d_amt = to_int(r.get("借方金額"))
-        c_amt = to_int(r.get("貸方金額"))
+        d_amt = to_int(r.get(COL_DEBIT_AMOUNT))
+        c_amt = to_int(r.get(COL_CREDIT_AMOUNT))
 
         if d_amt > 0:
             debits.append((r, d_amt))
@@ -150,8 +117,8 @@ def split_journal(rows):
 
             new = copy.deepcopy(d_row)
 
-            new["貸方科目名"] = c_row.get("貸方科目名", "")
-            new["貸方補助科目名"] = c_row.get("貸方補助科目名", "")
+            new["貸方科目名"] = c_row.get(COL_CREDIT, "")
+            new["貸方補助科目名"] = c_row.get(COL_CREDIT_SUB, "")
             new["貸方金額"] = str(c_amt)
             new["借方金額"] = str(c_amt)
 
@@ -170,8 +137,8 @@ def split_journal(rows):
 
             new = copy.deepcopy(d_row)
 
-            new["貸方科目名"] = c_row.get("貸方科目名", "")
-            new["貸方補助科目名"] = c_row.get("貸方補助科目名", "")
+            new["貸方科目名"] = c_row.get(COL_CREDIT, "")
+            new["貸方補助科目名"] = c_row.get(COL_CREDIT_SUB, "")
             new["貸方金額"] = str(d_amt)
             new["借方金額"] = str(d_amt)
 
@@ -206,8 +173,8 @@ def build_epson_rows(rows, company_name):
         # 基本
         # =====================================
         row["伝票日付"] = r.get("伝票日付", "")
-        row["摘要"] = r.get("摘要", "")
-        row["伝票摘要"] = r.get("摘要", "")
+        row["摘要"] = r.get(COL_SUMMARY, "")
+        row["伝票摘要"] = r.get(COL_SUMMARY, "")
 
         # =====================================
         # 借方
@@ -216,12 +183,12 @@ def build_epson_rows(rows, company_name):
         row["借方部門名"] = r.get("借方部門名", "")
 
         row["借方科目"] = r.get("借方科目", "")
-        row["借方科目名"] = r.get("借方科目名", "")
+        row["借方科目名"] = r.get(COL_DEBIT, "")
 
         row["借方補助"] = r.get("借方補助", "")
-        row["借方補助科目名"] = r.get("借方補助科目名", "")
+        row["借方補助科目名"] = r.get(COL_DEBIT_SUB, "")
 
-        row["借方金額"] = r.get("借方金額", "")
+        row["借方金額"] = r.get(COL_DEBIT_AMOUNT, "")
 
         row["借方消費税コード"] = r.get(
             "借方消費税コード",
@@ -245,12 +212,12 @@ def build_epson_rows(rows, company_name):
         row["貸方部門名"] = r.get("貸方部門名", "")
 
         row["貸方科目"] = r.get("貸方科目", "")
-        row["貸方科目名"] = r.get("貸方科目名", "")
+        row["貸方科目名"] = r.get(COL_CREDIT, "")
 
         row["貸方補助"] = r.get("貸方補助", "")
-        row["貸方補助科目名"] = r.get("貸方補助科目名", "")
+        row["貸方補助科目名"] = r.get(COL_CREDIT_SUB, "")
 
-        row["貸方金額"] = r.get("貸方金額", "")
+        row["貸方金額"] = r.get(COL_CREDIT_AMOUNT, "")
 
         row["貸方消費税コード"] = r.get(
             "貸方消費税コード",
@@ -314,11 +281,11 @@ department_master = sorted(
 
 sub_master = sorted(
     list(set(
-        r.get("借方補助科目名", "")
+        r.get(COL_DEBIT_SUB, "")
         for rec in records
         for r in rec["rows"]
     ) | set(
-        r.get("貸方補助科目名", "")
+        r.get(COL_CREDIT_SUB, "")
         for rec in records
         for r in rec["rows"]
     ))
@@ -596,7 +563,7 @@ else:
                     r.get("貸方科目", "")
                 )
                 amount_value = to_int(
-                    r.get("借方金額", 0)
+                    r.get(COL_DEBIT_AMOUNT, 0)
                 )
 
                 row_summary = (
@@ -620,7 +587,7 @@ else:
                     with col1:
 
                         default_debit = r.get(
-                            "借方科目名",
+                            COL_DEBIT,
                             ""
                         )
 
@@ -638,7 +605,7 @@ else:
                     with col2:
 
                         default_credit = r.get(
-                            "貸方科目名",
+                            COL_CREDIT,
                             ""
                         )
 
@@ -661,7 +628,7 @@ else:
                 with col3:
 
                     default_ds = r.get(
-                        "借方補助科目名",
+                        COL_DEBIT_SUB,
                         ""
                     )
 
@@ -679,7 +646,7 @@ else:
                 with col4:
 
                     default_cs = r.get(
-                        "貸方補助科目名",
+                        COL_CREDIT_SUB,
                         ""
                     )
 
@@ -714,7 +681,7 @@ else:
                 else:
 
                     default_amt = to_int(
-                        r.get("借方金額")
+                        r.get(COL_DEBIT_AMOUNT)
                     )
 
                 amt = st.number_input(
@@ -729,7 +696,7 @@ else:
                 # =====================================
                 memo = st.text_input(
                     "摘要",
-                    value=r.get("摘要", ""),
+                    value=r.get(COL_SUMMARY, ""),
                     key=f"m_{doc_id}_{r_idx}"
                 )
 
@@ -851,12 +818,12 @@ if st.session_state.confirmed:
                         index=(
                             ([""] + sub_master).index(
                                 r.get(
-                                    "借方補助科目名",
+                                    COL_DEBIT_SUB,
                                     ""
                                 )
                             )
                             if r.get(
-                                "借方補助科目名",
+                                COL_DEBIT_SUB,
                                 ""
                             ) in ([""] + sub_master)
                             else 0
@@ -872,12 +839,12 @@ if st.session_state.confirmed:
                         index=(
                             ([""] + sub_master).index(
                                 r.get(
-                                    "貸方補助科目名",
+                                    COL_CREDIT_SUB,
                                     ""
                                 )
                             )
                             if r.get(
-                                "貸方補助科目名",
+                                COL_CREDIT_SUB,
                                 ""
                             ) in ([""] + sub_master)
                             else 0
@@ -895,7 +862,7 @@ if st.session_state.confirmed:
 
                 memo = st.text_input(
                     "摘要",
-                    value=r.get("摘要", ""),
+                    value=r.get(COL_SUMMARY, ""),
                     key=f"conf_m_{doc_idx}_{row_idx}"
                 )
 
