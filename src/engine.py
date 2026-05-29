@@ -22,6 +22,15 @@ from columns import (
     COL_SUMMARY,
 )
 
+from datetime import datetime
+
+
+def extract_year(date_str):
+    try:
+        return datetime.strptime(date_str, "%Y/%m/%d").year
+    except:
+        return datetime.now().year
+
 DATA_PATH = "data/transactions.csv"
 
 # =========================================
@@ -152,7 +161,7 @@ def split_records(rows):
             r.get(COL_CREDIT_AMOUNT)
         )
 
-        date = r.get("伝票日付")
+        date = r.get(COL_DATE)
 
         # 日付変化で強制分割
         if (
@@ -520,20 +529,18 @@ def load_data():
 
             tokens += tokenize(text)
 
+        # =========================
+        # 日付取得（columns統一）
+        # =========================
         date = ""
 
         if g:
-            date = g[0].get(
-                "伝票日付",
-                ""
-            )
+            date = g[0].get(COL_DATE, "")
 
-        year = datetime.now().year
-
-        try:
-            year = int(date[:4])
-        except:
-            pass
+        # =========================
+        # 年取得（安全版）
+        # =========================
+        year = extract_year(date)
 
         records.append({
 
@@ -547,7 +554,9 @@ def load_data():
                 year,
         })
 
+    # =========================
     # token頻度
+    # =========================
     freq = Counter()
 
     for rec in records:
