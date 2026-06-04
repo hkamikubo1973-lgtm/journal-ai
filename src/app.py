@@ -172,7 +172,7 @@ def build_epson_rows(rows, company_name):
         # =====================================
         # 基本
         # =====================================
-        row["伝票日付"] = r.get("伝票日付", "")
+        row["伝票日付"] = r.get(COL_DATE, "")
         row["摘要"] = r.get(COL_SUMMARY, "")
         row["伝票摘要"] = r.get(COL_SUMMARY, "")
 
@@ -705,18 +705,18 @@ else:
 
                 new_row = copy.deepcopy(r)
 
-                new_row["伝票日付"] = process_date
+                new_row[COL_DATE] = process_date
 
-                new_row["借方科目名"] = debit
-                new_row["貸方科目名"] = credit
+                new_row[COL_DEBIT] = debit
+                new_row[COL_CREDIT] = credit
 
-                new_row["借方補助科目名"] = debit_sub
-                new_row["貸方補助科目名"] = credit_sub
+                new_row[COL_DEBIT_SUB] = debit_sub
+                new_row[COL_CREDIT_SUB] = credit_sub
 
-                new_row["借方金額"] = str(amt)
-                new_row["貸方金額"] = str(amt)
+                new_row[COL_DEBIT_AMOUNT] = str(amt)
+                new_row[COL_CREDIT_AMOUNT] = str(amt)
 
-                new_row["摘要"] = memo
+                new_row[COL_SUMMARY] = memo
 
                 edited_rows.append(new_row)
 
@@ -785,9 +785,9 @@ if st.session_state.confirmed:
                         account_master,
                         index=(
                             account_master.index(
-                                r["借方科目名"]
+                                r[COL_DEBIT]
                             )
-                            if r["借方科目名"] in account_master
+                            if r[COL_DEBIT] in account_master
                             else 0
                         ),
                         key=f"conf_d_{doc_idx}_{row_idx}"
@@ -800,9 +800,9 @@ if st.session_state.confirmed:
                         account_master,
                         index=(
                             account_master.index(
-                                r["貸方科目名"]
+                                r[COL_CREDIT]
                             )
-                            if r["貸方科目名"] in account_master
+                            if r[COL_CREDIT] in account_master
                             else 0
                         ),
                         key=f"conf_c_{doc_idx}_{row_idx}"
@@ -868,16 +868,16 @@ if st.session_state.confirmed:
 
                 new_row = copy.deepcopy(r)
 
-                new_row["借方科目名"] = debit
-                new_row["貸方科目名"] = credit
+                new_row[COL_DEBIT] = debit
+                new_row[COL_CREDIT] = credit
 
-                new_row["借方補助科目名"] = debit_sub
-                new_row["貸方補助科目名"] = credit_sub
+                new_row[COL_DEBIT_SUB] = debit_sub
+                new_row[COL_CREDIT_SUB] = credit_sub
 
-                new_row["借方金額"] = str(amt)
-                new_row["貸方金額"] = str(amt)
+                new_row[COL_DEBIT_AMOUNT] = str(amt)
+                new_row[COL_CREDIT_AMOUNT] = str(amt)
 
-                new_row["摘要"] = memo
+                new_row[COL_SUMMARY] = memo
 
                 edited_doc.append(new_row)
 
@@ -956,7 +956,7 @@ if st.session_state.confirmed:
     ).encode("cp932")
 
     st.download_button(
-        "内部CSVダウンロード",
+        "確認用CSVダウンロード",
         csv,
         "journal_output.csv"
     )

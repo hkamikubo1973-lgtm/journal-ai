@@ -12,6 +12,7 @@ from collections import Counter
 from datetime import datetime
 from columns import SEARCH_COLUMNS
 from columns import (
+    EPSON_COLUMNS,
     COL_DATE,
     COL_DEBIT,
     COL_CREDIT,
@@ -21,8 +22,6 @@ from columns import (
     COL_CREDIT_AMOUNT,
     COL_SUMMARY,
 )
-
-from datetime import datetime
 
 
 def extract_year(date_str):
@@ -338,41 +337,32 @@ def explode_fukugo(rows):
         if amt <= 0:
             break
 
-        new_rows.append({
+        # =====================================
+        # 45列維持版
+        # =====================================
+        new = copy.deepcopy(
+            s["row"]
+        )
 
-            "伝票日付":
-                s["row"].get(
-                    "伝票日付",
-                    ""
-                ),
+        new[COL_DEBIT] = (
+            s["account"]
+        )
 
-            "摘要":
-                s["row"].get(
-                    "摘要",
-                    ""
-                ),
+        new[COL_CREDIT] = (
+            t["account"]
+        )
 
-            "借方科目名":
-                s["account"],
+        new[COL_DEBIT_AMOUNT] = (
+            str(amt)
+        )
 
-            "貸方科目名":
-                t["account"],
+        new[COL_CREDIT_AMOUNT] = (
+           str(amt)
+        )
 
-            "借方金額":
-                str(amt),
+        new["推定変換"] = "1"
 
-            "貸方金額":
-                str(amt),
-
-            "取引先":
-                s["row"].get(
-                    "取引先",
-                    ""
-                ),
-
-            "推定変換":
-                "1",
-        })
+        new_rows.append(new)
 
         # 残高減算
         s["remain"] -= amt
@@ -750,7 +740,7 @@ def get_amount_suggestions(records, debit, credit, limit=5):
 
                     candidates.append({
                         "amount": amt,
-                        "date": r.get("伝票日付", "")
+                        "date": r.get(COL_DATE, "")
                     })
 
     if not candidates:
@@ -811,7 +801,7 @@ def is_valid_row(r):
         return False
 
     # 日付なしNG
-    if not r.get("伝票日付"):
+    if not r.get(COL_DATE):
         return False
 
     return True
@@ -835,6 +825,36 @@ def normalize_rows(rows):
 
     return result
 
+# =========================================
+# 3年保持
+# =========================================
+KEEP_YEARS = 3
+
+def keep_recent_years(rows):
+
+    current_year = datetime.now().year
+
+    result = []
+
+    for r in rows:
+
+        date_str = str(
+            r.get(COL_DATE, "")
+        )
+
+        try:
+
+            year = int(date_str[:4])
+
+        except:
+
+            continue
+
+        if year >= current_year - KEEP_YEARS:
+
+            result.append(r)
+
+    return result
 
 def append_to_csv(new_rows):
     """
@@ -854,19 +874,29 @@ def append_to_csv(new_rows):
             for r in reader:
                 existing.append(r)
 
-    # ヘッダー取得
-    if existing:
-        fieldnames = list(existing[0].keys())
-    else:
-        fieldnames = list(new_rows[0].keys())
+    # ヘッダー固定
+    fieldnames = EPSON_COLUMNS
 
     # 上に追加
     combined = new_rows + existing
 
-    # 書き込み
-    with open(OUTPUT_PATH, "w", newline="", encoding="utf-8-sig") as f:
+    # 3年保持
+    combined = keep_recent_years(
+        combined
+    )
 
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    # 書き込み
+    with open(
+        OUTPUT_PATH,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=fieldnames
+        )
 
         writer.writeheader()
 
