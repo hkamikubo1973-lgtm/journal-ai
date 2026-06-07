@@ -12,6 +12,72 @@ import pandas as pd
 import copy
 import platform
 import getpass
+import csv
+
+def load_account_master():
+
+    result = {}
+
+    with open(
+        "data/account_master.csv",
+        encoding="utf-8-sig"
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            result[
+                row["name"]
+            ] = row["code"]
+
+    return result
+
+
+ACCOUNT_MASTER = load_account_master()
+
+def load_sub_master():
+
+    result = {}
+
+    with open(
+        "data/sub_master.csv",
+        encoding="utf-8-sig"
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            result[
+                row["name"]
+            ] = row["code"]
+
+    return result
+
+SUB_MASTER = load_sub_master()
+
+def load_department_master():
+
+    result = {}
+
+    with open(
+        "data/department_master.csv",
+        encoding="utf-8-sig"
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            result[
+                row["name"]
+            ] = row["code"]
+
+    return result
+
+
+DEPARTMENT_MASTER = load_department_master()
 
 from datetime import datetime
 
@@ -42,19 +108,6 @@ from columns import (
     COL_SUMMARY,
 )
 
-# =========================================
-# 科目マスタ（仮）
-# =========================================
-ACCOUNT_MASTER = {
-
-    "114": "普通預金",
-    "1241": "資金複合",
-    "511": "売上高",
-    "613": "消耗品費",
-    "711": "旅費交通費",
-    "801": "未払金",
-
-}
 
 # =========================================
 # 科目名変換
@@ -267,29 +320,189 @@ def cached_load():
 records, name_to_code, freq = cached_load()
 
 account_master = sorted(
-    list(name_to_code.keys())
+    ACCOUNT_MASTER.keys()
 )
 
 department_master = sorted(
-    list(set(
-        get_department(r)
-        for rec in records
-        for r in rec["rows"]
-        if get_department(r)
-    ))
+    DEPARTMENT_MASTER.keys()
 )
 
 sub_master = sorted(
-    list(set(
-        r.get(COL_DEBIT_SUB, "")
-        for rec in records
-        for r in rec["rows"]
-    ) | set(
-        r.get(COL_CREDIT_SUB, "")
-        for rec in records
-        for r in rec["rows"]
-    ))
+    SUB_MASTER.keys()
 )
+
+# =========================================
+# 科目マスター生成
+# =========================================
+def generate_account_master(records):
+
+    rows = []
+
+    seen = set()
+
+    for rec in records:
+
+        for r in rec["rows"]:
+
+            debit_code = str(
+                r.get("借方科目", "")
+            ).strip()
+
+            debit_name = str(
+                r.get(COL_DEBIT, "")
+            ).strip()
+
+            if debit_code and debit_name:
+
+                key = (
+                    debit_code,
+                    debit_name
+                )
+
+                if key not in seen:
+
+                    seen.add(key)
+
+                    rows.append({
+                        "code": debit_code,
+                        "name": debit_name
+                    })
+
+            credit_code = str(
+                r.get("貸方科目", "")
+            ).strip()
+
+            credit_name = str(
+                r.get(COL_CREDIT, "")
+            ).strip()
+
+            if credit_code and credit_name:
+
+                key = (
+                    credit_code,
+                    credit_name
+                )
+
+                if key not in seen:
+
+                    seen.add(key)
+
+                    rows.append({
+                        "code": credit_code,
+                        "name": credit_name
+                    })
+
+    rows = sorted(
+        rows,
+        key=lambda x: x["code"]
+    )
+
+    pd.DataFrame(rows).to_csv(
+        "data/account_master.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    return len(rows)
+
+# =========================================
+# 部門マスター生成
+# =========================================
+def generate_department_master(records):
+
+    rows = []
+    seen = set()
+
+    for rec in records:
+
+        for r in rec["rows"]:
+
+            targets = [
+
+                (
+                    str(r.get("借方部門", "")).strip(),
+                    str(r.get("借方部門名", "")).strip()
+                ),
+
+                (
+                    str(r.get("貸方部門", "")).strip(),
+                    str(r.get("貸方部門名", "")).strip()
+                )
+
+            ]
+
+            for code, name in targets:
+
+                if code and name:
+
+                    key = (code, name)
+
+                    if key not in seen:
+
+                        seen.add(key)
+
+                        rows.append({
+                            "code": code,
+                            "name": name
+                        })
+
+
+    pd.DataFrame(rows).to_csv(
+        "data/department_master.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    return len(rows)
+
+# =========================================
+# 補助マスター生成
+# =========================================
+def generate_sub_master(records):
+
+    rows = []
+    seen = set()
+
+    for rec in records:
+
+        for r in rec["rows"]:
+
+            targets = [
+
+                (
+                    str(r.get("借方補助", "")).strip(),
+                    str(r.get("借方補助科目名", "")).strip()
+                ),
+
+                (
+                    str(r.get("貸方補助", "")).strip(),
+                    str(r.get("貸方補助科目名", "")).strip()
+                )
+
+            ]
+
+            for code, name in targets:
+
+                if code and name:
+
+                    key = (code, name)
+
+                    if key not in seen:
+
+                        seen.add(key)
+
+                        rows.append({
+                            "code": code,
+                            "name": name
+                        })
+
+    pd.DataFrame(rows).to_csv(
+        "data/sub_master.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    return len(rows)
 
 # =========================================
 # セッション
@@ -364,6 +577,61 @@ if amount_str:
         st.sidebar.error("金額エラー")
 
 search_clicked = st.sidebar.button("検索")
+
+if st.sidebar.button(
+    "科目マスター生成"
+):
+    count = generate_account_master(
+        records
+    )
+
+    ACCOUNT_MASTER.clear()
+
+    ACCOUNT_MASTER.update(
+        load_account_master()
+    )
+
+    st.toast(
+        f"科目マスター {count}件生成しました"
+    )
+
+
+if st.sidebar.button(
+    "部門マスター生成"
+):
+    
+    count = generate_department_master(
+        records
+    )
+
+    DEPARTMENT_MASTER.clear()
+
+    DEPARTMENT_MASTER.update(
+        load_department_master()
+    )
+
+    st.toast(
+        f"部門マスター {count}件生成しました"
+    )
+
+
+if st.sidebar.button(
+    "補助マスター生成"
+):
+
+    count = generate_sub_master(
+        records
+    )
+
+    SUB_MASTER.clear()
+
+    SUB_MASTER.update(
+        load_sub_master()
+    )
+
+    st.toast(
+        f"補助マスター {count}件生成しました"
+    )
 
 # =========================================
 # OCR自動検索
