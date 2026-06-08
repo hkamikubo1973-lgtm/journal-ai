@@ -582,6 +582,39 @@ def calculate_score(
 
     match = 0
 
+    # =========================================
+    # 補助科目一致
+    # =========================================
+    for r in rec["rows"]:
+
+        debit_sub = normalize(
+            r.get(COL_DEBIT_SUB, "")
+        )
+
+        credit_sub = normalize(
+            r.get(COL_CREDIT_SUB, "")
+        )
+
+        keyword_norm = normalize(keyword)
+
+        if (
+            keyword_norm
+            and
+            (
+                keyword_norm in debit_sub
+                or
+                keyword_norm in credit_sub
+            )
+        ):
+
+            score += 150
+
+            score_detail.append(
+                f"補助科目一致:{keyword} +150"
+            )
+
+            break
+
     for kw in q:
         for t in tokens:
 

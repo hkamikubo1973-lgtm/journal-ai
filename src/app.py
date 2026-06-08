@@ -541,7 +541,7 @@ st.sidebar.divider()
 st.sidebar.header("🔍 検索")
 
 dept = st.sidebar.selectbox(
-    "部門（任意）",
+    "部門",
     [""] + department_master
 )
 
