@@ -1,6 +1,7 @@
 import pandas as pd
 import shutil
 import os
+import uuid
 
 from datetime import datetime
 
@@ -18,6 +19,16 @@ def load_receivables():
             dtype=str
         ).fillna("")
 
+        defaults = {
+            "未収科目": "売掛金",
+            "未収補助": "",
+            "部門": ""
+        }
+
+        for column, default_value in defaults.items():
+            if column not in df.columns:
+                df[column] = default_value
+
         return df
 
     except Exception as e:
@@ -30,7 +41,10 @@ def load_receivables():
                 "得意先名",
                 "請求金額",
                 "残高",
-                "ステータス"
+                "ステータス",
+                "未収科目",
+                "未収補助",
+                "部門"
             ]
         )
 
@@ -291,62 +305,249 @@ def update_receivables(receivables_df, matched_result):
         print("未収更新エラー:", e)
 
 # =========================================
-# 消込履歴保存
+# FIFO候補反映
 # =========================================
-def save_receivable_history(matched_result):
+def apply_receivable_candidates(
+    candidates,
+    settlement_date=None
+):
 
-    try:
+    receivables_df = load_receivables()
+    history_rows = []
+    settlement_id = uuid.uuid4().hex
 
-        import os
-        from datetime import datetime
+    if settlement_date is None:
+        settlement_date = datetime.now()
 
-        history_path = "data/receivables/receivable_history.csv"
+    if hasattr(settlement_date, "strftime"):
+        settlement_date = settlement_date.strftime("%Y/%m/%d")
+    else:
+        settlement_date = str(settlement_date).replace("-", "/")
 
-        history_rows = []
+    for candidate in candidates:
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        code = str(candidate["コード"])
+        scheduled_amount = int(candidate["消込予定"])
 
-        for item in matched_result:
+        target_indexes = receivables_df[
+            receivables_df["コード"] == code
+        ].index
 
-            row = {
-                "日時": now,
-                "コード": item.get("コード", ""),
-                "得意先名": item.get("得意先名", ""),
-                "消込額": item.get("消込額", ""),
-                "元残高": item.get("元残高", ""),
-                "消込後残高": item.get("消込後残高", ""),
-                "状態": item.get("状態", "")
-            }
-
-            history_rows.append(row)
-
-        new_df = pd.DataFrame(history_rows)
-
-        # 履歴CSV存在確認
-        if os.path.exists(history_path):
-
-            old_df = pd.read_csv(
-                history_path,
-                dtype=str
-            ).fillna("")
-
-            save_df = pd.concat(
-                [old_df, new_df],
-                ignore_index=True
+        if len(target_indexes) != 1:
+            raise ValueError(
+                f"未収明細を特定できません: {code}"
             )
 
-        else:
+        target_index = target_indexes[0]
 
-            save_df = new_df
-
-        save_df.to_csv(
-            history_path,
-            index=False,
-            encoding="utf-8-sig"
+        current_balance = int(
+            str(
+                receivables_df.at[target_index, "残高"]
+            ).replace(",", "")
         )
 
-        print("消込履歴保存完了")
+        if scheduled_amount <= 0:
+            raise ValueError(
+                f"消込予定額が不正です: {code}"
+            )
 
-    except Exception as e:
+        if scheduled_amount > current_balance:
+            raise ValueError(
+                f"残高が変更されています: {code}"
+            )
 
-        print("履歴保存エラー:", e)
+        new_balance = current_balance - scheduled_amount
+
+        history_rows.append({
+            "消込ID": settlement_id,
+            "消込日": settlement_date,
+            "得意先名": receivables_df.at[
+                target_index,
+                "得意先名"
+            ],
+            "コード": code,
+            "消込額": scheduled_amount,
+            "消込前残高": current_balance,
+            "消込後残高": new_balance,
+            "仕訳登録済": "0"
+        })
+
+        receivables_df.at[
+            target_index,
+            "残高"
+        ] = str(new_balance)
+
+        receivables_df.at[
+            target_index,
+            "ステータス"
+        ] = (
+            "完了"
+            if new_balance == 0
+            else "部分消込"
+        )
+
+    receivables_df.to_csv(
+        "data/receivables/current.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    save_receivable_history(history_rows)
+
+    return settlement_id
+
+# =========================================
+# 消込履歴
+# =========================================
+HISTORY_COLUMNS = [
+    "消込ID",
+    "消込日",
+    "得意先名",
+    "コード",
+    "消込額",
+    "消込前残高",
+    "消込後残高",
+    "仕訳登録済"
+]
+
+
+def normalize_receivable_history(history_df):
+
+    def get_column(*names):
+
+        for name in names:
+            if name in history_df.columns:
+                return history_df[name].astype(str)
+
+        return pd.Series(
+            "",
+            index=history_df.index,
+            dtype=str
+        )
+
+    settlement_dates = get_column("消込日", "日時")
+    settlement_dates = (
+        settlement_dates
+        .str[:10]
+        .str.replace("-", "/", regex=False)
+    )
+
+    return pd.DataFrame({
+        "消込ID": get_column("消込ID"),
+        "消込日": settlement_dates,
+        "得意先名": get_column("得意先名"),
+        "コード": get_column("コード"),
+        "消込額": get_column("消込額", "消込予定"),
+        "消込前残高": get_column("消込前残高", "元残高", "残高"),
+        "消込後残高": get_column("消込後残高"),
+        "仕訳登録済": get_column("仕訳登録済")
+    })[HISTORY_COLUMNS]
+
+
+def load_receivable_history():
+
+    history_path = "data/receivables/receivable_history.csv"
+
+    if not os.path.exists(history_path):
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+
+    history_df = pd.read_csv(
+        history_path,
+        dtype=str
+    ).fillna("")
+
+    return normalize_receivable_history(history_df)
+
+
+def save_receivable_history(history_rows):
+
+    history_path = "data/receivables/receivable_history.csv"
+
+    old_df = load_receivable_history()
+    new_df = normalize_receivable_history(
+        pd.DataFrame(history_rows)
+    )
+
+    if not new_df.empty:
+        empty_dates = new_df["消込日"] == ""
+        new_df.loc[
+            empty_dates,
+            "消込日"
+        ] = datetime.now().strftime("%Y/%m/%d")
+
+    save_df = pd.concat(
+        [old_df, new_df],
+        ignore_index=True
+    )
+
+    save_df.to_csv(
+        history_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+
+def is_receivable_journal_registered(settlement_id):
+
+    history_df = load_receivable_history()
+
+    target_df = history_df[
+        history_df["消込ID"] == settlement_id
+    ]
+
+    if target_df.empty:
+        raise ValueError("消込履歴を確認できません")
+
+    if (target_df["仕訳登録済"] == "1").any():
+        return True
+
+    transaction_path = "data/transactions.csv"
+
+    if os.path.exists(transaction_path):
+
+        transaction_df = pd.read_csv(
+            transaction_path,
+            dtype=str,
+            usecols=["証番号"]
+        ).fillna("")
+
+        if (
+            transaction_df["証番号"] == settlement_id
+        ).any():
+            mark_receivable_journal_registered(
+                settlement_id
+            )
+            return True
+
+    return False
+
+
+def mark_receivable_journal_registered(settlement_id):
+
+    history_df = load_receivable_history()
+
+    target_mask = (
+        history_df["消込ID"] == settlement_id
+    )
+
+    if not target_mask.any():
+        raise ValueError("消込履歴を確認できません")
+
+    if (
+        history_df.loc[
+            target_mask,
+            "仕訳登録済"
+        ] == "1"
+    ).any():
+        raise ValueError("この消込仕訳は登録済みです")
+
+    history_df.loc[
+        target_mask,
+        "仕訳登録済"
+    ] = "1"
+
+    history_df.to_csv(
+        "data/receivables/receivable_history.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
