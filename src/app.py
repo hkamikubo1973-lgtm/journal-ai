@@ -13,14 +13,19 @@ import copy
 import platform
 import getpass
 import csv
+import io
 
 from ocr_gateway import DummyOcrGateway
 from receivable_engine import (
+    append_standard_receivables,
     apply_receivable_candidates,
+    convert_company_billing_excel,
+    exclude_duplicate_receivables,
     is_receivable_journal_registered,
     load_receivable_history,
     load_receivables,
     mark_receivable_journal_registered,
+    normalize_standard_receivable_csv,
 )
 
 def load_account_master():
@@ -44,6 +49,65 @@ def load_account_master():
 
 
 ACCOUNT_MASTER = load_account_master()
+
+def load_payment_accounts():
+
+    result = set()
+
+    with open(
+        "data/payment_accounts.csv",
+        encoding="utf-8-sig"
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            raw_account = row.get("科目")
+
+            if raw_account is None:
+                continue
+
+            account = str(raw_account).strip()
+
+            if account and account.casefold() != "nan":
+                result.add(account)
+
+    return sorted(result)
+
+def append_account_master(code, name):
+
+    with open(
+        "data/account_master.csv",
+        "a",
+        encoding="utf-8",
+        newline=""
+    ) as f:
+
+        writer = csv.writer(f)
+        writer.writerow([code, name])
+
+def append_payment_account(name):
+
+    accounts = load_payment_accounts()
+    name = str(name).strip()
+
+    if name and name.casefold() != "nan":
+        accounts = sorted(set(accounts + [name]))
+
+    with open(
+        "data/payment_accounts.csv",
+        "w",
+        encoding="utf-8",
+        newline=""
+    ) as f:
+
+        writer = csv.writer(f)
+        writer.writerow(["科目"])
+        writer.writerows(
+            [account]
+            for account in accounts
+        )
 
 def load_sub_master():
 
@@ -325,6 +389,21 @@ def cached_load():
     return load_data()
 
 records, name_to_code, freq = cached_load()
+
+def get_account_code(account_name):
+
+    account_name = str(account_name).strip()
+
+    return ACCOUNT_MASTER.get(
+        account_name,
+        name_to_code.get(account_name, "")
+    )
+
+def keep_receivable_customer_open(customer_name):
+
+    st.session_state[
+        "open_receivable_customer"
+    ] = customer_name
 
 account_master = sorted(
     ACCOUNT_MASTER.keys()
@@ -1232,7 +1311,7 @@ if mode == "通常仕訳":
             )
     
             st.success(
-                "transactions.csv 更新完了"
+                "検索DBを更新しました"
             )
     
             st.cache_data.clear()
@@ -1277,6 +1356,307 @@ if mode == "通常仕訳":
 elif mode == "未収消込":
 
     st.header("未収消込")
+
+    if "receivable_import_success" in st.session_state:
+        st.success(
+            st.session_state.pop("receivable_import_success")
+        )
+
+    if "receivable_import_key" not in st.session_state:
+        st.session_state.receivable_import_key = 0
+
+    with st.expander("未収一覧CSV取込"):
+
+        import_format = st.selectbox(
+            "取込形式",
+            [
+                "標準未収CSV形式",
+                "請求一覧Excel形式"
+            ],
+            key=(
+                "receivable_import_format_"
+                f"{st.session_state.receivable_import_key}"
+            )
+        )
+
+        import_preview = None
+        import_errors = pd.DataFrame()
+        excluded_duplicate_count = 0
+
+        if import_format == "標準未収CSV形式":
+
+            uploaded_receivables = st.file_uploader(
+                "未収一覧CSV",
+                type=["csv"],
+                key=(
+                    "receivable_import_csv_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+        else:
+
+            invoice_date = st.date_input(
+                "請求日",
+                key=(
+                    "company_invoice_date_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+            specify_payment_due_date = st.checkbox(
+                "入金予定日を指定する",
+                key=(
+                    "specify_payment_due_date_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+            if specify_payment_due_date:
+                payment_due_date = st.date_input(
+                    "入金予定日",
+                    key=(
+                        "company_payment_due_date_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                )
+            else:
+                payment_due_date = None
+                st.caption(
+                    "入金予定日は請求日の翌月末で設定します"
+                )
+
+            default_receivable_account = st.selectbox(
+                "既定の未収科目",
+                account_master,
+                index=(
+                    account_master.index("未収運賃")
+                    if "未収運賃" in account_master
+                    else 0
+                ),
+                key=(
+                    "company_receivable_account_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+            import_department = st.selectbox(
+                "部門",
+                [""] + department_master,
+                key=(
+                    "company_receivable_department_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+            uploaded_receivables = st.file_uploader(
+                "請求一覧Excel",
+                type=["xlsx", "xls"],
+                key=(
+                    "receivable_import_excel_"
+                    f"{st.session_state.receivable_import_key}"
+                )
+            )
+
+        if uploaded_receivables is not None:
+
+            try:
+                if import_format == "標準未収CSV形式":
+                    try:
+                        uploaded_receivables.seek(0)
+                        source_receivables = pd.read_csv(
+                            uploaded_receivables,
+                            dtype=str,
+                            encoding="utf-8-sig"
+                        ).fillna("")
+                    except UnicodeDecodeError:
+                        uploaded_receivables.seek(0)
+                        source_receivables = pd.read_csv(
+                            uploaded_receivables,
+                            dtype=str,
+                            encoding="cp932"
+                        ).fillna("")
+
+                    import_preview, import_errors = (
+                        normalize_standard_receivable_csv(
+                            source_receivables
+                        )
+                    )
+
+                else:
+                    excel_data = uploaded_receivables.getvalue()
+                    excel_file = pd.ExcelFile(
+                        io.BytesIO(excel_data)
+                    )
+                    sheet_name = (
+                        "プリント用"
+                        if "プリント用" in excel_file.sheet_names
+                        else excel_file.sheet_names[0]
+                    )
+                    raw_billing_df = pd.read_excel(
+                        io.BytesIO(excel_data),
+                        sheet_name=sheet_name,
+                        header=None,
+                        dtype=object
+                    )
+                    st.caption(f"読込シート: {sheet_name}")
+
+                    standard_source, conversion_errors = (
+                        convert_company_billing_excel(
+                            raw_billing_df,
+                            invoice_date,
+                            payment_due_date,
+                            default_receivable_account,
+                            import_department
+                        )
+                    )
+                    import_preview, validation_errors = (
+                        normalize_standard_receivable_csv(
+                            standard_source
+                        )
+                    )
+                    company_duplicate_columns = [
+                        "コード",
+                        "得意先名",
+                        "請求日",
+                        "請求金額",
+                        "未収科目",
+                        "未収補助"
+                    ]
+                    import_preview, duplicate_errors = (
+                        exclude_duplicate_receivables(
+                            import_preview,
+                            company_duplicate_columns
+                        )
+                    )
+                    excluded_duplicate_count = len(
+                        duplicate_errors
+                    )
+                    import_errors = pd.concat(
+                        [
+                            conversion_errors,
+                            validation_errors,
+                            duplicate_errors.drop(
+                                columns=["未収ID"],
+                                errors="ignore"
+                            )
+                        ],
+                        ignore_index=True
+                    )
+
+                if excluded_duplicate_count:
+                    st.warning(
+                        "取り込み済みの請求を"
+                        f"{excluded_duplicate_count}件除外しました"
+                    )
+
+                if not import_errors.empty:
+                    st.error(
+                        f"取込対象外の行が{len(import_errors)}件あります"
+                    )
+                    st.dataframe(
+                        import_errors,
+                        use_container_width=True
+                    )
+
+                st.write("取込プレビュー")
+                st.dataframe(
+                    import_preview.drop(
+                        columns=["未収ID"],
+                        errors="ignore"
+                    ),
+                    use_container_width=True
+                )
+
+                if import_preview.empty:
+                    st.warning("取り込める明細がありません")
+
+                elif st.button(
+                    "未収一覧へ取り込む",
+                    key=(
+                        "append_receivables_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                ):
+                    duplicate_columns = (
+                        [
+                            "コード",
+                            "得意先名",
+                            "請求日",
+                            "請求金額",
+                            "未収科目",
+                            "未収補助"
+                        ]
+                        if import_format == "請求一覧Excel形式"
+                        else None
+                    )
+                    imported_count, duplicate_count = (
+                        append_standard_receivables(
+                            import_preview,
+                            duplicate_columns=duplicate_columns
+                        )
+                    )
+
+                    if imported_count:
+                        message = (
+                            f"未収一覧へ{imported_count}件取り込みました"
+                        )
+                    else:
+                        message = "追加対象の未収明細はありません"
+
+                    if excluded_duplicate_count or duplicate_count:
+                        message += (
+                            "（重複"
+                            f"{excluded_duplicate_count + duplicate_count}"
+                            "件を除外）"
+                        )
+
+                    st.session_state[
+                        "receivable_import_success"
+                    ] = message
+                    st.session_state.receivable_import_key += 1
+                    st.rerun()
+
+            except ImportError as e:
+                if (
+                    import_format == "請求一覧Excel形式"
+                    and "openpyxl" in str(e).casefold()
+                ):
+                    st.error(
+                        "Excelファイルの読み込みに必要な "
+                        "openpyxl がインストールされていません。"
+                        "\n\n以下を実行してください："
+                        "\n\n`pip install openpyxl`"
+                    )
+                else:
+                    st.error(
+                        f"未収一覧ファイルを読み込めません: {e}"
+                    )
+            except ValueError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"未収一覧ファイルを読み込めません: {e}")
+
+    payment_accounts = load_payment_accounts()
+
+    if "account_master_success" in st.session_state:
+        for message in st.session_state.pop(
+            "account_master_success"
+        ):
+            st.success(message)
+
+    default_receipt_account = (
+        "普通預金"
+        if "普通預金" in payment_accounts
+        else payment_accounts[0]
+    )
+
+    if (
+        "receipt_account" not in st.session_state
+        or st.session_state.receipt_account
+        not in payment_accounts
+    ):
+        st.session_state.receipt_account = default_receipt_account
 
     if "receivable_success" in st.session_state:
         st.success(
@@ -1341,7 +1721,12 @@ elif mode == "未収消込":
                 customer_name = customer["取引先"]
 
                 with st.expander(
-                    f"{customer_name}の明細"
+                    f"{customer_name}の明細",
+                    expanded=(
+                        st.session_state.get(
+                            "open_receivable_customer"
+                        ) == customer_name
+                    )
                 ):
 
                     detail_df = receivables_df[
@@ -1361,22 +1746,24 @@ elif mode == "未収消込":
                         - detail_df["残高"]
                     )
 
+                    detail_display_columns = [
+                        "コード",
+                        "請求日",
+                        "請求金額",
+                        "入金済額",
+                        "残高",
+                        "ステータス",
+                        "未収科目",
+                        "未収補助",
+                        "部門"
+                    ]
+
                     detail_df = detail_df[
-                        [
-                            "コード",
-                            "請求日",
-                            "請求金額",
-                            "入金済額",
-                            "残高",
-                            "ステータス",
-                            "未収科目",
-                            "未収補助",
-                            "部門"
-                        ]
+                        ["未収ID"] + detail_display_columns
                     ]
 
                     st.dataframe(
-                        detail_df,
+                        detail_df[detail_display_columns],
                         use_container_width=True
                     )
 
@@ -1392,10 +1779,126 @@ elif mode == "未収消込":
                         key=f"payment_amount_{customer_idx}"
                     )
 
+                    receipt_account = st.selectbox(
+                        "入金科目",
+                        payment_accounts,
+                        index=(
+                            payment_accounts.index(
+                                st.session_state.receipt_account
+                            )
+                        ),
+                        key=f"receipt_account_{customer_idx}"
+                    )
+
+                    with st.expander("未登録科目を追加"):
+
+                        new_account_code = st.text_input(
+                            "科目コード",
+                            key=f"new_account_code_{customer_idx}"
+                        ).strip()
+
+                        new_account_name = st.text_input(
+                            "科目名",
+                            key=f"new_account_name_{customer_idx}"
+                        ).strip()
+
+                        add_to_payment_accounts = st.checkbox(
+                            "入金科目として追加する",
+                            key=f"add_payment_account_{customer_idx}"
+                        )
+
+                        if st.button(
+                            "登録",
+                            key=f"add_account_master_{customer_idx}"
+                        ):
+
+                            registered_name = next((
+                                name
+                                for name, code
+                                in ACCOUNT_MASTER.items()
+                                if str(code).strip()
+                                == new_account_code
+                            ), None)
+
+                            registered_code = str(
+                                ACCOUNT_MASTER.get(
+                                    new_account_name,
+                                    ""
+                                )
+                            ).strip()
+
+                            if not new_account_code or not new_account_name:
+                                st.warning(
+                                    "科目コードと科目名を入力してください"
+                                )
+
+                            elif (
+                                registered_name
+                                and registered_name != new_account_name
+                            ):
+                                st.warning(
+                                    "同じ科目コードが登録済みです"
+                                )
+
+                            elif (
+                                registered_code
+                                and registered_code != new_account_code
+                            ):
+                                st.warning(
+                                    "同じ科目名が登録済みです"
+                                )
+
+                            else:
+                                account_registered = (
+                                    registered_code
+                                    == new_account_code
+                                )
+
+                                if account_registered:
+                                    messages = [
+                                        "科目マスターには既に登録されています"
+                                    ]
+                                else:
+                                    append_account_master(
+                                        new_account_code,
+                                        new_account_name
+                                    )
+                                    messages = [
+                                        "科目マスターへ追加しました"
+                                    ]
+
+                                if add_to_payment_accounts:
+                                    if (
+                                        new_account_name
+                                        in payment_accounts
+                                    ):
+                                        messages.append(
+                                            "入金科目候補にも既に登録されています"
+                                        )
+                                    else:
+                                        append_payment_account(
+                                            new_account_name
+                                        )
+                                        messages.append(
+                                            "入金科目候補に追加しました"
+                                            if account_registered
+                                            else "入金科目候補にも追加しました"
+                                        )
+
+                                st.session_state[
+                                    "account_master_success"
+                                ] = messages
+
+                                st.rerun()
+
                     if st.button(
                         "入金候補表示",
-                        key=f"payment_preview_{customer_idx}"
+                        key=f"payment_preview_{customer_idx}",
+                        on_click=keep_receivable_customer_open,
+                        args=(customer_name,)
                     ):
+
+                        st.session_state.receipt_account = receipt_account
 
                         fifo_df = detail_df.copy()
 
@@ -1432,6 +1935,7 @@ elif mode == "未収消込":
 
                             candidates.append({
                                 "コード": detail["コード"],
+                                "未収ID": detail["未収ID"],
                                 "請求日": detail["請求日"],
                                 "請求額": detail["請求金額"],
                                 "残高": detail["残高"],
@@ -1448,6 +1952,7 @@ elif mode == "未収消込":
                         ] = {
                             "payment_date": payment_date,
                             "payment_amount": payment_amount,
+                            "receipt_account": receipt_account,
                             "items": candidates
                         }
 
@@ -1464,7 +1969,10 @@ elif mode == "未収消込":
                             st.write("FIFO候補")
 
                             st.dataframe(
-                                pd.DataFrame(candidates),
+                                pd.DataFrame(candidates).drop(
+                                    columns=["未収ID"],
+                                    errors="ignore"
+                                ),
                                 use_container_width=True
                             )
 
@@ -1515,7 +2023,9 @@ elif mode == "未収消込":
                                         ],
                                         "rows": [
                                             {
-                                                "借方科目": "普通預金",
+                                                "借方科目": candidate_state[
+                                                    "receipt_account"
+                                                ],
                                                 "貸方科目": account,
                                                 "貸方補助": sub_account,
                                                 "部門": department,
@@ -1601,6 +2111,24 @@ elif mode == "未収消込":
                 use_container_width=True
             )
 
+            missing_account_names = sorted({
+                account_name
+                for journal in journal_rows
+                for account_name in (
+                    journal["借方科目"],
+                    journal["貸方科目"]
+                )
+                if account_name
+                and not get_account_code(account_name)
+            })
+
+            if missing_account_names:
+                st.warning(
+                    "科目コードを補完できない科目があります: "
+                    + "、".join(missing_account_names)
+                    + "。account_master.csvを確認してください。"
+                )
+
             if settlement_id is None:
 
                 st.info(
@@ -1614,7 +2142,7 @@ elif mode == "未収消込":
                 st.success("仕訳登録済みです")
 
             elif st.button(
-                "transactions.csvへ登録",
+                "生成仕訳を登録",
                 key=f"register_receivable_{settlement_id}"
             ):
 
@@ -1637,15 +2165,13 @@ elif mode == "未収消込":
                             .replace("-", "")
                         )
 
-                        row["借方科目"] = ACCOUNT_MASTER.get(
-                            journal["借方科目"],
-                            ""
+                        row["借方科目"] = get_account_code(
+                            journal["借方科目"]
                         )
                         row[COL_DEBIT] = journal["借方科目"]
 
-                        row["貸方科目"] = ACCOUNT_MASTER.get(
-                            journal["貸方科目"],
-                            ""
+                        row["貸方科目"] = get_account_code(
+                            journal["貸方科目"]
                         )
                         row[COL_CREDIT] = journal["貸方科目"]
 
@@ -1684,6 +2210,17 @@ elif mode == "未収消込":
                     mark_receivable_journal_registered(
                         settlement_id
                     )
+
+                    if "confirmed" not in st.session_state:
+                        st.session_state.confirmed = []
+
+                    st.session_state.confirmed.append(
+                        copy.deepcopy(transaction_rows)
+                    )
+
+                    st.session_state[
+                        "receivable_success"
+                    ] = "仕訳を登録し、CSV出力対象に追加しました"
 
                     st.cache_data.clear()
                     st.rerun()

@@ -5,6 +5,34 @@ import uuid
 
 from datetime import datetime
 
+STANDARD_RECEIVABLE_COLUMNS = [
+    "取引先",
+    "請求日",
+    "入金予定日",
+    "未収科目",
+    "未収補助",
+    "部門",
+    "摘要",
+    "請求額",
+    "残高"
+]
+
+CURRENT_RECEIVABLE_COLUMNS = [
+    "コード",
+    "未収ID",
+    "得意先名",
+    "請求日",
+    "入金予定日",
+    "未収科目",
+    "未収補助",
+    "部門",
+    "摘要",
+    "請求金額",
+    "入金済額",
+    "残高",
+    "ステータス"
+]
+
 # =========================================
 # 未収CSV読み込み
 # =========================================
@@ -29,6 +57,40 @@ def load_receivables():
             if column not in df.columns:
                 df[column] = default_value
 
+        migrated = False
+        code_values = df["コード"].astype(str)
+
+        if "未収ID" not in df.columns:
+            df.insert(1, "未収ID", code_values)
+            migrated = True
+        else:
+            empty_ids = df["未収ID"].astype(str).str.strip() == ""
+            if empty_ids.any():
+                df.loc[empty_ids, "未収ID"] = code_values.loc[
+                    empty_ids
+                ]
+                migrated = True
+
+        legacy_codes = code_values.str.extract(
+            r"^(.+)-([0-9a-fA-F]{32})$",
+            expand=True
+        )
+        legacy_mask = legacy_codes[0].notna()
+
+        if legacy_mask.any():
+            df.loc[legacy_mask, "コード"] = legacy_codes.loc[
+                legacy_mask,
+                0
+            ]
+            migrated = True
+
+        if migrated:
+            df.to_csv(
+                path,
+                index=False,
+                encoding="utf-8-sig"
+            )
+
         return df
 
     except Exception as e:
@@ -38,6 +100,7 @@ def load_receivables():
         return pd.DataFrame(
             columns=[
                 "コード",
+                "未収ID",
                 "得意先名",
                 "請求金額",
                 "残高",
@@ -76,6 +139,480 @@ def import_receivable_csv(upload_path):
     cleanup_logs()
 
     print("未収CSV取込完了")
+
+# =========================================
+# 標準未収CSV変換
+# =========================================
+def normalize_standard_receivable_csv(source_df):
+
+    source_df = source_df.copy()
+    source_df.columns = [
+        str(column).strip()
+        for column in source_df.columns
+    ]
+
+    missing_columns = [
+        column
+        for column in STANDARD_RECEIVABLE_COLUMNS
+        if column not in source_df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "必須列が不足しています: "
+            + "、".join(missing_columns)
+        )
+
+    if "コード" in source_df.columns:
+        source_codes = (
+            source_df["コード"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .reset_index(drop=True)
+        )
+    else:
+        source_codes = pd.Series(
+            "",
+            index=range(len(source_df)),
+            dtype=str
+        )
+
+    source_df = source_df[
+        STANDARD_RECEIVABLE_COLUMNS
+    ].fillna("").reset_index(drop=True)
+
+    for column in STANDARD_RECEIVABLE_COLUMNS:
+        source_df[column] = (
+            source_df[column]
+            .astype(str)
+            .str.strip()
+        )
+
+    error_messages = pd.Series(
+        "",
+        index=source_df.index,
+        dtype=str
+    )
+
+    def add_error(mask, message):
+
+        error_messages.loc[mask] = (
+            error_messages.loc[mask]
+            .apply(
+                lambda current: (
+                    f"{current}、{message}"
+                    if current
+                    else message
+                )
+            )
+        )
+
+    normalized_dates = {}
+
+    for column in ["請求日", "入金予定日"]:
+
+        values = source_df[column]
+        parsed_dates = pd.Series(
+            pd.NaT,
+            index=source_df.index,
+            dtype="datetime64[ns]"
+        )
+
+        hyphenated = values.str.fullmatch(
+            r"\d{4}-\d{2}-\d{2}"
+        )
+        compact = values.str.fullmatch(r"\d{8}")
+
+        parsed_dates.loc[hyphenated] = pd.to_datetime(
+            values.loc[hyphenated],
+            format="%Y-%m-%d",
+            errors="coerce"
+        )
+        parsed_dates.loc[compact] = pd.to_datetime(
+            values.loc[compact],
+            format="%Y%m%d",
+            errors="coerce"
+        )
+
+        invalid_dates = parsed_dates.isna()
+        add_error(
+            invalid_dates,
+            f"{column}を変換できません"
+        )
+
+        normalized_dates[column] = (
+            parsed_dates.dt.strftime("%Y-%m-%d")
+        )
+
+    normalized_amounts = {}
+
+    for column in ["請求額", "残高"]:
+
+        values = source_df[column].str.replace(
+            ",",
+            "",
+            regex=False
+        )
+        numeric_values = pd.to_numeric(
+            values,
+            errors="coerce"
+        )
+        invalid_amounts = (
+            numeric_values.isna()
+            | (numeric_values % 1 != 0)
+        )
+
+        add_error(
+            invalid_amounts,
+            f"{column}を数値化できません"
+        )
+
+        normalized_amounts[column] = (
+            numeric_values
+            .where(~invalid_amounts)
+            .astype("Int64")
+            .astype(str)
+        )
+
+    receivable_ids = [
+        uuid.uuid4().hex
+        for _ in range(len(source_df))
+    ]
+
+    standard_df = pd.DataFrame({
+        "コード": [
+            source_code if source_code else receivable_id
+            for source_code, receivable_id in zip(
+                source_codes,
+                receivable_ids
+            )
+        ],
+        "未収ID": receivable_ids,
+        "得意先名": source_df["取引先"],
+        "請求日": normalized_dates["請求日"],
+        "入金予定日": normalized_dates["入金予定日"],
+        "未収科目": source_df["未収科目"],
+        "未収補助": source_df["未収補助"],
+        "部門": source_df["部門"],
+        "摘要": source_df["摘要"],
+        "請求金額": normalized_amounts["請求額"],
+        "入金済額": "0",
+        "残高": normalized_amounts["残高"],
+        "ステータス": "未完了"
+    })[CURRENT_RECEIVABLE_COLUMNS]
+
+    valid_rows = error_messages == ""
+
+    error_df = source_df.loc[~valid_rows].copy()
+    if not error_df.empty:
+        source_row_numbers = pd.Series(
+            range(2, len(source_df) + 2),
+            index=source_df.index
+        )
+        error_df.insert(
+            0,
+            "CSV行",
+            source_row_numbers.loc[~valid_rows]
+        )
+        error_df["エラー"] = error_messages.loc[~valid_rows]
+
+    return (
+        standard_df.loc[valid_rows].reset_index(drop=True),
+        error_df.reset_index(drop=True)
+    )
+
+# =========================================
+# 請求一覧Excel形式変換
+# =========================================
+def convert_company_billing_excel(
+    raw_df,
+    invoice_date,
+    payment_due_date,
+    default_account,
+    department=""
+):
+
+    required_headers = {
+        "コード",
+        "得意先名１",
+        "繰越し"
+    }
+    header_index = None
+    header_values = None
+
+    for index, row in raw_df.iterrows():
+
+        values = [
+            ""
+            if pd.isna(value)
+            else str(value).strip()
+            for value in row.tolist()
+        ]
+
+        if required_headers.issubset(set(values)):
+            header_index = index
+            header_values = values
+            break
+
+    if header_index is None:
+        raise ValueError(
+            "見出し行にコード・得意先名１・繰越しがありません"
+        )
+
+    detail_df = raw_df.loc[
+        raw_df.index > header_index
+    ].copy()
+    detail_df.columns = header_values
+    detail_df = detail_df.reset_index(drop=False)
+
+    invoice_date = pd.Timestamp(invoice_date)
+
+    if payment_due_date is None:
+        payment_due_date = (
+            invoice_date.to_period("M") + 1
+        ).to_timestamp("M")
+    else:
+        payment_due_date = pd.Timestamp(payment_due_date)
+
+    invoice_date_text = invoice_date.strftime("%Y-%m-%d")
+    payment_due_date_text = payment_due_date.strftime(
+        "%Y-%m-%d"
+    )
+
+    standard_rows = []
+    error_rows = []
+
+    for detail_index, row in detail_df.iterrows():
+
+        code_value = row.get("コード", "")
+        customer_value = row.get("得意先名１", "")
+        balance_value = row.get("繰越し", "")
+
+        values = [code_value, customer_value, balance_value]
+        if all(
+            pd.isna(value) or str(value).strip() == ""
+            for value in values
+        ):
+            continue
+
+        code_numeric = pd.to_numeric(
+            str(code_value).strip(),
+            errors="coerce"
+        )
+        balance_numeric = pd.to_numeric(
+            str(balance_value)
+            .replace(",", "")
+            .replace("¥", "")
+            .strip(),
+            errors="coerce"
+        )
+        customer_name = (
+            ""
+            if pd.isna(customer_value)
+            else str(customer_value).strip()
+        )
+
+        errors = []
+
+        if pd.isna(code_numeric):
+            errors.append("コードが数値ではありません")
+
+        if not customer_name:
+            errors.append("得意先名１が空欄です")
+
+        if pd.isna(balance_numeric):
+            errors.append("繰越しを数値化できません")
+        elif balance_numeric <= 0:
+            errors.append("繰越しが0以下です")
+        elif balance_numeric % 1 != 0:
+            errors.append("繰越しに小数があります")
+
+        if errors:
+            error_rows.append({
+                "Excel行": int(row["index"]) + 1,
+                "コード": code_value,
+                "得意先名１": customer_value,
+                "繰越し": balance_value,
+                "エラー": "、".join(errors)
+            })
+            continue
+
+        source_code = (
+            str(int(code_numeric))
+            if code_numeric % 1 == 0
+            else str(code_numeric)
+        )
+        balance_text = str(int(balance_numeric))
+
+        standard_rows.append({
+            "コード": source_code,
+            "取引先": customer_name,
+            "請求日": invoice_date_text,
+            "入金予定日": payment_due_date_text,
+            "未収科目": str(default_account).strip(),
+            "未収補助": customer_name,
+            "部門": str(department).strip(),
+            "摘要": f"{customer_name} 繰越未収",
+            "請求額": balance_text,
+            "残高": balance_text
+        })
+
+    standard_source_df = pd.DataFrame(
+        standard_rows,
+        columns=["コード"] + STANDARD_RECEIVABLE_COLUMNS
+    )
+    error_df = pd.DataFrame(
+        error_rows,
+        columns=[
+            "Excel行",
+            "コード",
+            "得意先名１",
+            "繰越し",
+            "エラー"
+        ]
+    )
+
+    return standard_source_df, error_df
+
+# =========================================
+# 標準未収データ追記
+# =========================================
+def exclude_duplicate_receivables(
+    standard_df,
+    duplicate_columns
+):
+
+    current_df = load_receivables()
+
+    def row_key(row):
+
+        values = []
+
+        for column in duplicate_columns:
+            value = str(row.get(column, "")).strip()
+
+            if column in ["請求日", "入金予定日"]:
+                normalized_date = None
+
+                try:
+                    if len(value) == 8 and value.isdigit():
+                        normalized_date = datetime.strptime(
+                            value,
+                            "%Y%m%d"
+                        )
+                    else:
+                        date_parts = value.replace(
+                            "/",
+                            "-"
+                        ).split("-")
+
+                        if len(date_parts) == 3:
+                            normalized_date = datetime(
+                                int(date_parts[0]),
+                                int(date_parts[1]),
+                                int(date_parts[2])
+                            )
+                except ValueError:
+                    normalized_date = None
+
+                if normalized_date is not None:
+                    value = normalized_date.strftime(
+                        "%Y-%m-%d"
+                    )
+
+            if column in ["請求金額", "残高"]:
+                value = value.replace(",", "")
+            values.append(value)
+
+        return tuple(values)
+
+    registered_keys = {
+        row_key(row)
+        for _, row in current_df.iterrows()
+    }
+    append_indexes = []
+    duplicate_indexes = []
+
+    for index, row in standard_df.iterrows():
+
+        key = row_key(row)
+
+        if key in registered_keys:
+            duplicate_indexes.append(index)
+            continue
+
+        registered_keys.add(key)
+        append_indexes.append(index)
+
+    append_df = standard_df.loc[append_indexes].copy()
+    duplicate_df = standard_df.loc[duplicate_indexes].copy()
+
+    if not duplicate_df.empty:
+        duplicate_df["エラー"] = (
+            "既に取り込み済みの請求です"
+        )
+
+    return append_df, duplicate_df
+
+
+def append_standard_receivables(
+    standard_df,
+    duplicate_columns=None
+):
+
+    current_path = "data/receivables/current.csv"
+    current_df = load_receivables()
+
+    if duplicate_columns is None:
+        duplicate_columns = [
+            "得意先名",
+            "請求日",
+            "入金予定日",
+            "未収科目",
+            "未収補助",
+            "部門",
+            "摘要",
+            "請求金額",
+            "残高"
+        ]
+
+    append_df, duplicate_df = exclude_duplicate_receivables(
+        standard_df,
+        duplicate_columns
+    )
+    duplicate_count = len(duplicate_df)
+
+    if append_df.empty:
+        return 0, duplicate_count
+
+    save_columns = CURRENT_RECEIVABLE_COLUMNS + [
+        column
+        for column in current_df.columns
+        if column not in CURRENT_RECEIVABLE_COLUMNS
+    ]
+
+    current_df = current_df.reindex(
+        columns=save_columns,
+        fill_value=""
+    )
+    append_df = append_df.reindex(
+        columns=save_columns,
+        fill_value=""
+    )
+
+    save_df = pd.concat(
+        [current_df, append_df],
+        ignore_index=True
+    )
+
+    save_df.to_csv(
+        current_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    return len(append_df), duplicate_count
 
 # =========================================
 # 古いログ削除
@@ -327,11 +864,17 @@ def apply_receivable_candidates(
     for candidate in candidates:
 
         code = str(candidate["コード"])
+        receivable_id = str(candidate.get("未収ID", ""))
         scheduled_amount = int(candidate["消込予定"])
 
-        target_indexes = receivables_df[
-            receivables_df["コード"] == code
-        ].index
+        if receivable_id and "未収ID" in receivables_df.columns:
+            target_indexes = receivables_df[
+                receivables_df["未収ID"] == receivable_id
+            ].index
+        else:
+            target_indexes = receivables_df[
+                receivables_df["コード"] == code
+            ].index
 
         if len(target_indexes) != 1:
             raise ValueError(
