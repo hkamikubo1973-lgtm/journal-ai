@@ -26,6 +26,7 @@ from receivable_engine import (
     load_receivables,
     mark_receivable_journal_registered,
     normalize_standard_receivable_csv,
+    organize_completed_receivables,
 )
 
 def load_account_master():
@@ -1729,6 +1730,43 @@ elif mode == "未収消込":
             except Exception as e:
                 st.error(f"未収一覧ファイルを読み込めません: {e}")
 
+    if "receivable_cleanup_success" in st.session_state:
+        st.success(
+            st.session_state.pop("receivable_cleanup_success")
+        )
+
+    cleanup_df = load_receivables()
+    cleanup_balances = pd.to_numeric(
+        cleanup_df["残高"].astype(str).str.replace(",", ""),
+        errors="coerce"
+    )
+    cleanup_mask = (
+        cleanup_df["ステータス"].astype(str).str.strip().eq("完了")
+        | cleanup_balances.le(0)
+    )
+    cleanup_count = int(cleanup_mask.sum())
+
+    with st.expander("未収台帳の整理"):
+        st.write(
+            "完了済みまたは残高0の未収が"
+            f"{cleanup_count}件あります"
+        )
+        st.caption(
+            "整理すると、current.csv から完了済み未収を除外します。"
+            "消込履歴と検索DBは削除されません。"
+        )
+
+        if st.button(
+            "完了済み未収を整理する",
+            key="organize_completed_receivables",
+            disabled=cleanup_count == 0
+        ):
+            organized_count = organize_completed_receivables()
+            st.session_state["receivable_cleanup_success"] = (
+                f"完了済み未収を{organized_count}件整理しました"
+            )
+            st.rerun()
+
     payment_accounts = load_payment_accounts()
 
     if "account_master_success" in st.session_state:
@@ -1776,7 +1814,7 @@ elif mode == "未収消込":
 
         receivables_df = receivables_df[
             (receivables_df["残高"] > 0)
-            |
+            &
             (receivables_df["ステータス"] != "完了")
         ].copy()
 
@@ -2181,7 +2219,7 @@ elif mode == "未収消込":
 
                             st.info("消込候補がありません")
 
-    with st.expander("消込履歴"):
+    with st.expander("消込履歴（直近50件）"):
 
         history_df = load_receivable_history()
 
@@ -2191,8 +2229,13 @@ elif mode == "未収消込":
 
         else:
 
+            # ファイル保持とは分け、画面では短期確認分だけ表示する
+            history_display_df = (
+                history_df.tail(50).iloc[::-1]
+            )
+
             st.dataframe(
-                history_df[
+                history_display_df[
                     ["消込日", "コード", "消込額"]
                 ],
                 use_container_width=True

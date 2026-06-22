@@ -141,6 +141,35 @@ def load_receivables():
             ]
         )
 
+
+def organize_completed_receivables():
+
+    current_path = "data/receivables/current.csv"
+    receivables_df = load_receivables()
+
+    balances = pd.to_numeric(
+        receivables_df["残高"].astype(str).str.replace(",", ""),
+        errors="coerce"
+    )
+    completed_mask = (
+        receivables_df["ステータス"].astype(str).str.strip().eq("完了")
+        | balances.le(0)
+    )
+    organized_count = int(completed_mask.sum())
+
+    if organized_count == 0:
+        return 0
+
+    remaining_df = receivables_df.loc[~completed_mask].copy()
+    remaining_df, _ = remove_empty_receivable_rows(remaining_df)
+    remaining_df.to_csv(
+        current_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    return organized_count
+
 # =========================================
 # 未収CSV取込
 # =========================================
