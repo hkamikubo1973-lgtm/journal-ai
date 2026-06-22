@@ -373,6 +373,70 @@ def build_epson_rows(rows, company_name):
 
     return result
 
+
+def save_exported_journals(rows):
+
+    duplicate_columns = [
+        COL_DATE,
+        "借方科目",
+        COL_DEBIT,
+        COL_DEBIT_SUB,
+        "貸方科目",
+        COL_CREDIT,
+        COL_CREDIT_SUB,
+        COL_DEBIT_AMOUNT,
+        COL_SUMMARY,
+    ]
+
+    def row_key(row):
+
+        values = []
+
+        for column in duplicate_columns:
+            value = " ".join(
+                str(row.get(column, "")).split()
+            )
+
+            if column == COL_DATE:
+                value = value.replace("/", "").replace("-", "")
+            elif column == COL_DEBIT_AMOUNT:
+                value = value.replace(",", "")
+
+            values.append(value)
+
+        return tuple(values)
+
+    try:
+        existing_df = pd.read_csv(
+            "data/transactions.csv",
+            dtype=str
+        ).fillna("")
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        existing_df = pd.DataFrame()
+
+    registered_keys = {
+        row_key(row)
+        for _, row in existing_df.iterrows()
+    }
+    new_rows = []
+
+    for row in rows:
+        key = row_key(row)
+
+        if key in registered_keys:
+            continue
+
+        registered_keys.add(key)
+        new_rows.append(row)
+
+    if new_rows:
+        update_search_csv([new_rows])
+
+    st.session_state["epson_export_success"] = (
+        "エプソンCSVを作成し、検索DBも更新しました"
+    )
+    st.cache_data.clear()
+
 # =========================================
 # 初期設定
 # =========================================
@@ -638,11 +702,6 @@ if mode == "通常仕訳":
     # -----------------------------------------
     st.sidebar.header("🔍 検索")
     
-    dept = st.sidebar.selectbox(
-        "部門",
-        [""] + department_master
-    )
-    
     if "keyword_input" not in st.session_state:
         st.session_state["keyword_input"] = ""
     
@@ -651,26 +710,38 @@ if mode == "通常仕訳":
             st.session_state.pop("ocr_search_text_pending")
         )
     
-    keyword = st.sidebar.text_input(
-        "キーワード",
-        key="keyword_input"
+    with st.sidebar.form(key="journal_search_form"):
+        dept = st.selectbox(
+            "部門",
+            [""] + department_master,
+            key="search_department"
+        )
+
+        keyword = st.text_input(
+            "キーワード",
+            key="keyword_input"
+        )
+
+        amount_input = st.number_input(
+            "金額",
+            value=None,
+            min_value=0,
+            step=1,
+            placeholder="0",
+            key="search_amount"
+        )
+
+        st.caption("条件を入力し、Enterキーでも検索できます。")
+        search_clicked = st.form_submit_button(
+            "検索",
+            type="primary"
+        )
+
+    amount = (
+        int(amount_input)
+        if amount_input is not None and amount_input > 0
+        else None
     )
-    
-    amount_str = st.sidebar.text_input("金額")
-    
-    amount = None
-    
-    if amount_str:
-    
-        try:
-            amount = int(
-                amount_str.replace(",", "")
-            )
-    
-        except:
-            st.sidebar.error("金額エラー")
-    
-    search_clicked = st.sidebar.button("検索")
     
     if st.sidebar.button(
         "科目マスター生成"
@@ -920,6 +991,7 @@ if mode == "通常仕訳":
     
                 d_sum = 0
                 c_sum = 0
+                entered_amounts_valid = True
     
                 for r_idx, r in enumerate(rows):
     
@@ -1037,25 +1109,28 @@ if mode == "通常仕訳":
                         debit,
                         credit
                     )
-    
-                    if len(rows) == 1 and suggest:
-    
-                        default_amt = suggest["avg"]
-    
+
+                    st.caption(f"過去金額: ¥{amount_value:,}")
+
+                    if suggest:
                         st.caption(
-                            f"平均:{suggest['avg']:,}"
+                            f"平均金額: ¥{suggest['avg']:,}"
                         )
-    
-                    else:
-    
-                        default_amt = to_int(
-                            r.get(COL_DEBIT_AMOUNT)
-                        )
+
+                    default_amt = (
+                        amount
+                        if len(rows) == 1
+                        and amount is not None
+                        and amount > 0
+                        else None
+                    )
     
                     amt = st.number_input(
                         "金額",
                         min_value=0,
                         value=default_amt,
+                        step=1,
+                        placeholder="今回の金額",
                         key=f"amt_{doc_id}_{r_idx}"
                     )
     
@@ -1068,8 +1143,14 @@ if mode == "通常仕訳":
                         key=f"m_{doc_id}_{r_idx}"
                     )
     
-                    d_sum += amt
-                    c_sum += amt
+                    if amt is None or amt <= 0:
+                        entered_amounts_valid = False
+                        registered_amount = 0
+                    else:
+                        registered_amount = int(amt)
+
+                    d_sum += registered_amount
+                    c_sum += registered_amount
     
                     new_row = copy.deepcopy(r)
     
@@ -1081,19 +1162,28 @@ if mode == "通常仕訳":
                     new_row[COL_DEBIT_SUB] = debit_sub
                     new_row[COL_CREDIT_SUB] = credit_sub
     
-                    new_row[COL_DEBIT_AMOUNT] = str(amt)
-                    new_row[COL_CREDIT_AMOUNT] = str(amt)
+                    new_row[COL_DEBIT_AMOUNT] = (
+                        str(registered_amount)
+                        if registered_amount > 0
+                        else ""
+                    )
+                    new_row[COL_CREDIT_AMOUNT] = (
+                        str(registered_amount)
+                        if registered_amount > 0
+                        else ""
+                    )
     
                     new_row[COL_SUMMARY] = memo
     
                     edited_rows.append(new_row)
     
-                    if d_sum != c_sum:
-                        st.error(
-                            f"借貸不一致: 借方¥{d_sum:,} / 貸方¥{c_sum:,}"
-                        )
-                    else:
-                        st.success("借貸一致")
+                    if entered_amounts_valid:
+                        if d_sum != c_sum:
+                            st.error(
+                                f"借貸不一致: 借方¥{d_sum:,} / 貸方¥{c_sum:,}"
+                            )
+                        else:
+                            st.success("借貸一致")
     
                 st.divider()
                 
@@ -1111,7 +1201,11 @@ if mode == "通常仕訳":
                     key=f"save_{doc_id}"
                 ):
     
-                    if d_sum != c_sum:
+                    if not entered_amounts_valid:
+
+                        st.warning("今回の金額を入力してください")
+
+                    elif d_sum != c_sum:
     
                         st.error("登録不可")
     
@@ -1302,21 +1396,6 @@ if mode == "通常仕訳":
         st.dataframe(df)
     
         # =====================================
-        # DB保存
-        # =====================================
-        if st.button("💾 検索DBへ保存"):
-    
-            update_search_csv(
-                st.session_state.confirmed
-            )
-    
-            st.success(
-                "検索DBを更新しました"
-            )
-    
-            st.cache_data.clear()
-    
-        # =====================================
         # 内部CSV
         # =====================================
         csv = df.to_csv(
@@ -1345,11 +1424,20 @@ if mode == "通常仕訳":
         epson_csv = epson_df.to_csv(
             index=False
         ).encode("cp932")
+
+        if "epson_export_success" in st.session_state:
+            st.success(
+                st.session_state.pop("epson_export_success")
+            )
     
+        st.caption("登録済み仕訳をエプソン取込形式で保存します。")
         st.download_button(
-            "エプソンCSVダウンロード",
+            "エプソン取込CSVをダウンロード",
             epson_csv,
-            "epson_output.csv"
+            "epson_output.csv",
+            type="primary",
+            on_click=save_exported_journals,
+            args=(epson_rows,)
         )
     
 
@@ -1571,12 +1659,16 @@ elif mode == "未収消込":
                 if import_preview.empty:
                     st.warning("取り込める明細がありません")
 
-                elif st.button(
+                else:
+                    st.caption("プレビューの明細を未収一覧へ追加します。")
+
+                if not import_preview.empty and st.button(
                     "未収一覧へ取り込む",
                     key=(
                         "append_receivables_"
                         f"{st.session_state.receivable_import_key}"
-                    )
+                    ),
+                    type="primary"
                 ):
                     duplicate_columns = (
                         [
@@ -1673,6 +1765,10 @@ elif mode == "未収消込":
 
         receivables_df = receivables_df.copy()
 
+        receivables_df = receivables_df[
+            receivables_df["得意先名"].astype(str).str.strip() != ""
+        ].copy()
+
         receivables_df["残高"] = pd.to_numeric(
             receivables_df["残高"].str.replace(",", ""),
             errors="coerce"
@@ -1767,28 +1863,45 @@ elif mode == "未収消込":
                         use_container_width=True
                     )
 
-                    payment_date = st.date_input(
-                        "入金日",
-                        key=f"payment_date_{customer_idx}"
-                    )
+                    with st.form(
+                        key=f"payment_form_{customer_idx}_{customer_name}"
+                    ):
+                        payment_date = st.date_input(
+                            "入金日",
+                            key=f"payment_date_{customer_idx}"
+                        )
 
-                    payment_amount = st.number_input(
-                        "入金額",
-                        min_value=0,
-                        step=1,
-                        key=f"payment_amount_{customer_idx}"
-                    )
+                        payment_amount = st.number_input(
+                            "入金額",
+                            value=None,
+                            min_value=0,
+                            step=1,
+                            placeholder="0",
+                            key=f"payment_amount_{customer_idx}"
+                        )
 
-                    receipt_account = st.selectbox(
-                        "入金科目",
-                        payment_accounts,
-                        index=(
-                            payment_accounts.index(
-                                st.session_state.receipt_account
+                        receipt_account = st.selectbox(
+                            "入金科目",
+                            payment_accounts,
+                            index=(
+                                payment_accounts.index(
+                                    st.session_state.receipt_account
+                                )
+                            ),
+                            key=f"receipt_account_{customer_idx}"
+                        )
+
+                        st.caption(
+                            "入金額を入力し、Enterキーでも候補を表示できます。"
+                        )
+                        payment_preview_submitted = (
+                            st.form_submit_button(
+                                "入金候補を表示",
+                                on_click=keep_receivable_customer_open,
+                                args=(customer_name,),
+                                type="primary"
                             )
-                        ),
-                        key=f"receipt_account_{customer_idx}"
-                    )
+                        )
 
                     with st.expander("未登録科目を追加"):
 
@@ -1891,11 +2004,19 @@ elif mode == "未収消込":
 
                                 st.rerun()
 
-                    if st.button(
-                        "入金候補表示",
-                        key=f"payment_preview_{customer_idx}",
-                        on_click=keep_receivable_customer_open,
-                        args=(customer_name,)
+                    if (
+                        payment_preview_submitted
+                        and (
+                            payment_amount is None
+                            or payment_amount <= 0
+                        )
+                    ):
+                        st.warning("入金額を入力してください")
+
+                    if (
+                        payment_preview_submitted
+                        and payment_amount is not None
+                        and payment_amount > 0
                     ):
 
                         st.session_state.receipt_account = receipt_account
@@ -1984,9 +2105,11 @@ elif mode == "未収消込":
                                 )
                             )
 
+                            st.caption("表示された候補で未収を消し込みます。")
                             if st.button(
                                 "消込実行",
-                                key=f"payment_execute_{customer_idx}"
+                                key=f"payment_execute_{customer_idx}",
+                                type="primary"
                             ):
 
                                 try:
@@ -2129,21 +2252,32 @@ elif mode == "未収消込":
                     + "。account_master.csvを確認してください。"
                 )
 
+            journal_registered = (
+                settlement_id is not None
+                and is_receivable_journal_registered(settlement_id)
+            )
+
             if settlement_id is None:
 
                 st.info(
                     "この仕訳候補には消込IDがありません"
                 )
 
-            elif is_receivable_journal_registered(
-                settlement_id
-            ):
+            elif journal_registered:
 
                 st.success("仕訳登録済みです")
 
-            elif st.button(
-                "生成仕訳を登録",
-                key=f"register_receivable_{settlement_id}"
+            else:
+                st.caption("生成した仕訳をCSV出力対象へ追加します。")
+
+            if (
+                settlement_id is not None
+                and not journal_registered
+                and st.button(
+                    "この仕訳をCSV出力対象へ登録",
+                    key=f"register_receivable_{settlement_id}",
+                    type="primary"
+                )
             ):
 
                 try:
@@ -2204,8 +2338,6 @@ elif mode == "未収消込":
                         )
 
                         transaction_rows.append(row)
-
-                    update_search_csv([transaction_rows])
 
                     mark_receivable_journal_registered(
                         settlement_id

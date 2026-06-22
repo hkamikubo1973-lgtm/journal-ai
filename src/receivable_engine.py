@@ -33,6 +33,34 @@ CURRENT_RECEIVABLE_COLUMNS = [
     "ステータス"
 ]
 
+
+def remove_empty_receivable_rows(df):
+
+    df = df.copy().fillna("")
+    stripped_df = df.apply(
+        lambda column: column.astype(str).str.strip()
+    )
+    completely_empty = stripped_df.eq("").all(axis=1)
+
+    customer_empty = stripped_df.get(
+        "得意先名",
+        pd.Series("", index=df.index)
+    ).eq("")
+
+    amounts_are_zero = pd.Series(True, index=df.index)
+    for column in ["請求金額", "入金済額", "残高"]:
+        values = stripped_df.get(
+            column,
+            pd.Series("", index=df.index)
+        ).str.replace(",", "", regex=False)
+        numeric_values = pd.to_numeric(values, errors="coerce")
+        amounts_are_zero &= values.eq("") | numeric_values.eq(0)
+
+    empty_data = customer_empty & amounts_are_zero
+    remove_mask = completely_empty | empty_data
+
+    return df.loc[~remove_mask].reset_index(drop=True), remove_mask.any()
+
 # =========================================
 # 未収CSV読み込み
 # =========================================
@@ -47,6 +75,8 @@ def load_receivables():
             dtype=str
         ).fillna("")
 
+        df, removed_empty_rows = remove_empty_receivable_rows(df)
+
         defaults = {
             "未収科目": "売掛金",
             "未収補助": "",
@@ -57,7 +87,7 @@ def load_receivables():
             if column not in df.columns:
                 df[column] = default_value
 
-        migrated = False
+        migrated = removed_empty_rows
         code_values = df["コード"].astype(str)
 
         if "未収ID" not in df.columns:
@@ -135,6 +165,7 @@ def import_receivable_csv(upload_path):
 
     # current更新
     shutil.copy(upload_path, current_path)
+    load_receivables()
 
     cleanup_logs()
 
@@ -606,6 +637,8 @@ def append_standard_receivables(
         ignore_index=True
     )
 
+    save_df, _ = remove_empty_receivable_rows(save_df)
+
     save_df.to_csv(
         current_path,
         index=False,
@@ -827,6 +860,9 @@ def update_receivables(receivables_df, matched_result):
                 ] = "部分消込"
 
         # 保存
+        receivables_df, _ = remove_empty_receivable_rows(
+            receivables_df
+        )
         receivables_df.to_csv(
             "data/receivables/current.csv",
             index=False,
@@ -929,6 +965,9 @@ def apply_receivable_candidates(
             else "部分消込"
         )
 
+    receivables_df, _ = remove_empty_receivable_rows(
+        receivables_df
+    )
     receivables_df.to_csv(
         "data/receivables/current.csv",
         index=False,
