@@ -1,4 +1,4 @@
-﻿# =========================================
+# =========================================
 # 仕訳検索システム（完全版・安全版）
 # 削除禁止版
 # ・登録済編集維持
@@ -15,7 +15,7 @@ import getpass
 import csv
 import io
 
-from ocr_gateway import PaddleOcrGateway
+from ocr_gateway import DummyOcrGateway
 from receivable_engine import (
     append_standard_receivables,
     apply_receivable_candidates,
@@ -864,7 +864,7 @@ if mode == "通常仕訳":
     
         st.info("OCR解析中...")
     
-        gateway = PaddleOcrGateway()
+        gateway = DummyOcrGateway()
     
         st.session_state["ocr_result"] = gateway.analyze(
             content=uploaded_file.getvalue(),
@@ -907,52 +907,6 @@ if mode == "通常仕訳":
             "信頼度:",
             ocr_result.confidence
         )
-
-        if ocr_result.invoice_number_present:
-            invoice_registration_number = (
-                ocr_result.invoice_registration_number
-                or ""
-            )
-            invoice_format_status = (
-                "OK"
-                if ocr_result.invoice_number_valid_format
-                else "要確認"
-            )
-            invoice_verified_status = (
-                "確認済み"
-                if ocr_result.invoice_number_verified
-                else "未確認"
-            )
-            invoice_number_candidates = (
-                ocr_result.invoice_number_candidates
-                or []
-            )
-
-            st.write(
-                "適格請求書番号:",
-                invoice_registration_number
-            )
-
-            st.write(
-                "形式:",
-                invoice_format_status
-            )
-
-            st.write(
-                "国税庁照会:",
-                invoice_verified_status
-            )
-
-            if len(invoice_number_candidates) > 1:
-                st.write(
-                    "候補:",
-                    "、".join(invoice_number_candidates)
-                )
-            elif invoice_number_candidates:
-                st.write(
-                    "候補:",
-                    invoice_number_candidates[0]
-                )
     
         if st.button(
             "検索へ反映",
@@ -2449,4 +2403,3 @@ elif mode == "未収消込":
                 except Exception as e:
 
                     st.error(str(e))
-
