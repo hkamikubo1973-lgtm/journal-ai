@@ -630,6 +630,151 @@ def save_exported_journals(rows):
     )
     st.cache_data.clear()
 
+
+TRANSACTIONS_PATH = "data/transactions.csv"
+
+
+def read_past_journal_csv(content):
+
+    last_error = None
+
+    for encoding in [
+        "utf-8-sig",
+        "cp932",
+    ]:
+        try:
+            df = pd.read_csv(
+                io.BytesIO(content),
+                dtype=str,
+                encoding=encoding,
+            ).fillna("")
+            df.columns = [
+                str(column).strip()
+                for column in df.columns
+            ]
+            return df, encoding, None
+        except Exception as e:
+            last_error = e
+
+    return None, None, last_error
+
+
+def load_transactions_df():
+
+    return pd.read_csv(
+        TRANSACTIONS_PATH,
+        dtype=str,
+        encoding="utf-8-sig",
+    ).fillna("")
+
+
+def normalize_import_value(value, amount=False, date=False):
+
+    value = " ".join(
+        str(value or "").split()
+    )
+
+    if date:
+        value = value.replace("/", "").replace("-", "")
+
+    if amount:
+        value = value.replace(",", "")
+
+    return value
+
+
+def journal_import_key(row):
+
+    amount = row.get(COL_DEBIT_AMOUNT, "")
+
+    if not normalize_import_value(amount, amount=True):
+        amount = row.get(COL_CREDIT_AMOUNT, "")
+
+    return (
+        normalize_import_value(row.get(COL_DATE, ""), date=True),
+        normalize_import_value(row.get("借方科目", "")),
+        normalize_import_value(row.get(COL_DEBIT, "")),
+        normalize_import_value(row.get("貸方科目", "")),
+        normalize_import_value(row.get(COL_CREDIT, "")),
+        normalize_import_value(amount, amount=True),
+        normalize_import_value(row.get(COL_SUMMARY, "")),
+    )
+
+
+def prepare_past_journal_import(upload_df, existing_df):
+
+    existing_columns = list(existing_df.columns)
+
+    if len(upload_df.columns) != 45:
+        return None, f"45列CSVではありません（{len(upload_df.columns)}列）"
+
+    if list(upload_df.columns) != existing_columns:
+        return None, "CSVの列構造がtransactions.csvと一致しません"
+
+    upload_df = upload_df[
+        upload_df.apply(
+            lambda row: any(
+                str(value).strip()
+                for value in row
+            ),
+            axis=1,
+        )
+    ]
+
+    existing_keys = {
+        journal_import_key(row)
+        for _, row in existing_df.iterrows()
+    }
+
+    seen_import_keys = set()
+    new_rows = []
+    duplicate_count = 0
+
+    for _, row in upload_df.iterrows():
+        key = journal_import_key(row)
+
+        if key in existing_keys or key in seen_import_keys:
+            duplicate_count += 1
+            continue
+
+        seen_import_keys.add(key)
+        new_rows.append(row.to_dict())
+
+    new_df = pd.DataFrame(
+        new_rows,
+        columns=existing_columns,
+    )
+
+    return {
+        "new_df": new_df,
+        "duplicate_count": duplicate_count,
+    }, None
+
+
+def append_past_journals_to_transactions(new_df):
+
+    if new_df.empty:
+        return 0
+
+    existing_df = load_transactions_df()
+    combined_df = pd.concat(
+        [
+            existing_df,
+            new_df,
+        ],
+        ignore_index=True,
+    )
+
+    combined_df.to_csv(
+        TRANSACTIONS_PATH,
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    st.cache_data.clear()
+
+    return len(new_df)
+
 # =========================================
 # 初期設定
 # =========================================
@@ -1080,6 +1225,93 @@ if mode == "通常仕訳":
     process_date = process_date_obj.strftime("%Y%m%d")
     
     st.divider()
+
+    # =========================================
+    # 過去仕訳CSV取込
+    # =========================================
+    with st.expander("過去仕訳CSV取込"):
+
+        if "past_journal_import_success" in st.session_state:
+            st.success(
+                st.session_state.pop(
+                    "past_journal_import_success"
+                )
+            )
+
+        past_journal_file = st.file_uploader(
+            "エプソン仕訳CSVアップロード",
+            type=["csv"],
+            key="past_journal_csv_upload"
+        )
+
+        if past_journal_file is not None:
+            upload_df, encoding, read_error = read_past_journal_csv(
+                past_journal_file.getvalue()
+            )
+
+            if read_error is not None:
+                st.error(
+                    f"CSVを読み込めませんでした: {read_error}"
+                )
+            else:
+                st.caption(
+                    f"文字コード: {encoding} / {len(upload_df.columns)}列"
+                )
+
+                existing_df = load_transactions_df()
+                import_result, import_error = prepare_past_journal_import(
+                    upload_df,
+                    existing_df,
+                )
+
+                if import_error:
+                    st.warning(import_error)
+                else:
+                    new_df = import_result["new_df"]
+                    duplicate_count = import_result["duplicate_count"]
+
+                    st.write(
+                        "新規件数:",
+                        len(new_df)
+                    )
+                    st.write(
+                        "重複件数:",
+                        duplicate_count
+                    )
+
+                    preview_columns = [
+                        column
+                        for column in [
+                            COL_DATE,
+                            "借方科目",
+                            COL_DEBIT,
+                            "貸方科目",
+                            COL_CREDIT,
+                            COL_DEBIT_AMOUNT,
+                            COL_SUMMARY,
+                        ]
+                        if column in upload_df.columns
+                    ]
+
+                    st.dataframe(
+                        upload_df[preview_columns].head(50),
+                        use_container_width=True
+                    )
+
+                    if st.button(
+                        "検索DBへ追加",
+                        disabled=new_df.empty,
+                        key="append_past_journals_to_search_db"
+                    ):
+                        appended_count = append_past_journals_to_transactions(
+                            new_df
+                        )
+                        st.session_state[
+                            "past_journal_import_success"
+                        ] = (
+                            f"検索DBへ{appended_count}件追加しました"
+                        )
+                        st.rerun()
     
     # =========================================
     # OCR読込
