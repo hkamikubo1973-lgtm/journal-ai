@@ -15,7 +15,7 @@ import getpass
 import csv
 import io
 
-from ocr_gateway import PaddleOcrGateway
+from ocr_gateway import OcrResult, PaddleOcrGateway
 from receivable_engine import (
     append_standard_receivables,
     apply_receivable_candidates,
@@ -29,9 +29,86 @@ from receivable_engine import (
     organize_completed_receivables,
 )
 
+ACCOUNT_CATEGORIES = [
+    "資産",
+    "負債",
+    "純資産",
+    "収益",
+    "費用",
+]
+
+
+def format_ocr_amount_candidate(candidate):
+
+    if isinstance(candidate, dict):
+        amount_value = (
+            candidate.get("amount")
+            or candidate.get("value")
+            or candidate.get("total")
+        )
+
+        parts = []
+        if amount_value not in (None, ""):
+            try:
+                parts.append(f"¥{int(amount_value):,}")
+            except Exception:
+                parts.append(str(amount_value))
+
+        for key, value in candidate.items():
+            if key in {"amount", "value", "total"}:
+                continue
+            if value not in (None, ""):
+                parts.append(f"{key}: {value}")
+
+        return " / ".join(parts) if parts else str(candidate)
+
+    try:
+        return f"¥{int(candidate):,}"
+    except Exception:
+        return str(candidate)
+
+
+def format_ocr_candidates(candidates, formatter=str):
+
+    if not candidates:
+        return ""
+
+    return "\n".join(
+        f"- {formatter(candidate)}"
+        for candidate in candidates
+    )
+
+
+def is_ocr_api_connection_error(ocr_result):
+
+    raw_text = getattr(ocr_result, "raw_text", "") or ""
+    warnings = getattr(ocr_result, "warnings", None) or []
+
+    if "OCR API接続エラー" in raw_text:
+        return True
+
+    return any(
+        "OCR API接続エラー" in str(warning)
+        for warning in warnings
+    )
+
+
 def load_account_master():
 
     result = {}
+
+    for row in load_account_master_rows():
+
+        result[
+            row["name"]
+        ] = row["code"]
+
+    return result
+
+
+def load_account_master_rows():
+
+    rows = []
 
     with open(
         "data/account_master.csv",
@@ -42,11 +119,39 @@ def load_account_master():
 
         for row in reader:
 
-            result[
-                row["name"]
-            ] = row["code"]
+            code = str(row.get("code", "")).strip()
+            name = str(row.get("name", "")).strip()
+            category = str(row.get("category", "")).strip()
 
-    return result
+            if code and name:
+                rows.append({
+                    "code": code,
+                    "name": name,
+                    "category": category,
+                })
+
+    return rows
+
+
+def save_account_master_rows(rows):
+
+    with open(
+        "data/account_master.csv",
+        "w",
+        encoding="utf-8-sig",
+        newline=""
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "code",
+                "name",
+                "category",
+            ]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 ACCOUNT_MASTER = load_account_master()
@@ -76,17 +181,16 @@ def load_payment_accounts():
 
     return sorted(result)
 
-def append_account_master(code, name):
+def append_account_master(code, name, category=""):
 
-    with open(
-        "data/account_master.csv",
-        "a",
-        encoding="utf-8",
-        newline=""
-    ) as f:
+    rows = load_account_master_rows()
+    rows.append({
+        "code": str(code).strip(),
+        "name": str(name).strip(),
+        "category": str(category).strip(),
+    })
 
-        writer = csv.writer(f)
-        writer.writerow([code, name])
+    save_account_master_rows(rows)
 
 def append_payment_account(name):
 
@@ -109,6 +213,94 @@ def append_payment_account(name):
             [account]
             for account in accounts
         )
+
+
+def add_account_candidate(
+    code,
+    name,
+    category,
+    add_to_payment_accounts=False,
+):
+
+    code = str(code).strip()
+    name = str(name).strip()
+    category = str(category).strip()
+
+    if not code or not name:
+        return False, [
+            "科目コードと科目名を入力してください"
+        ]
+
+    if category not in ACCOUNT_CATEGORIES:
+        return False, [
+            "分類を選択してください"
+        ]
+
+    account_rows = load_account_master_rows()
+    payment_accounts = load_payment_accounts()
+
+    same_code = next(
+        (
+            row
+            for row in account_rows
+            if row["code"] == code
+        ),
+        None
+    )
+    same_name = next(
+        (
+            row
+            for row in account_rows
+            if row["name"] == name
+        ),
+        None
+    )
+
+    if same_code and same_code["name"] != name:
+        return False, [
+            "同じ科目コードが登録済みです"
+        ]
+
+    if same_name and same_name["code"] != code:
+        return False, [
+            "同じ科目名が登録済みです"
+        ]
+
+    account_registered = bool(same_code and same_name)
+    messages = []
+    changed = False
+
+    if account_registered:
+        messages.append(
+            "科目候補には既に登録されています"
+        )
+    else:
+        append_account_master(
+            code,
+            name,
+            category,
+        )
+        messages.append(
+            "科目候補に追加しました"
+        )
+        changed = True
+
+    if add_to_payment_accounts:
+        if name in payment_accounts:
+            messages.append(
+                "入金科目候補にも既に登録されています"
+            )
+        else:
+            append_payment_account(name)
+            messages.append(
+                "入金科目候補に追加しました"
+                if account_registered
+                else "入金科目候補にも追加しました"
+            )
+            changed = True
+
+    return changed, messages
+
 
 def load_sub_master():
 
@@ -516,7 +708,8 @@ def generate_account_master(records):
 
                     rows.append({
                         "code": debit_code,
-                        "name": debit_name
+                        "name": debit_name,
+                        "category": ""
                     })
 
             credit_code = str(
@@ -540,7 +733,8 @@ def generate_account_master(records):
 
                     rows.append({
                         "code": credit_code,
-                        "name": credit_name
+                        "name": credit_name,
+                        "category": ""
                     })
 
     rows = sorted(
@@ -695,6 +889,67 @@ if mode == "通常仕訳":
     )
     
     st.session_state.company_name = company_name
+
+    if "account_candidate_success" in st.session_state:
+        for message in st.session_state.pop(
+            "account_candidate_success"
+        ):
+            st.sidebar.success(message)
+
+    with st.sidebar.expander("科目マスター管理"):
+
+        st.subheader("科目候補の追加")
+
+        st.caption(
+            "※ エプソン側に登録済みの科目だけを追加してください。"
+        )
+        st.caption(
+            "※ journal-aiで追加しても、エプソン側には登録されません。"
+        )
+        st.caption(
+            "※ 分類は検索・確認・AIチェック用の補助情報です。"
+        )
+
+        candidate_code = st.text_input(
+            "科目コード",
+            key="sidebar_account_candidate_code"
+        ).strip()
+
+        candidate_name = st.text_input(
+            "科目名",
+            key="sidebar_account_candidate_name"
+        ).strip()
+
+        candidate_category = st.selectbox(
+            "分類",
+            ACCOUNT_CATEGORIES,
+            key="sidebar_account_candidate_category"
+        )
+
+        candidate_add_to_payment = st.checkbox(
+            "入金科目候補にも追加する",
+            key="sidebar_account_candidate_payment"
+        )
+
+        if st.button(
+            "追加する",
+            key="sidebar_add_account_candidate"
+        ):
+            changed, messages = add_account_candidate(
+                candidate_code,
+                candidate_name,
+                candidate_category,
+                candidate_add_to_payment,
+            )
+
+            if changed:
+                st.session_state[
+                    "account_candidate_success"
+                ] = messages
+                st.rerun()
+            else:
+                for message in messages:
+                    st.warning(message)
     
     st.sidebar.divider()
     
@@ -866,37 +1121,82 @@ if mode == "通常仕訳":
     
         gateway = PaddleOcrGateway()
     
-        st.session_state["ocr_result"] = gateway.analyze(
-            content=uploaded_file.getvalue(),
-            filename=uploaded_file.name,
-            mime_type=uploaded_file.type or "",
-        )
+        try:
+            st.session_state["ocr_result"] = gateway.analyze(
+                content=uploaded_file.getvalue(),
+                filename=uploaded_file.name,
+                mime_type=uploaded_file.type or "",
+            )
+        except Exception as e:
+            message = f"OCR API接続エラー: {type(e).__name__}: {e}"
+            st.session_state["ocr_result"] = OcrResult(
+                raw_text=message,
+                confidence=0.0,
+                warnings=[message],
+            )
     
         # OCR済み
         st.session_state["ocr_done"] = True
-    
-        st.success("OCR解析完了")
+
+        if is_ocr_api_connection_error(st.session_state["ocr_result"]):
+            st.warning("OCR解析失敗：AIサーバーに接続できません")
+        else:
+            st.success("OCR解析完了")
     
     ocr_result = st.session_state["ocr_result"]
     
     if ocr_result is not None:
     
+        search_text_candidates = (
+            getattr(ocr_result, "search_text_candidates", None)
+            or ([ocr_result.search_text] if ocr_result.search_text else [])
+        )
+        amount_candidates = (
+            getattr(ocr_result, "amount_candidates", None)
+            or ([ocr_result.amount] if ocr_result.amount is not None else [])
+        )
+        memo_candidates = (
+            getattr(ocr_result, "memo_candidates", None)
+            or ([ocr_result.memo] if ocr_result.memo else [])
+        )
+        invoice_number_candidates = (
+            getattr(ocr_result, "invoice_number_candidates", None)
+            or (
+                [ocr_result.invoice_registration_number]
+                if ocr_result.invoice_registration_number
+                else []
+            )
+        )
+        warnings = getattr(ocr_result, "warnings", None) or []
+
         st.write(
-            "検索文字列:",
-            ocr_result.search_text
+            "検索文字列候補:",
+            format_ocr_candidates(search_text_candidates)
         )
     
         st.write(
-            "金額:",
-            f"¥{ocr_result.amount:,}"
-            if ocr_result.amount is not None
-            else ""
+            "金額候補:",
+            format_ocr_candidates(
+                amount_candidates,
+                format_ocr_amount_candidate,
+            )
         )
     
         st.write(
-            "摘要:",
-            ocr_result.memo
+            "摘要候補:",
+            format_ocr_candidates(memo_candidates)
         )
+
+        st.write(
+            "T番号候補:",
+            format_ocr_candidates(invoice_number_candidates)
+        )
+
+        if warnings:
+            for warning in warnings:
+                st.warning(str(warning))
+        else:
+            st.write("警告:", "")
     
         st.write(
             "OCR全文:",
@@ -923,11 +1223,6 @@ if mode == "通常仕訳":
                 if ocr_result.invoice_number_verified
                 else "未確認"
             )
-            invoice_number_candidates = (
-                ocr_result.invoice_number_candidates
-                or []
-            )
-
             st.write(
                 "適格請求書番号:",
                 invoice_registration_number
@@ -1987,106 +2282,11 @@ elif mode == "未収消込":
                             )
                         )
 
-                    with st.expander("未登録科目を追加"):
+                    with st.expander("科目候補の追加"):
 
-                        new_account_code = st.text_input(
-                            "科目コード",
-                            key=f"new_account_code_{customer_idx}"
-                        ).strip()
-
-                        new_account_name = st.text_input(
-                            "科目名",
-                            key=f"new_account_name_{customer_idx}"
-                        ).strip()
-
-                        add_to_payment_accounts = st.checkbox(
-                            "入金科目として追加する",
-                            key=f"add_payment_account_{customer_idx}"
+                        st.info(
+                            "入金科目がない場合は、通常仕訳画面の左サイドバーにある「科目マスター管理」から追加してください。"
                         )
-
-                        if st.button(
-                            "登録",
-                            key=f"add_account_master_{customer_idx}"
-                        ):
-
-                            registered_name = next((
-                                name
-                                for name, code
-                                in ACCOUNT_MASTER.items()
-                                if str(code).strip()
-                                == new_account_code
-                            ), None)
-
-                            registered_code = str(
-                                ACCOUNT_MASTER.get(
-                                    new_account_name,
-                                    ""
-                                )
-                            ).strip()
-
-                            if not new_account_code or not new_account_name:
-                                st.warning(
-                                    "科目コードと科目名を入力してください"
-                                )
-
-                            elif (
-                                registered_name
-                                and registered_name != new_account_name
-                            ):
-                                st.warning(
-                                    "同じ科目コードが登録済みです"
-                                )
-
-                            elif (
-                                registered_code
-                                and registered_code != new_account_code
-                            ):
-                                st.warning(
-                                    "同じ科目名が登録済みです"
-                                )
-
-                            else:
-                                account_registered = (
-                                    registered_code
-                                    == new_account_code
-                                )
-
-                                if account_registered:
-                                    messages = [
-                                        "科目マスターには既に登録されています"
-                                    ]
-                                else:
-                                    append_account_master(
-                                        new_account_code,
-                                        new_account_name
-                                    )
-                                    messages = [
-                                        "科目マスターへ追加しました"
-                                    ]
-
-                                if add_to_payment_accounts:
-                                    if (
-                                        new_account_name
-                                        in payment_accounts
-                                    ):
-                                        messages.append(
-                                            "入金科目候補にも既に登録されています"
-                                        )
-                                    else:
-                                        append_payment_account(
-                                            new_account_name
-                                        )
-                                        messages.append(
-                                            "入金科目候補に追加しました"
-                                            if account_registered
-                                            else "入金科目候補にも追加しました"
-                                        )
-
-                                st.session_state[
-                                    "account_master_success"
-                                ] = messages
-
-                                st.rerun()
 
                     if (
                         payment_preview_submitted
