@@ -350,11 +350,13 @@ DEPARTMENT_MASTER = load_department_master()
 from datetime import datetime
 
 from engine import (
+    EXCLUDED_SUGGESTION_ACCOUNTS,
     load_data,
     search,
     get_department,
     to_int,
     get_amount_suggestions,
+    get_account_suggestions,
     update_search_csv
 )
 
@@ -388,6 +390,62 @@ def get_account_name(code):
         code,
         code
     )
+
+def build_account_select_options(
+    records,
+    summary,
+    opposite_account,
+    sub_account=None,
+    current_account=""
+):
+
+    suggestions = get_account_suggestions(
+        records,
+        summary,
+        opposite_account,
+        sub_account=sub_account
+    )
+    recommended_accounts = [
+        account
+        for account, _ in suggestions
+        if (
+            account in account_master
+            and account not in EXCLUDED_SUGGESTION_ACCOUNTS
+        )
+    ]
+
+    options = recommended_accounts + [
+        account
+        for account in account_master
+        if (
+            account not in recommended_accounts
+            and account not in EXCLUDED_SUGGESTION_ACCOUNTS
+        )
+    ]
+
+    if (
+        current_account
+        and current_account not in EXCLUDED_SUGGESTION_ACCOUNTS
+        and current_account not in options
+    ):
+        options.insert(0, current_account)
+
+    recommended_set = set(recommended_accounts)
+
+    return options, recommended_set
+
+
+def is_excluded_account(account):
+
+    return str(account or "").strip() in EXCLUDED_SUGGESTION_ACCOUNTS
+
+
+def format_recommended_account(account, recommended_accounts):
+
+    if account in recommended_accounts:
+        return f"【推奨】{account}"
+
+    return account
 
 # =========================================
 # 伝票合計
@@ -1630,23 +1688,62 @@ if mode == "通常仕訳":
                         # =====================================
                         # 借方 / 貸方
                         # =====================================
+                        summary_for_suggestions = " ".join([
+                            str(r.get(COL_SUMMARY, "") or ""),
+                            str(r.get("摘要", "") or ""),
+                            str(r.get("伝票摘要", "") or "")
+                        ])
+                        debit_key = f"d_{doc_id}_{r_idx}"
+                        credit_key = f"c_{doc_id}_{r_idx}"
+
                         with col1:
     
                             default_debit = r.get(
                                 COL_DEBIT,
                                 ""
                             )
+                            current_credit = st.session_state.get(
+                                credit_key,
+                                r.get(COL_CREDIT, "")
+                            )
+                            debit_options, recommended_debits = (
+                                build_account_select_options(
+                                    records,
+                                    summary_for_suggestions,
+                                    current_credit,
+                                    sub_account=r.get(COL_DEBIT_SUB, ""),
+                                    current_account=default_debit
+                                )
+                            )
     
                             debit = st.selectbox(
                                 "借方",
-                                account_master,
+                                debit_options,
                                 index=(
-                                    account_master.index(default_debit)
-                                    if default_debit in account_master
+                                    debit_options.index(default_debit)
+                                    if (
+                                        default_debit in debit_options
+                                        and not is_excluded_account(
+                                            default_debit
+                                        )
+                                    )
                                     else 0
                                 ),
-                                key=f"d_{doc_id}_{r_idx}"
+                                key=debit_key,
+                                format_func=(
+                                    lambda account,
+                                    recommended=recommended_debits:
+                                    format_recommended_account(
+                                        account,
+                                        recommended
+                                    )
+                                )
                             )
+                            if is_excluded_account(default_debit):
+                                st.caption(
+                                    "元データの科目が資金複合/諸口のため、"
+                                    "選択可能な科目へ変更してください"
+                                )
     
                         with col2:
     
@@ -1654,17 +1751,44 @@ if mode == "通常仕訳":
                                 COL_CREDIT,
                                 ""
                             )
+                            credit_options, recommended_credits = (
+                                build_account_select_options(
+                                    records,
+                                    summary_for_suggestions,
+                                    debit,
+                                    sub_account=r.get(COL_CREDIT_SUB, ""),
+                                    current_account=default_credit
+                                )
+                            )
     
                             credit = st.selectbox(
                                 "貸方",
-                                account_master,
+                                credit_options,
                                 index=(
-                                    account_master.index(default_credit)
-                                    if default_credit in account_master
+                                    credit_options.index(default_credit)
+                                    if (
+                                        default_credit in credit_options
+                                        and not is_excluded_account(
+                                            default_credit
+                                        )
+                                    )
                                     else 0
                                 ),
-                                key=f"c_{doc_id}_{r_idx}"
+                                key=credit_key,
+                                format_func=(
+                                    lambda account,
+                                    recommended=recommended_credits:
+                                    format_recommended_account(
+                                        account,
+                                        recommended
+                                    )
+                                )
                             )
+                            if is_excluded_account(default_credit):
+                                st.caption(
+                                    "元データの科目が資金複合/諸口のため、"
+                                    "選択可能な科目へ変更してください"
+                                )
     
                     # =====================================
                     # 補助

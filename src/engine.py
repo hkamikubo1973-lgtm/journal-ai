@@ -32,6 +32,11 @@ def extract_year(date_str):
 
 DATA_PATH = "data/transactions.csv"
 
+EXCLUDED_SUGGESTION_ACCOUNTS = {
+    "資金複合",
+    "諸口",
+}
+
 # =========================================
 # ストップワード
 # =========================================
@@ -560,6 +565,93 @@ def load_data():
         name_to_code,
         freq
     )
+
+
+def get_account_suggestions(
+    records,
+    summary,
+    opposite_account,
+    sub_account=None,
+    top_n=3
+):
+
+    summary_tokens = tokenize(summary)
+    opposite_account = str(opposite_account or "").strip()
+    sub_account = str(sub_account or "").strip()
+
+    if not opposite_account:
+        return []
+
+    scores = Counter()
+    counts = Counter()
+    first_seen = {}
+
+    for rec in records:
+
+        for row in rec["rows"]:
+
+            debit = str(row.get(COL_DEBIT, "") or "").strip()
+            credit = str(row.get(COL_CREDIT, "") or "").strip()
+
+            if opposite_account == debit:
+                account = credit
+            elif opposite_account == credit:
+                account = debit
+            else:
+                continue
+
+            account = str(account or "").strip()
+
+            if (
+                not account
+                or account == opposite_account
+                or account in EXCLUDED_SUGGESTION_ACCOUNTS
+            ):
+                continue
+
+            text = " ".join([
+                str(row.get("摘要", "") or ""),
+                str(row.get("伝票摘要", "") or "")
+            ])
+            row_tokens = set(tokenize(text))
+
+            score = sum(
+                1
+                for token in summary_tokens
+                if token in row_tokens
+            )
+
+            if (
+                sub_account
+                and sub_account in (
+                    row.get(COL_DEBIT_SUB, ""),
+                    row.get(COL_CREDIT_SUB, "")
+                )
+            ):
+                score += 3
+
+            if score <= 0:
+                continue
+
+            if account not in first_seen:
+                first_seen[account] = len(first_seen)
+
+            scores[account] += score
+            counts[account] += 1
+
+    ordered = sorted(
+        scores,
+        key=lambda account: (
+            -scores[account],
+            -counts[account],
+            first_seen[account]
+        )
+    )
+
+    return [
+        (account, scores[account])
+        for account in ordered[:top_n]
+    ]
 
 
 # =========================================
