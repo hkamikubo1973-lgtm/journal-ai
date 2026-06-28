@@ -19,6 +19,8 @@ from ocr_gateway import OcrResult, PaddleOcrGateway
 from receivable_engine import (
     append_standard_receivables,
     apply_receivable_candidates,
+    build_receivable_journal_rows,
+    calculate_receivable_difference,
     convert_company_billing_excel,
     exclude_duplicate_receivables,
     is_receivable_journal_registered,
@@ -806,6 +808,36 @@ def keep_receivable_customer_open(customer_name):
     st.session_state[
         "open_receivable_customer"
     ] = customer_name
+    st.session_state[
+        "active_receivable_customer"
+    ] = customer_name
+
+def parse_receivable_payment_amount(value):
+
+    if value is None:
+        return None
+
+    normalized = str(value)
+    for old, new in [
+        (",", ""),
+        ("，", ""),
+        ("円", ""),
+        ("￥", ""),
+        ("¥", "")
+    ]:
+        normalized = normalized.replace(old, new)
+
+    normalized = "".join(normalized.split())
+
+    if not normalized or not normalized.isdigit():
+        return None
+
+    amount = int(normalized)
+
+    if amount <= 0:
+        return None
+
+    return amount
 
 account_master = sorted(
     ACCOUNT_MASTER.keys()
@@ -2047,6 +2079,30 @@ elif mode == "未収消込":
 
         if import_format == "標準未収CSV形式":
 
+            st.markdown(
+                "標準未収CSV 必須列：\n\n"
+                "取引先,請求日,請求額,残高,摘要"
+            )
+            st.markdown(
+                "任意列：\n\n"
+                "入金予定日,未収科目,未収補助,部門"
+            )
+            st.markdown("サンプル：")
+            st.code(
+                "取引先,請求日,入金予定日,未収科目,未収補助,部門,摘要,請求額,残高\n"
+                "サンプル運送株式会社,2026-06-30,2026-07-31,未収運賃,"
+                "サンプル運送株式会社,総務課,6月分運賃,50000,50000",
+                language="csv"
+            )
+            st.markdown(
+                "注意：\n"
+                "- サンプルの企業名は架空です\n"
+                "- 日付は YYYY-MM-DD / YYYY/MM/DD / YYYYMMDD に対応\n"
+                "- 金額はカンマなし推奨\n"
+                "- 任意列がない場合は既定値で補完します\n"
+                "- 請求額と残高は必須です"
+            )
+
             uploaded_receivables = st.file_uploader(
                 "未収一覧CSV",
                 type=["csv"],
@@ -2431,6 +2487,12 @@ elif mode == "未収消込":
                     f"{customer_name}の明細",
                     expanded=(
                         st.session_state.get(
+                            "active_receivable_customer"
+                        ) == customer_name
+                        or st.session_state.get(
+                            "active_receivable_customer_idx"
+                        ) == customer_idx
+                        or st.session_state.get(
                             "open_receivable_customer"
                         ) == customer_name
                     )
@@ -2474,21 +2536,30 @@ elif mode == "未収消込":
                         use_container_width=True
                     )
 
+                    payment_amount_key = (
+                        "payment_amount_text_"
+                        f"{customer_idx}_{customer_name}"
+                    )
+                    payment_submission_key = (
+                        f"{customer_idx}_{customer_name}"
+                    )
+                    payment_candidates_key = (
+                        f"payment_candidates_{customer_idx}"
+                    )
+
                     with st.form(
                         key=f"payment_form_{customer_idx}_{customer_name}"
                     ):
+
                         payment_date = st.date_input(
                             "入金日",
                             key=f"payment_date_{customer_idx}"
                         )
 
-                        payment_amount = st.number_input(
+                        payment_amount_text = st.text_input(
                             "入金額",
-                            value=None,
-                            min_value=0,
-                            step=1,
                             placeholder="0",
-                            key=f"payment_amount_{customer_idx}"
+                            key=payment_amount_key
                         )
 
                         receipt_account = st.selectbox(
@@ -2508,8 +2579,6 @@ elif mode == "未収消込":
                         payment_preview_submitted = (
                             st.form_submit_button(
                                 "入金候補を表示",
-                                on_click=keep_receivable_customer_open,
-                                args=(customer_name,),
                                 type="primary"
                             )
                         )
@@ -2520,22 +2589,73 @@ elif mode == "未収消込":
                             "入金科目がない場合は、通常仕訳画面の左サイドバーにある「科目マスター管理」から追加してください。"
                         )
 
-                    if (
-                        payment_preview_submitted
-                        and (
-                            payment_amount is None
-                            or payment_amount <= 0
+                    if payment_preview_submitted:
+                        keep_receivable_customer_open(customer_name)
+                        st.session_state[
+                            "active_receivable_customer_idx"
+                        ] = customer_idx
+                        st.session_state[
+                            "submitted_payment_amount"
+                        ] = st.session_state.get(
+                            payment_amount_key,
+                            payment_amount_text
                         )
+                        st.session_state[
+                            "submitted_payment_account"
+                        ] = receipt_account
+                        st.session_state[
+                            "submitted_payment_date"
+                        ] = payment_date
+                        st.session_state[
+                            "pending_receivable_submission_key"
+                        ] = payment_submission_key
+                        st.rerun()
+
+                    process_payment_submission = (
+                        st.session_state.get(
+                            "pending_receivable_submission_key"
+                        ) == payment_submission_key
+                    )
+                    submitted_payment_amount = st.session_state.get(
+                        "submitted_payment_amount",
+                        st.session_state.get(
+                            payment_amount_key,
+                            payment_amount_text
+                        )
+                    )
+                    submitted_payment_account = st.session_state.get(
+                        "submitted_payment_account",
+                        receipt_account
+                    )
+                    submitted_payment_date = st.session_state.get(
+                        "submitted_payment_date",
+                        payment_date
+                    )
+                    parsed_payment_amount = (
+                        parse_receivable_payment_amount(
+                            submitted_payment_amount
+                        )
+                    )
+
+                    if (
+                        process_payment_submission
+                        and parsed_payment_amount is None
                     ):
                         st.warning("入金額を入力してください")
+                        st.session_state.pop(
+                            "pending_receivable_submission_key",
+                            None
+                        )
 
                     if (
-                        payment_preview_submitted
-                        and payment_amount is not None
-                        and payment_amount > 0
+                        process_payment_submission
+                        and parsed_payment_amount is not None
                     ):
 
-                        st.session_state.receipt_account = receipt_account
+                        st.session_state.receipt_account = (
+                            submitted_payment_account
+                        )
+                        payment_amount = parsed_payment_amount
 
                         fifo_df = detail_df.copy()
 
@@ -2554,23 +2674,41 @@ elif mode == "未収消込":
                             kind="stable"
                         )
 
-                        remaining = payment_amount
-                        candidates = []
+                        target_candidates = []
+                        partial_candidates = []
+                        remaining = int(payment_amount)
 
                         for _, detail in fifo_df.iterrows():
 
+                            target_amount = int(detail["残高"])
+
+                            if target_amount <= 0:
+                                continue
+
+                            target_candidates.append({
+                                "コード": detail["コード"],
+                                "未収ID": detail["未収ID"],
+                                "請求日": detail["請求日"],
+                                "請求額": detail["請求金額"],
+                                "残高": detail["残高"],
+                                "消込予定": target_amount,
+                                "未収科目": detail["未収科目"],
+                                "未収補助": detail["未収補助"],
+                                "部門": detail["部門"]
+                            })
+
                             if remaining <= 0:
-                                break
+                                continue
 
                             scheduled_amount = min(
-                                int(detail["残高"]),
+                                target_amount,
                                 remaining
                             )
 
                             if scheduled_amount <= 0:
                                 continue
 
-                            candidates.append({
+                            partial_candidates.append({
                                 "コード": detail["コード"],
                                 "未収ID": detail["未収ID"],
                                 "請求日": detail["請求日"],
@@ -2584,29 +2722,70 @@ elif mode == "未収消込":
 
                             remaining -= scheduled_amount
 
+                        target_total = sum(
+                            item["消込予定"]
+                            for item in target_candidates
+                        )
+                        difference = calculate_receivable_difference(
+                            int(payment_amount),
+                            target_total
+                        )
+
                         st.session_state[
-                            f"payment_candidates_{customer_idx}"
+                            payment_candidates_key
                         ] = {
-                            "payment_date": payment_date,
-                            "payment_amount": payment_amount,
-                            "receipt_account": receipt_account,
-                            "items": candidates
+                            "payment_date": submitted_payment_date,
+                            "payment_amount": int(payment_amount),
+                            "receipt_account": submitted_payment_account,
+                            "items": (
+                                partial_candidates
+                                if difference < 0
+                                else target_candidates
+                            ),
+                            "target_items": target_candidates,
+                            "partial_items": partial_candidates,
+                            "target_total": target_total,
+                            "difference": difference
                         }
+                        st.session_state.pop(
+                            "pending_receivable_submission_key",
+                            None
+                        )
 
                     candidate_state = st.session_state.get(
-                        f"payment_candidates_{customer_idx}"
+                        payment_candidates_key
                     )
 
                     if candidate_state:
 
                         candidates = candidate_state["items"]
+                        target_candidates = candidate_state.get(
+                            "target_items",
+                            candidates
+                        )
+                        partial_candidates = candidate_state.get(
+                            "partial_items",
+                            candidates
+                        )
+                        target_total = int(
+                            candidate_state.get(
+                                "target_total",
+                                sum(
+                                    item["消込予定"]
+                                    for item in candidates
+                                )
+                            )
+                        )
+                        difference = int(
+                            candidate_state.get("difference", 0)
+                        )
 
-                        if candidates:
+                        if target_candidates:
 
                             st.write("FIFO候補")
 
                             st.dataframe(
-                                pd.DataFrame(candidates).drop(
+                                pd.DataFrame(target_candidates).drop(
                                     columns=["未収ID"],
                                     errors="ignore"
                                 ),
@@ -2614,84 +2793,223 @@ elif mode == "未収消込":
                             )
 
                             st.write(
-                                "合計消込予定:",
-                                sum(
-                                    item["消込予定"]
-                                    for item in candidates
-                                )
+                                "未収対象合計:",
+                                target_total
+                            )
+                            st.write(
+                                "差額:",
+                                difference
                             )
 
-                            st.caption("表示された候補で未収を消し込みます。")
-                            if st.button(
-                                "消込実行",
-                                key=f"payment_execute_{customer_idx}",
-                                type="primary"
+                            def execute_receivable_settlement(
+                                settlement_candidates,
+                                difference_account=None,
+                                difference_side=None
                             ):
 
-                                try:
-
-                                    settlement_id = apply_receivable_candidates(
-                                        candidates,
-                                        candidate_state["payment_date"]
+                                selected_accounts = [
+                                    candidate_state["receipt_account"]
+                                ]
+                                if difference_account:
+                                    selected_accounts.append(
+                                        difference_account
                                     )
 
-                                    journal_groups = {}
+                                missing_account_names = [
+                                    account_name
+                                    for account_name in selected_accounts
+                                    if account_name
+                                    and not get_account_code(account_name)
+                                ]
 
-                                    for item in candidates:
+                                if missing_account_names:
+                                    st.warning(
+                                        "科目コードを補完できないため処理できません: "
+                                        + "、".join(missing_account_names)
+                                    )
+                                    return
 
-                                        group_key = (
-                                            item["未収科目"],
-                                            item["未収補助"],
-                                            item["部門"]
+                                journal_rows = build_receivable_journal_rows(
+                                    settlement_candidates,
+                                    candidate_state["payment_amount"],
+                                    candidate_state["receipt_account"],
+                                    customer_name,
+                                    difference_account,
+                                    difference_side
+                                )
+
+                                settlement_id = apply_receivable_candidates(
+                                    settlement_candidates,
+                                    candidate_state["payment_date"]
+                                )
+
+                                st.session_state[
+                                    "generated_receivable_journal"
+                                ] = {
+                                    "settlement_id": settlement_id,
+                                    "settlement_date": candidate_state[
+                                        "payment_date"
+                                    ],
+                                    "rows": journal_rows
+                                }
+
+                                del st.session_state[
+                                    payment_candidates_key
+                                ]
+
+                                st.session_state[
+                                    "receivable_success"
+                                ] = "消込が完了しました"
+
+                                st.rerun()
+
+                            if difference == 0:
+
+                                st.caption(
+                                    "表示された候補で未収を消し込みます。"
+                                )
+                                if st.button(
+                                    "消込実行",
+                                    key=f"payment_execute_{customer_idx}",
+                                    type="primary"
+                                ):
+
+                                    try:
+                                        execute_receivable_settlement(
+                                            candidates
                                         )
+                                    except Exception as e:
+                                        st.error(str(e))
 
-                                        journal_groups[group_key] = (
-                                            journal_groups.get(
-                                                group_key,
-                                                0
+                            elif difference < 0:
+
+                                shortage_amount = abs(difference)
+                                st.warning(
+                                    "入金不足があります。差額処理を選択してください。"
+                                )
+                                st.write(
+                                    "入金額:",
+                                    candidate_state["payment_amount"]
+                                )
+                                st.write("不足額:", shortage_amount)
+
+                                default_expense_account = (
+                                    "支払手数料"
+                                    if "支払手数料" in account_master
+                                    else account_master[0]
+                                )
+                                shortage_method_key = (
+                                    "shortage_method_"
+                                    f"{customer_idx}"
+                                )
+                                shortage_difference_account_key = (
+                                    "shortage_difference_account_"
+                                    f"{customer_idx}"
+                                )
+                                shortage_method = st.radio(
+                                    "処理方法",
+                                    [
+                                        "部分消込（残額を未収に残す）",
+                                        "差額を科目で処理する"
+                                    ],
+                                    key=shortage_method_key
+                                )
+
+                                shortage_difference_account = None
+                                if shortage_method == "差額を科目で処理する":
+                                    shortage_difference_account = st.selectbox(
+                                        "差額処理科目",
+                                        account_master,
+                                        index=account_master.index(
+                                            default_expense_account
+                                        ),
+                                        key=shortage_difference_account_key
+                                    )
+                                    st.caption(
+                                        "選択した借方科目で不足額を処理します。"
+                                    )
+
+                                if st.button(
+                                    "この内容で処理",
+                                    key=f"shortage_execute_{customer_idx}",
+                                    type="primary"
+                                ):
+                                    try:
+                                        if (
+                                            shortage_method
+                                            == "部分消込（残額を未収に残す）"
+                                        ):
+                                            execute_receivable_settlement(
+                                                partial_candidates
                                             )
-                                            + item["消込予定"]
+                                        else:
+                                            selected_difference_account = (
+                                                st.session_state.get(
+                                                    shortage_difference_account_key,
+                                                    shortage_difference_account
+                                                )
+                                            )
+                                            execute_receivable_settlement(
+                                                target_candidates,
+                                                selected_difference_account,
+                                                "debit"
+                                            )
+                                    except Exception as e:
+                                        st.error(str(e))
+
+                            else:
+
+                                overpaid_amount = difference
+                                st.warning(
+                                    "過入金があります。差額処理を選択してください。"
+                                )
+                                st.write(
+                                    "入金額:",
+                                    candidate_state["payment_amount"]
+                                )
+                                st.write("過入金額:", overpaid_amount)
+
+                                default_suspense_account = (
+                                    "仮受金"
+                                    if "仮受金" in account_master
+                                    else account_master[0]
+                                )
+                                overpaid_difference_account_key = (
+                                    "overpaid_difference_account_"
+                                    f"{customer_idx}"
+                                )
+                                st.write("処理方法:", "差額を科目で処理する")
+                                overpaid_difference_account = st.selectbox(
+                                    "差額処理科目",
+                                    account_master,
+                                    index=account_master.index(
+                                        default_suspense_account
+                                    ),
+                                    key=overpaid_difference_account_key
+                                )
+                                st.caption(
+                                    "選択した貸方科目で過入金額を処理します。"
+                                )
+
+                                if st.button(
+                                    "この内容で処理",
+                                    key=f"overpaid_execute_{customer_idx}",
+                                    type="primary"
+                                ):
+                                    try:
+                                        selected_difference_account = (
+                                            st.session_state.get(
+                                                overpaid_difference_account_key,
+                                                overpaid_difference_account
+                                            )
                                         )
-
-                                    st.session_state[
-                                        "generated_receivable_journal"
-                                    ] = {
-                                        "settlement_id": settlement_id,
-                                        "settlement_date": candidate_state[
-                                            "payment_date"
-                                        ],
-                                        "rows": [
-                                            {
-                                                "借方科目": candidate_state[
-                                                    "receipt_account"
-                                                ],
-                                                "貸方科目": account,
-                                                "貸方補助": sub_account,
-                                                "部門": department,
-                                                "金額": amount,
-                                                "摘要": f"{customer_name}入金"
-                                            }
-                                            for (
-                                                account,
-                                                sub_account,
-                                                department
-                                            ), amount in journal_groups.items()
-                                        ]
-                                    }
-
-                                    del st.session_state[
-                                        f"payment_candidates_{customer_idx}"
-                                    ]
-
-                                    st.session_state[
-                                        "receivable_success"
-                                    ] = "消込が完了しました"
-
-                                    st.rerun()
-
-                                except Exception as e:
-
-                                    st.error(str(e))
+                                        execute_receivable_settlement(
+                                            target_candidates,
+                                            selected_difference_account,
+                                            "credit"
+                                        )
+                                    except Exception as e:
+                                        st.error(str(e))
 
                         else:
 

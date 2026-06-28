@@ -17,6 +17,21 @@ STANDARD_RECEIVABLE_COLUMNS = [
     "残高"
 ]
 
+STANDARD_RECEIVABLE_REQUIRED_COLUMNS = [
+    "取引先",
+    "請求日",
+    "請求額",
+    "残高",
+    "摘要"
+]
+
+STANDARD_RECEIVABLE_OPTIONAL_COLUMNS = [
+    "入金予定日",
+    "未収科目",
+    "未収補助",
+    "部門"
+]
+
 CURRENT_RECEIVABLE_COLUMNS = [
     "コード",
     "未収ID",
@@ -213,7 +228,7 @@ def normalize_standard_receivable_csv(source_df):
 
     missing_columns = [
         column
-        for column in STANDARD_RECEIVABLE_COLUMNS
+        for column in STANDARD_RECEIVABLE_REQUIRED_COLUMNS
         if column not in source_df.columns
     ]
 
@@ -222,6 +237,10 @@ def normalize_standard_receivable_csv(source_df):
             "必須列が不足しています: "
             + "、".join(missing_columns)
         )
+
+    for column in STANDARD_RECEIVABLE_OPTIONAL_COLUMNS:
+        if column not in source_df.columns:
+            source_df[column] = ""
 
     if "コード" in source_df.columns:
         source_codes = (
@@ -268,11 +287,14 @@ def normalize_standard_receivable_csv(source_df):
             )
         )
 
-    normalized_dates = {}
+    for column in ["取引先", "摘要"]:
+        add_error(
+            source_df[column].eq(""),
+            f"{column}は必須です"
+        )
 
-    for column in ["請求日", "入金予定日"]:
+    def parse_standard_date_values(values):
 
-        values = source_df[column]
         parsed_dates = pd.Series(
             pd.NaT,
             index=source_df.index,
@@ -282,11 +304,19 @@ def normalize_standard_receivable_csv(source_df):
         hyphenated = values.str.fullmatch(
             r"\d{4}-\d{2}-\d{2}"
         )
+        slashed = values.str.fullmatch(
+            r"\d{4}/\d{2}/\d{2}"
+        )
         compact = values.str.fullmatch(r"\d{8}")
 
         parsed_dates.loc[hyphenated] = pd.to_datetime(
             values.loc[hyphenated],
             format="%Y-%m-%d",
+            errors="coerce"
+        )
+        parsed_dates.loc[slashed] = pd.to_datetime(
+            values.loc[slashed],
+            format="%Y/%m/%d",
             errors="coerce"
         )
         parsed_dates.loc[compact] = pd.to_datetime(
@@ -295,15 +325,55 @@ def normalize_standard_receivable_csv(source_df):
             errors="coerce"
         )
 
-        invalid_dates = parsed_dates.isna()
-        add_error(
-            invalid_dates,
-            f"{column}を変換できません"
-        )
+        return parsed_dates
 
-        normalized_dates[column] = (
-            parsed_dates.dt.strftime("%Y-%m-%d")
+    normalized_dates = {}
+
+    invoice_dates = parse_standard_date_values(source_df["請求日"])
+
+    add_error(
+        invoice_dates.isna(),
+        "請求日を変換できません"
+    )
+
+    default_due_dates = invoice_dates.apply(
+        lambda value: (
+            pd.NaT
+            if pd.isna(value)
+            else (
+                value.to_period("M") + 1
+            ).to_timestamp(how="end").normalize()
         )
+    )
+    due_dates = parse_standard_date_values(source_df["入金予定日"])
+    empty_due_dates = source_df["入金予定日"].eq("")
+    due_dates.loc[empty_due_dates] = default_due_dates.loc[
+        empty_due_dates
+    ]
+
+    add_error(
+        due_dates.isna(),
+        "入金予定日を変換できません"
+    )
+
+    normalized_dates["請求日"] = invoice_dates.dt.strftime(
+        "%Y-%m-%d"
+    )
+    normalized_dates["入金予定日"] = due_dates.dt.strftime(
+        "%Y-%m-%d"
+    )
+
+    source_df.loc[
+        source_df["未収科目"].eq(""),
+        "未収科目"
+    ] = "未収運賃"
+    source_df.loc[
+        source_df["未収補助"].eq(""),
+        "未収補助"
+    ] = source_df.loc[
+        source_df["未収補助"].eq(""),
+        "取引先"
+    ]
 
     normalized_amounts = {}
 
@@ -1006,6 +1076,154 @@ def apply_receivable_candidates(
     save_receivable_history(history_rows)
 
     return settlement_id
+
+
+def calculate_receivable_difference(payment_amount, target_total):
+
+    return int(payment_amount) - int(target_total)
+
+
+def build_receivable_journal_rows(
+    candidates,
+    payment_amount,
+    receipt_account,
+    customer_name,
+    difference_account=None,
+    difference_side=None
+):
+
+    payment_amount = int(payment_amount)
+    target_total = sum(
+        int(candidate["消込予定"])
+        for candidate in candidates
+    )
+    difference = calculate_receivable_difference(
+        payment_amount,
+        target_total
+    )
+
+    def allocate_candidates(amount, offset=0):
+
+        allocated = []
+        remaining_offset = int(offset)
+        remaining_amount = int(amount)
+
+        for candidate in candidates:
+
+            candidate_amount = int(candidate["消込予定"])
+
+            if remaining_offset >= candidate_amount:
+                remaining_offset -= candidate_amount
+                continue
+
+            available_amount = candidate_amount - remaining_offset
+            remaining_offset = 0
+            allocated_amount = min(available_amount, remaining_amount)
+
+            if allocated_amount > 0:
+                allocated_item = candidate.copy()
+                allocated_item["消込予定"] = allocated_amount
+                allocated.append(allocated_item)
+                remaining_amount -= allocated_amount
+
+            if remaining_amount <= 0:
+                break
+
+        return allocated
+
+    def group_candidates(target_candidates):
+
+        journal_groups = {}
+
+        for item in target_candidates:
+
+            amount = int(item["消込予定"])
+            if amount <= 0:
+                continue
+
+            group_key = (
+                item["未収科目"],
+                item["未収補助"],
+                item["部門"]
+            )
+            journal_groups[group_key] = (
+                journal_groups.get(group_key, 0) + amount
+            )
+
+        return journal_groups
+
+    def build_receivable_rows(target_candidates, debit_account, summary):
+
+        return [
+            {
+                "借方科目": debit_account,
+                "貸方科目": account,
+                "貸方補助": sub_account,
+                "部門": department,
+                "金額": amount,
+                "摘要": summary
+            }
+            for (
+                account,
+                sub_account,
+                department
+            ), amount in group_candidates(target_candidates).items()
+        ]
+
+    if difference == 0:
+        return build_receivable_rows(
+            candidates,
+            receipt_account,
+            f"{customer_name}入金"
+        )
+
+    if not difference_account or not difference_side:
+        raise ValueError("差額処理の科目を選択してください")
+
+    rows = []
+    difference_amount = abs(difference)
+
+    if difference_side == "debit":
+
+        rows.extend(
+            build_receivable_rows(
+                allocate_candidates(payment_amount),
+                receipt_account,
+                f"{customer_name}入金"
+            )
+        )
+        rows.extend(
+            build_receivable_rows(
+                allocate_candidates(
+                    difference_amount,
+                    offset=payment_amount
+                ),
+                difference_account,
+                f"{customer_name}差額処理"
+            )
+        )
+
+    elif difference_side == "credit":
+
+        rows.extend(
+            build_receivable_rows(
+                candidates,
+                receipt_account,
+                f"{customer_name}入金"
+            )
+        )
+        rows.append({
+            "借方科目": receipt_account,
+            "貸方科目": difference_account,
+            "貸方補助": "",
+            "部門": "",
+            "金額": difference_amount,
+            "摘要": f"{customer_name}差額処理"
+        })
+    else:
+        raise ValueError("差額処理区分が不正です")
+
+    return rows
 
 # =========================================
 # 消込履歴
