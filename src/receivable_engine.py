@@ -981,12 +981,15 @@ def update_receivables(receivables_df, matched_result):
 # =========================================
 def apply_receivable_candidates(
     candidates,
-    settlement_date=None
+    settlement_date=None,
+    settlement_id=None
 ):
 
     receivables_df = load_receivables()
     history_rows = []
-    settlement_id = uuid.uuid4().hex
+
+    if settlement_id is None:
+        settlement_id = uuid.uuid4().hex
 
     if settlement_date is None:
         settlement_date = datetime.now()

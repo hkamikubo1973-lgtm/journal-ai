@@ -14,6 +14,9 @@ import platform
 import getpass
 import csv
 import io
+import uuid
+import re
+import unicodedata
 
 from ocr_gateway import OcrResult, PaddleOcrGateway
 from receivable_engine import (
@@ -355,6 +358,7 @@ from engine import (
     search,
     get_department,
     to_int,
+    tokenize,
     get_amount_suggestions,
     get_account_suggestions,
     update_search_csv
@@ -446,6 +450,510 @@ def format_recommended_account(account, recommended_accounts):
         return f"【推奨】{account}"
 
     return account
+
+
+RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED = {
+    "資金複合",
+    "諸口",
+    "普通預金",
+    "当座預金",
+    "現金",
+    "未収運賃",
+    "未収金",
+    "売掛金",
+}
+
+RECEIVABLE_OVERPAID_RECOMMEND_EXCLUDED = {
+    "未払金",
+    "買掛金",
+    "未払費用",
+    "預り金",
+}
+
+
+def is_receivable_difference_recommend_excluded(account):
+
+    account = str(account or "").strip()
+
+    if (
+        account in RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED
+        or is_excluded_account(account)
+    ):
+        return True
+
+    return (
+        "未収" in account
+        or "売掛" in account
+    )
+
+
+def is_receivable_difference_recommendable(
+    account,
+    side,
+    account_categories
+):
+
+    if is_receivable_difference_recommend_excluded(account):
+        return False
+
+    if (
+        side == "credit"
+        and account in RECEIVABLE_OVERPAID_RECOMMEND_EXCLUDED
+    ):
+        return False
+
+    category = account_categories.get(account, "")
+
+    if category:
+        if side == "debit":
+            return category == "費用"
+
+        return category in {"負債", "収益"}
+
+    code = str(ACCOUNT_MASTER.get(account, "")).strip()
+
+    try:
+        code_number = int(code)
+    except Exception:
+        code_number = 0
+
+    if side == "debit":
+        return (
+            400 <= code_number < 600
+            or account in {"支払手数料", "雑費"}
+        )
+
+    return (
+        200 <= code_number < 300
+        or account in {"仮受金", "雑収入"}
+        or account.endswith("収入")
+    )
+
+
+def build_receivable_difference_account_options(
+    records,
+    customer_name,
+    candidates,
+    side,
+    default_account,
+    top_n=5
+):
+
+    allowed_accounts = [
+        account
+        for account in account_master
+        if not is_excluded_account(account)
+    ]
+
+    if not allowed_accounts:
+        return [], set(), ""
+
+    if default_account not in allowed_accounts:
+        default_account = allowed_accounts[0]
+
+    context_text = " ".join(
+        [str(customer_name or "")]
+        + [
+            str(candidate.get(column, "") or "")
+            for candidate in candidates
+            for column in [
+                "未収科目",
+                "未収補助",
+                "部門",
+                "摘要",
+            ]
+        ]
+    )
+    context_tokens = set(tokenize(context_text))
+
+    target_column = COL_DEBIT if side == "debit" else COL_CREDIT
+    account_categories = {
+        row["name"]: row.get("category", "")
+        for row in load_account_master_rows()
+    }
+
+    scores = {}
+    counts = {}
+    first_seen = {}
+
+    for rec in records:
+        for row in rec.get("rows", []):
+            account = str(row.get(target_column, "") or "").strip()
+
+            if (
+                not account
+                or account not in allowed_accounts
+                or is_excluded_account(account)
+                or not is_receivable_difference_recommendable(
+                    account,
+                    side,
+                    account_categories
+                )
+            ):
+                continue
+
+            row_text = " ".join([
+                str(row.get(COL_SUMMARY, "") or ""),
+                str(row.get("伝票摘要", "") or ""),
+                str(row.get(COL_DEBIT_SUB, "") or ""),
+                str(row.get(COL_CREDIT_SUB, "") or ""),
+                str(row.get(COL_DEBIT, "") or ""),
+                str(row.get(COL_CREDIT, "") or ""),
+            ])
+            row_tokens = set(tokenize(row_text))
+            score = len(context_tokens & row_tokens)
+
+            if score <= 0:
+                continue
+
+            if account not in first_seen:
+                first_seen[account] = len(first_seen)
+
+            scores[account] = scores.get(account, 0) + score
+            counts[account] = counts.get(account, 0) + 1
+
+    recommended_accounts = sorted(
+        scores,
+        key=lambda account: (
+            -scores[account],
+            -counts[account],
+            first_seen[account]
+        )
+    )[:top_n]
+
+    if (
+        is_receivable_difference_recommendable(
+            default_account,
+            side,
+            account_categories
+        )
+        and default_account not in recommended_accounts
+    ):
+        recommended_accounts.insert(0, default_account)
+        recommended_accounts = recommended_accounts[:top_n]
+
+    options = recommended_accounts + [
+        account
+        for account in [default_account]
+        if account not in recommended_accounts
+    ] + [
+        account
+        for account in allowed_accounts
+        if (
+            account not in recommended_accounts
+            and account != default_account
+        )
+    ]
+
+    return options, set(recommended_accounts), default_account
+
+
+def format_receivable_date(value):
+
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y%m%d")
+
+    return str(value or "").replace("/", "").replace("-", "")
+
+
+def get_receivable_template_candidates(journal, source_candidates):
+
+    receivable_matches = []
+
+    for candidate in source_candidates:
+        if (
+            journal.get("貸方科目") == candidate.get("未収科目")
+            and journal.get("貸方補助", "") == candidate.get("未収補助", "")
+        ):
+            receivable_matches.append(candidate)
+
+    return receivable_matches or source_candidates
+
+
+def build_empty_epson_template_row():
+
+    return {
+        column: ""
+        for column in EPSON_COLUMNS
+    }
+
+
+def normalize_receivable_template_text(value):
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.lower()
+
+    for pattern in [
+        "株式会社",
+        "有限会社",
+        "(株)",
+        "（株）",
+        "株)",
+        "(有)",
+        "（有）",
+        "㈱",
+        "㈲",
+    ]:
+        text = text.replace(pattern.lower(), "")
+
+    text = re.sub(r"\d+\s*月分?", "", text)
+    text = re.sub(r"[0-9０-９]+号車", "", text)
+    text = re.sub(r"(総務課|経理課|御中|様)$", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[　\s・･.,，．、。()\[\]（）【】\-ー－]", "", text)
+
+    return text
+
+
+def is_receivable_text_close(left, right):
+
+    left = normalize_receivable_template_text(left)
+    right = normalize_receivable_template_text(right)
+
+    if not left or not right:
+        return False
+
+    if left in right or right in left:
+        return True
+
+    min_length = min(len(left), len(right))
+
+    for size in range(min(4, min_length), 1, -1):
+        for index in range(0, len(left) - size + 1):
+            if left[index:index + size] in right:
+                return True
+
+    return False
+
+
+def is_receivable_account_name(account):
+
+    account = str(account or "")
+
+    return (
+        account in {"未収運賃", "未収金", "売掛金"}
+        or "未収" in account
+        or "売掛" in account
+    )
+
+
+def is_cash_account_name(account):
+
+    return str(account or "") in {
+        "普通預金",
+        "当座預金",
+        "現金",
+    }
+
+
+def get_receivable_template_quality(row):
+
+    quality_columns = [
+        "形式",
+        "作成方法",
+        "借方消費税コード",
+        "借方消費税業種",
+        "借方消費税税率",
+        "借方資金区分",
+        "貸方消費税コード",
+        "貸方消費税業種",
+        "貸方消費税税率",
+        "貸方資金区分",
+        "入力アプリ",
+    ]
+
+    return sum(
+        1
+        for column in quality_columns
+        if str(row.get(column, "") or "").strip()
+    )
+
+
+def find_receivable_template_row(journal, source_candidates, customer_name):
+
+    template_candidates = get_receivable_template_candidates(
+        journal,
+        source_candidates
+    )
+
+    if not template_candidates:
+        return build_empty_epson_template_row()
+
+    context_values = (
+        [str(customer_name or ""), str(journal.get("摘要", "") or "")]
+        + [
+            str(candidate.get(column, "") or "")
+            for candidate in template_candidates
+            for column in [
+                "未収科目",
+                "未収補助",
+                "部門",
+                "取引先",
+                "摘要",
+                "請求日",
+                "残高",
+            ]
+        ]
+    )
+    context_text = " ".join(context_values)
+    context_tokens = set(tokenize(context_text))
+
+    receivable_accounts = {
+        str(candidate.get("未収科目", "") or "").strip()
+        for candidate in template_candidates
+        if candidate.get("未収科目")
+    }
+    receivable_subs = {
+        str(candidate.get("未収補助", "") or "").strip()
+        for candidate in template_candidates
+        if candidate.get("未収補助")
+    }
+    departments = {
+        str(candidate.get("部門", "") or "").strip()
+        for candidate in template_candidates
+        if candidate.get("部門")
+    }
+
+    best_row = None
+    best_rank = None
+
+    for rec in records:
+        for row in rec.get("rows", []):
+
+            row_text = " ".join([
+                str(row.get(COL_SUMMARY, "") or ""),
+                str(row.get("伝票摘要", "") or ""),
+                str(row.get(COL_DEBIT, "") or ""),
+                str(row.get(COL_CREDIT, "") or ""),
+                str(row.get(COL_DEBIT_SUB, "") or ""),
+                str(row.get(COL_CREDIT_SUB, "") or ""),
+            ])
+            row_tokens = set(tokenize(row_text))
+            text_score = len(context_tokens & row_tokens)
+
+            if any(
+                is_receivable_text_close(value, row_text)
+                for value in context_values
+            ):
+                text_score += 5
+
+            credit_matches_receivable = (
+                row.get(COL_CREDIT) in receivable_accounts
+            )
+            credit_sub_matches = (
+                bool(receivable_subs)
+                and row.get(COL_CREDIT_SUB) in receivable_subs
+            )
+            debit_is_cash = is_cash_account_name(row.get(COL_DEBIT))
+            credit_is_receivable = is_receivable_account_name(
+                row.get(COL_CREDIT)
+            )
+
+            if (
+                credit_matches_receivable
+                and credit_sub_matches
+                and text_score > 0
+            ):
+                priority = 1
+            elif (
+                credit_matches_receivable
+                and receivable_subs
+                and credit_sub_matches
+            ):
+                priority = 2
+            elif credit_matches_receivable and debit_is_cash:
+                priority = 3
+            elif credit_is_receivable and debit_is_cash:
+                priority = 4
+            else:
+                continue
+
+            department_score = 0
+
+            if (
+                row.get("貸方部門名") in departments
+                or row.get("借方部門名") in departments
+            ):
+                department_score = 1
+
+            quality_score = get_receivable_template_quality(row)
+            rank = (
+                priority,
+                -quality_score,
+                -text_score,
+                -department_score
+            )
+
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_row = row
+
+    if best_row is None:
+        return build_empty_epson_template_row()
+
+    return {
+        column: best_row.get(column, "")
+        for column in EPSON_COLUMNS
+    }
+
+
+def build_receivable_transaction_row(
+    journal,
+    settlement_date,
+    settlement_id,
+    source_candidates,
+    customer_name
+):
+
+    row = find_receivable_template_row(
+        journal,
+        source_candidates,
+        customer_name
+    )
+
+    summary = str(journal.get("摘要", "") or "")
+    debit_account = str(journal.get("借方科目", "") or "")
+    credit_account = str(journal.get("貸方科目", "") or "")
+    debit_sub = str(journal.get("借方補助", "") or "")
+    credit_sub = str(journal.get("貸方補助", "") or "")
+    department = str(journal.get("部門", "") or "")
+    amount = str(journal.get("金額", "") or "")
+    debit_sub_code = SUB_MASTER.get(debit_sub, "") if debit_sub else ""
+    credit_sub_code = SUB_MASTER.get(credit_sub, "") if credit_sub else ""
+
+    row[COL_DATE] = format_receivable_date(settlement_date)
+
+    row["借方部門"] = ""
+    row["借方部門名"] = ""
+    row["借方科目"] = get_account_code(debit_account)
+    row[COL_DEBIT] = debit_account
+    row["借方補助"] = debit_sub_code
+    row[COL_DEBIT_SUB] = debit_sub if debit_sub_code else ""
+
+    row["貸方部門"] = (
+        DEPARTMENT_MASTER.get(department, "")
+        if department
+        else ""
+    )
+    row["貸方部門名"] = department
+    row["貸方科目"] = get_account_code(credit_account)
+    row[COL_CREDIT] = credit_account
+    row["貸方補助"] = credit_sub_code
+    row[COL_CREDIT_SUB] = credit_sub if credit_sub_code else ""
+
+    row[COL_DEBIT_AMOUNT] = amount
+    row[COL_CREDIT_AMOUNT] = amount
+    row[COL_SUMMARY] = summary
+    row["伝票摘要"] = summary
+
+    row["証番号"] = settlement_id
+    row["入力マシン"] = platform.node()
+    row["入力ユーザ"] = getpass.getuser()
+    row["入力アプリ"] = "仕訳検索システム"
+    row["入力会社"] = st.session_state.get("company_name", "")
+    row["入力日付"] = datetime.now().strftime("%Y%m%d")
+
+    return row
 
 # =========================================
 # 伝票合計
@@ -543,75 +1051,57 @@ def build_epson_rows(rows, company_name):
 
     for r in rows:
 
-        row = {}
+        row = {
+            c: r.get(c, "")
+            for c in EPSON_COLUMNS
+        }
 
-        for c in EPSON_COLUMNS:
-            row[c] = ""
+        summary = r.get(COL_SUMMARY, "")
+        debit_sub_name = r.get(COL_DEBIT_SUB, "")
+        credit_sub_name = r.get(COL_CREDIT_SUB, "")
 
         # =====================================
-        # 基本
+        # 画面で編集した項目だけ上書き
         # =====================================
         row["伝票日付"] = r.get(COL_DATE, "")
-        row["摘要"] = r.get(COL_SUMMARY, "")
-        row["伝票摘要"] = r.get(COL_SUMMARY, "")
+        row["摘要"] = summary
+
+        if not row.get("伝票摘要") and summary:
+            row["伝票摘要"] = summary
 
         # =====================================
         # 借方
         # =====================================
-        row["借方部門"] = r.get("借方部門", "")
-        row["借方部門名"] = r.get("借方部門名", "")
-
-        row["借方科目"] = r.get("借方科目", "")
+        row["借方科目"] = get_account_code(
+            r.get(COL_DEBIT, "")
+        ) or r.get("借方科目", "")
         row["借方科目名"] = r.get(COL_DEBIT, "")
 
-        row["借方補助"] = r.get("借方補助", "")
-        row["借方補助科目名"] = r.get(COL_DEBIT_SUB, "")
+        row["借方補助"] = (
+            SUB_MASTER.get(debit_sub_name, r.get("借方補助", ""))
+            if debit_sub_name
+            else ""
+        )
+        row["借方補助科目名"] = debit_sub_name
 
         row["借方金額"] = r.get(COL_DEBIT_AMOUNT, "")
-
-        row["借方消費税コード"] = r.get(
-            "借方消費税コード",
-            ""
-        )
-
-        row["借方消費税業種"] = r.get(
-            "借方消費税業種",
-            ""
-        )
-
-        row["借方消費税税率"] = r.get(
-            "借方消費税税率",
-            ""
-        )
 
         # =====================================
         # 貸方
         # =====================================
-        row["貸方部門"] = r.get("貸方部門", "")
-        row["貸方部門名"] = r.get("貸方部門名", "")
-
-        row["貸方科目"] = r.get("貸方科目", "")
+        row["貸方科目"] = get_account_code(
+            r.get(COL_CREDIT, "")
+        ) or r.get("貸方科目", "")
         row["貸方科目名"] = r.get(COL_CREDIT, "")
 
-        row["貸方補助"] = r.get("貸方補助", "")
-        row["貸方補助科目名"] = r.get(COL_CREDIT_SUB, "")
+        row["貸方補助"] = (
+            SUB_MASTER.get(credit_sub_name, r.get("貸方補助", ""))
+            if credit_sub_name
+            else ""
+        )
+        row["貸方補助科目名"] = credit_sub_name
 
         row["貸方金額"] = r.get(COL_CREDIT_AMOUNT, "")
-
-        row["貸方消費税コード"] = r.get(
-            "貸方消費税コード",
-            ""
-        )
-
-        row["貸方消費税業種"] = r.get(
-            "貸方消費税業種",
-            ""
-        )
-
-        row["貸方消費税税率"] = r.get(
-            "貸方消費税税率",
-            ""
-        )
 
         # =====================================
         # AO～AS
@@ -908,6 +1398,17 @@ department_master = sorted(
 sub_master = sorted(
     SUB_MASTER.keys()
 )
+
+
+def build_sub_options(current_sub):
+
+    options = [""] + sub_master
+
+    if current_sub and current_sub not in options:
+        options.append(current_sub)
+
+    return options
+
 
 # =========================================
 # 科目マスター生成
@@ -1801,13 +2302,14 @@ if mode == "通常仕訳":
                             COL_DEBIT_SUB,
                             ""
                         )
+                        debit_sub_options = build_sub_options(default_ds)
     
                         debit_sub = st.selectbox(
                             "借方補助",
-                            [""] + sub_master,
+                            debit_sub_options,
                             index=(
-                                ([""] + sub_master).index(default_ds)
-                                if default_ds in ([""] + sub_master)
+                                debit_sub_options.index(default_ds)
+                                if default_ds in debit_sub_options
                                 else 0
                             ),
                             key=f"ds_{doc_id}_{r_idx}"
@@ -1819,13 +2321,14 @@ if mode == "通常仕訳":
                             COL_CREDIT_SUB,
                             ""
                         )
+                        credit_sub_options = build_sub_options(default_cs)
     
                         credit_sub = st.selectbox(
                             "貸方補助",
-                            [""] + sub_master,
+                            credit_sub_options,
                             index=(
-                                ([""] + sub_master).index(default_cs)
-                                if default_cs in ([""] + sub_master)
+                                credit_sub_options.index(default_cs)
+                                if default_cs in credit_sub_options
                                 else 0
                             ),
                             key=f"cs_{doc_id}_{r_idx}"
@@ -1903,6 +2406,12 @@ if mode == "通常仕訳":
                         else ""
                     )
     
+                    if (
+                        memo != r.get(COL_SUMMARY, "")
+                        or not new_row.get("伝票摘要")
+                    ):
+                        new_row["伝票摘要"] = memo
+
                     new_row[COL_SUMMARY] = memo
     
                     edited_rows.append(new_row)
@@ -2003,42 +2512,38 @@ if mode == "通常仕訳":
                     col3, col4 = st.columns(2)
     
                     with col3:
+
+                        default_ds = r.get(
+                            COL_DEBIT_SUB,
+                            ""
+                        )
+                        debit_sub_options = build_sub_options(default_ds)
     
                         debit_sub = st.selectbox(
                             "借方補助",
-                            [""] + sub_master,
+                            debit_sub_options,
                             index=(
-                                ([""] + sub_master).index(
-                                    r.get(
-                                        COL_DEBIT_SUB,
-                                        ""
-                                    )
-                                )
-                                if r.get(
-                                    COL_DEBIT_SUB,
-                                    ""
-                                ) in ([""] + sub_master)
+                                debit_sub_options.index(default_ds)
+                                if default_ds in debit_sub_options
                                 else 0
                             ),
                             key=f"conf_ds_{doc_idx}_{row_idx}"
                         )
     
                     with col4:
+
+                        default_cs = r.get(
+                            COL_CREDIT_SUB,
+                            ""
+                        )
+                        credit_sub_options = build_sub_options(default_cs)
     
                         credit_sub = st.selectbox(
                             "貸方補助",
-                            [""] + sub_master,
+                            credit_sub_options,
                             index=(
-                                ([""] + sub_master).index(
-                                    r.get(
-                                        COL_CREDIT_SUB,
-                                        ""
-                                    )
-                                )
-                                if r.get(
-                                    COL_CREDIT_SUB,
-                                    ""
-                                ) in ([""] + sub_master)
+                                credit_sub_options.index(default_cs)
+                                if default_cs in credit_sub_options
                                 else 0
                             ),
                             key=f"conf_cs_{doc_idx}_{row_idx}"
@@ -2069,6 +2574,12 @@ if mode == "通常仕訳":
                     new_row[COL_DEBIT_AMOUNT] = str(amt)
                     new_row[COL_CREDIT_AMOUNT] = str(amt)
     
+                    if (
+                        memo != r.get(COL_SUMMARY, "")
+                        or not new_row.get("伝票摘要")
+                    ):
+                        new_row["伝票摘要"] = memo
+
                     new_row[COL_SUMMARY] = memo
     
                     edited_doc.append(new_row)
@@ -2154,6 +2665,10 @@ if mode == "通常仕訳":
         epson_csv = epson_df.to_csv(
             index=False
         ).encode("cp932")
+        epson_filename = (
+            "epson_output_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        )
 
         if "epson_export_success" in st.session_state:
             st.success(
@@ -2164,7 +2679,7 @@ if mode == "通常仕訳":
         st.download_button(
             "エプソン取込CSVをダウンロード",
             epson_csv,
-            "epson_output.csv",
+            epson_filename,
             type="primary",
             on_click=save_exported_journals,
             args=(epson_rows,)
@@ -2651,8 +3166,17 @@ elif mode == "未収消込":
                         "部門"
                     ]
 
+                    detail_storage_columns = (
+                        ["未収ID"]
+                        + detail_display_columns
+                        + [
+                            column
+                            for column in ["摘要"]
+                            if column in detail_df.columns
+                        ]
+                    )
                     detail_df = detail_df[
-                        ["未収ID"] + detail_display_columns
+                        detail_storage_columns
                     ]
 
                     st.dataframe(
@@ -2818,7 +3342,9 @@ elif mode == "未収消込":
                                 "消込予定": target_amount,
                                 "未収科目": detail["未収科目"],
                                 "未収補助": detail["未収補助"],
-                                "部門": detail["部門"]
+                                "部門": detail["部門"],
+                                "取引先": customer_name,
+                                "摘要": detail.get("摘要", "")
                             })
 
                             if remaining <= 0:
@@ -2841,7 +3367,9 @@ elif mode == "未収消込":
                                 "消込予定": scheduled_amount,
                                 "未収科目": detail["未収科目"],
                                 "未収補助": detail["未収補助"],
-                                "部門": detail["部門"]
+                                "部門": detail["部門"],
+                                "取引先": customer_name,
+                                "摘要": detail.get("摘要", "")
                             })
 
                             remaining -= scheduled_amount
@@ -2962,20 +3490,56 @@ elif mode == "未収消込":
                                     difference_side
                                 )
 
-                                settlement_id = apply_receivable_candidates(
-                                    settlement_candidates,
-                                    candidate_state["payment_date"]
-                                )
+                                settlement_id = uuid.uuid4().hex
 
-                                st.session_state[
-                                    "generated_receivable_journal"
-                                ] = {
+                                generated_receivable_journal = {
                                     "settlement_id": settlement_id,
                                     "settlement_date": candidate_state[
                                         "payment_date"
                                     ],
-                                    "rows": journal_rows
+                                    "rows": journal_rows,
+                                    "source_candidates": copy.deepcopy(
+                                        settlement_candidates
+                                    ),
+                                    "customer_name": customer_name,
+                                    "created_at": datetime.now().strftime(
+                                        "%Y/%m/%d %H:%M"
+                                    )
                                 }
+
+                                if (
+                                    "receivable_generated_journals"
+                                    not in st.session_state
+                                ):
+                                    st.session_state[
+                                        "receivable_generated_journals"
+                                    ] = []
+
+                                st.session_state[
+                                    "receivable_generated_journals"
+                                ].append(generated_receivable_journal)
+
+                                try:
+                                    apply_receivable_candidates(
+                                        settlement_candidates,
+                                        candidate_state["payment_date"],
+                                        settlement_id
+                                    )
+                                except Exception:
+                                    st.session_state[
+                                        "receivable_generated_journals"
+                                    ] = [
+                                        journal
+                                        for journal in st.session_state[
+                                            "receivable_generated_journals"
+                                        ]
+                                        if (
+                                            not isinstance(journal, dict)
+                                            or journal.get("settlement_id")
+                                            != settlement_id
+                                        )
+                                    ]
+                                    raise
 
                                 del st.session_state[
                                     payment_candidates_key
@@ -3022,6 +3586,19 @@ elif mode == "未収消込":
                                     if "支払手数料" in account_master
                                     else account_master[0]
                                 )
+                                (
+                                    shortage_account_options,
+                                    shortage_recommended_accounts,
+                                    default_expense_account
+                                ) = (
+                                    build_receivable_difference_account_options(
+                                        records,
+                                        customer_name,
+                                        target_candidates,
+                                        "debit",
+                                        default_expense_account
+                                    )
+                                )
                                 shortage_method_key = (
                                     "shortage_method_"
                                     f"{customer_idx}"
@@ -3041,13 +3618,31 @@ elif mode == "未収消込":
 
                                 shortage_difference_account = None
                                 if shortage_method == "差額を科目で処理する":
+                                    if (
+                                        st.session_state.get(
+                                            shortage_difference_account_key
+                                        )
+                                        not in shortage_account_options
+                                    ):
+                                        st.session_state[
+                                            shortage_difference_account_key
+                                        ] = default_expense_account
+
                                     shortage_difference_account = st.selectbox(
                                         "差額処理科目",
-                                        account_master,
-                                        index=account_master.index(
+                                        shortage_account_options,
+                                        index=shortage_account_options.index(
                                             default_expense_account
                                         ),
-                                        key=shortage_difference_account_key
+                                        key=shortage_difference_account_key,
+                                        format_func=(
+                                            lambda account,
+                                            recommended=shortage_recommended_accounts:
+                                            format_recommended_account(
+                                                account,
+                                                recommended
+                                            )
+                                        )
                                     )
                                     st.caption(
                                         "選択した借方科目で不足額を処理します。"
@@ -3098,18 +3693,49 @@ elif mode == "未収消込":
                                     if "仮受金" in account_master
                                     else account_master[0]
                                 )
+                                (
+                                    overpaid_account_options,
+                                    overpaid_recommended_accounts,
+                                    default_suspense_account
+                                ) = (
+                                    build_receivable_difference_account_options(
+                                        records,
+                                        customer_name,
+                                        target_candidates,
+                                        "credit",
+                                        default_suspense_account
+                                    )
+                                )
                                 overpaid_difference_account_key = (
                                     "overpaid_difference_account_"
                                     f"{customer_idx}"
                                 )
+                                if (
+                                    st.session_state.get(
+                                        overpaid_difference_account_key
+                                    )
+                                    not in overpaid_account_options
+                                ):
+                                    st.session_state[
+                                        overpaid_difference_account_key
+                                    ] = default_suspense_account
+
                                 st.write("処理方法:", "差額を科目で処理する")
                                 overpaid_difference_account = st.selectbox(
                                     "差額処理科目",
-                                    account_master,
-                                    index=account_master.index(
+                                    overpaid_account_options,
+                                    index=overpaid_account_options.index(
                                         default_suspense_account
                                     ),
-                                    key=overpaid_difference_account_key
+                                    key=overpaid_difference_account_key,
+                                    format_func=(
+                                        lambda account,
+                                        recommended=overpaid_recommended_accounts:
+                                        format_recommended_account(
+                                            account,
+                                            recommended
+                                        )
+                                    )
                                 )
                                 st.caption(
                                     "選択した貸方科目で過入金額を処理します。"
@@ -3163,164 +3789,208 @@ elif mode == "未収消込":
 
     with st.expander("生成仕訳"):
 
-        generated_journal = st.session_state.get(
-            "generated_receivable_journal"
+        if "receivable_generated_journals" not in st.session_state:
+            st.session_state["receivable_generated_journals"] = []
+
+        legacy_generated_journal = st.session_state.pop(
+            "generated_receivable_journal",
+            None
         )
 
-        if generated_journal is None:
+        if legacy_generated_journal:
+            existing_ids = {
+                journal.get("settlement_id")
+                for journal in st.session_state[
+                    "receivable_generated_journals"
+                ]
+                if isinstance(journal, dict)
+            }
+
+            if (
+                isinstance(legacy_generated_journal, dict)
+                and legacy_generated_journal.get("settlement_id")
+                not in existing_ids
+            ):
+                st.session_state[
+                    "receivable_generated_journals"
+                ].append(legacy_generated_journal)
+
+        generated_journals = st.session_state[
+            "receivable_generated_journals"
+        ]
+
+        if not generated_journals:
 
             st.info("生成された仕訳はありません")
 
         else:
 
-            if (
-                isinstance(generated_journal, dict)
-                and "rows" in generated_journal
+            has_unregistered_journal = False
+
+            for journal_idx, generated_journal in enumerate(
+                list(generated_journals)
             ):
-                journal_rows = generated_journal["rows"]
-                settlement_id = generated_journal[
-                    "settlement_id"
-                ]
-                settlement_date = generated_journal[
+
+                if not isinstance(generated_journal, dict):
+                    continue
+
+                journal_rows = generated_journal.get("rows", [])
+                settlement_id = generated_journal.get("settlement_id")
+                settlement_date = generated_journal.get(
                     "settlement_date"
-                ]
-            else:
-                journal_rows = generated_journal
-                settlement_id = None
-                settlement_date = None
+                )
+                source_candidates = generated_journal.get(
+                    "source_candidates",
+                    []
+                )
+                journal_customer_name = generated_journal.get(
+                    "customer_name",
+                    ""
+                )
+                created_at = generated_journal.get("created_at", "")
 
                 if isinstance(journal_rows, dict):
                     journal_rows = [journal_rows]
 
-            st.dataframe(
-                pd.DataFrame(journal_rows),
-                use_container_width=True
-            )
+                journal_registered = False
 
-            missing_account_names = sorted({
-                account_name
-                for journal in journal_rows
-                for account_name in (
-                    journal["借方科目"],
-                    journal["貸方科目"]
-                )
-                if account_name
-                and not get_account_code(account_name)
-            })
-
-            if missing_account_names:
-                st.warning(
-                    "科目コードを補完できない科目があります: "
-                    + "、".join(missing_account_names)
-                    + "。account_master.csvを確認してください。"
-                )
-
-            journal_registered = (
-                settlement_id is not None
-                and is_receivable_journal_registered(settlement_id)
-            )
-
-            if settlement_id is None:
-
-                st.info(
-                    "この仕訳候補には消込IDがありません"
-                )
-
-            elif journal_registered:
-
-                st.success("仕訳登録済みです")
-
-            else:
-                st.caption("生成した仕訳をCSV出力対象へ追加します。")
-
-            if (
-                settlement_id is not None
-                and not journal_registered
-                and st.button(
-                    "この仕訳をCSV出力対象へ登録",
-                    key=f"register_receivable_{settlement_id}",
-                    type="primary"
-                )
-            ):
-
-                try:
-
-                    transaction_rows = []
-
-                    for journal in journal_rows:
-
-                        row = {
-                            column: ""
-                            for column in EPSON_COLUMNS
-                        }
-
-                        row[COL_DATE] = (
-                            settlement_date.strftime("%Y%m%d")
-                            if hasattr(settlement_date, "strftime")
-                            else str(settlement_date)
-                            .replace("/", "")
-                            .replace("-", "")
+                if settlement_id is not None:
+                    try:
+                        journal_registered = (
+                            is_receivable_journal_registered(
+                                settlement_id
+                            )
                         )
+                    except Exception:
+                        journal_registered = False
 
-                        row["借方科目"] = get_account_code(
-                            journal["借方科目"]
+                if journal_registered:
+                    st.session_state[
+                        "receivable_generated_journals"
+                    ] = [
+                        journal
+                        for journal in st.session_state[
+                            "receivable_generated_journals"
+                        ]
+                        if (
+                            not isinstance(journal, dict)
+                            or journal.get("settlement_id")
+                            != settlement_id
                         )
-                        row[COL_DEBIT] = journal["借方科目"]
+                    ]
+                    continue
 
-                        row["貸方科目"] = get_account_code(
+                has_unregistered_journal = True
+                expander_label = (
+                    f"{journal_customer_name or '未収消込'}"
+                    f" / {settlement_id or 'IDなし'}"
+                )
+
+                if created_at:
+                    expander_label = f"{created_at} / {expander_label}"
+
+                with st.expander(expander_label):
+
+                    st.dataframe(
+                        pd.DataFrame(journal_rows),
+                        use_container_width=True
+                    )
+
+                    missing_account_names = sorted({
+                        account_name
+                        for journal in journal_rows
+                        for account_name in (
+                            journal["借方科目"],
                             journal["貸方科目"]
                         )
-                        row[COL_CREDIT] = journal["貸方科目"]
+                        if account_name
+                        and not get_account_code(account_name)
+                    })
 
-                        row["貸方補助"] = SUB_MASTER.get(
-                            journal["貸方補助"],
-                            ""
-                        )
-                        row[COL_CREDIT_SUB] = journal["貸方補助"]
-
-                        row["貸方部門"] = DEPARTMENT_MASTER.get(
-                            journal["部門"],
-                            ""
-                        )
-                        row["貸方部門名"] = journal["部門"]
-
-                        row[COL_DEBIT_AMOUNT] = str(journal["金額"])
-                        row[COL_CREDIT_AMOUNT] = str(journal["金額"])
-                        row[COL_SUMMARY] = journal["摘要"]
-
-                        row["証番号"] = settlement_id
-                        row["入力マシン"] = platform.node()
-                        row["入力ユーザ"] = getpass.getuser()
-                        row["入力アプリ"] = "未収消込"
-                        row["入力会社"] = st.session_state.get(
-                            "company_name",
-                            ""
-                        )
-                        row["入力日付"] = datetime.now().strftime(
-                            "%Y%m%d"
+                    if missing_account_names:
+                        st.warning(
+                            "科目コードを補完できない科目があります: "
+                            + "、".join(missing_account_names)
+                            + "。account_master.csvを確認してください。"
                         )
 
-                        transaction_rows.append(row)
+                    if settlement_id is None:
 
-                    mark_receivable_journal_registered(
-                        settlement_id
-                    )
+                        st.info(
+                            "この仕訳候補には消込IDがありません"
+                        )
 
-                    if "confirmed" not in st.session_state:
-                        st.session_state.confirmed = []
+                    else:
+                        st.caption(
+                            "生成した仕訳をCSV出力対象へ追加します。"
+                        )
 
-                    st.session_state.confirmed.append(
-                        copy.deepcopy(transaction_rows)
-                    )
+                    if (
+                        settlement_id is not None
+                        and st.button(
+                            "この仕訳をCSV出力対象へ登録",
+                            key=(
+                                "register_receivable_"
+                                f"{settlement_id}_{journal_idx}"
+                            ),
+                            type="primary"
+                        )
+                    ):
 
-                    st.session_state[
-                        "receivable_success"
-                    ] = "仕訳を登録し、CSV出力対象に追加しました"
+                        try:
 
-                    st.cache_data.clear()
-                    st.rerun()
+                            transaction_rows = []
 
-                except Exception as e:
+                            for journal in journal_rows:
 
-                    st.error(str(e))
+                                row = build_receivable_transaction_row(
+                                    journal,
+                                    settlement_date,
+                                    settlement_id,
+                                    source_candidates,
+                                    journal_customer_name
+                                )
+
+                                transaction_rows.append(row)
+
+                            if "confirmed" not in st.session_state:
+                                st.session_state.confirmed = []
+
+                            st.session_state.confirmed.append(
+                                copy.deepcopy(transaction_rows)
+                            )
+
+                            mark_receivable_journal_registered(
+                                settlement_id
+                            )
+
+                            st.session_state[
+                                "receivable_generated_journals"
+                            ] = [
+                                journal
+                                for journal in st.session_state[
+                                    "receivable_generated_journals"
+                                ]
+                                if (
+                                    not isinstance(journal, dict)
+                                    or journal.get("settlement_id")
+                                    != settlement_id
+                                )
+                            ]
+
+                            st.session_state[
+                                "receivable_success"
+                            ] = (
+                                "仕訳を登録し、CSV出力対象に追加しました"
+                            )
+
+                            st.cache_data.clear()
+                            st.rerun()
+
+                        except Exception as e:
+
+                            st.error(str(e))
+
+            if not has_unregistered_journal:
+                st.info("未登録の生成仕訳はありません")
 
