@@ -19,6 +19,10 @@ import re
 import unicodedata
 
 from ocr_gateway import OcrResult, PaddleOcrGateway
+from ai_search.ai_search import (
+    build_ai_search_context,
+    run_ai_search,
+)
 from receivable_engine import (
     append_standard_receivables,
     apply_receivable_candidates,
@@ -1144,6 +1148,46 @@ def build_input_csv_rows(confirmed_journals):
 
     return rows
 
+
+def build_ai_search_candidates(results):
+
+    candidates = []
+    score_details = []
+
+    for index, result in enumerate(results or [], start=1):
+        if len(result) != 3:
+            continue
+
+        score, rec, score_detail = result
+
+        if not isinstance(rec, dict):
+            continue
+
+        rows = rec.get("rows", [])
+        if not rows:
+            continue
+
+        first_row = rows[0]
+        candidate = {
+            "rank": index,
+            "score": score,
+            "date": first_row.get(COL_DATE, ""),
+            "summary": first_row.get(COL_SUMMARY, ""),
+            "debit": first_row.get(COL_DEBIT, ""),
+            "credit": first_row.get(COL_CREDIT, ""),
+            "row_count": len(rows),
+            "amount": get_voucher_total(rows),
+        }
+        candidates.append(candidate)
+
+        if score_detail:
+            score_details.append({
+                "rank": index,
+                "detail": list(score_detail),
+            })
+
+    return candidates, score_details
+
 # =========================================
 # エプソンCSV変換
 # =========================================
@@ -2196,11 +2240,52 @@ if mode == "通常仕訳":
     
     if not results:
     
-        st.info("検索してください")
+        st.info("検索結果がありません")
     
     else:
     
         st.success(f"{len(results)}件ヒット")
+
+        with st.expander("AIサーチ（補足説明）", expanded=False):
+            st.caption(
+                "検索結果をもとに、候補選択の理由や注意点を整理します。"
+                "仕訳の決定や検索順位の変更は行いません。"
+            )
+
+            if st.button(
+                "AIサーチで説明を表示",
+                key="run_ai_search_explanation"
+            ):
+                ai_candidates, ai_score_detail = build_ai_search_candidates(
+                    results
+                )
+                context = build_ai_search_context(
+                    keyword=st.session_state.get("keyword_input", ""),
+                    amount=amount,
+                    department=dept,
+                    candidates=ai_candidates,
+                    score_detail=ai_score_detail,
+                    ocr_text=(
+                        getattr(ocr_result, "raw_text", "")
+                        if ocr_result is not None
+                        else ""
+                    ),
+                )
+                ai_result = run_ai_search(context)
+
+                st.info(ai_result.get("summary", ""))
+
+                reasons = ai_result.get("reason", [])
+                if reasons:
+                    st.markdown("**理由**")
+                    for reason in reasons:
+                        st.write(f"- {reason}")
+
+                warnings = ai_result.get("warning", [])
+                if warnings:
+                    st.markdown("**注意点**")
+                    for warning in warnings:
+                        st.warning(warning)
     
         for idx, (score, rec, score_detail) in enumerate(results, 1):
     
