@@ -755,14 +755,24 @@ def get_receivable_template_quality(row):
     quality_columns = [
         "形式",
         "作成方法",
+        "借方部門",
+        "借方部門名",
         "借方消費税コード",
         "借方消費税業種",
         "借方消費税税率",
         "借方資金区分",
+        "借方補助",
+        "借方補助科目名",
+        "貸方部門",
+        "貸方部門名",
         "貸方消費税コード",
         "貸方消費税業種",
         "貸方消費税税率",
         "貸方資金区分",
+        "貸方補助",
+        "貸方補助科目名",
+        "伝票摘要",
+        COL_SUMMARY,
         "入力アプリ",
     ]
 
@@ -815,21 +825,97 @@ def is_receivable_summary_template_match(journal_summary, row):
     return bool(journal_tokens & row_tokens)
 
 
-def find_receivable_template_row(journal, source_candidates, customer_name):
+def is_receivable_template_text_match(search_terms, row):
 
-    del source_candidates, customer_name
+    row_text = " ".join([
+        str(row.get(COL_SUMMARY, "") or ""),
+        str(row.get("伝票摘要", "") or ""),
+        str(row.get(COL_DEBIT_SUB, "") or ""),
+        str(row.get(COL_CREDIT_SUB, "") or ""),
+    ])
+    row_tokens = set(tokenize(row_text))
+
+    for term in search_terms:
+        term = str(term or "").strip()
+
+        if not term:
+            continue
+
+        if is_receivable_text_close(term, row_text):
+            return True
+
+        term_tokens = set(tokenize(term))
+        if term_tokens & row_tokens:
+            return True
+
+    return False
+
+
+def find_receivable_template_match(
+    journal,
+    customer_name="",
+    source_candidates=None
+):
 
     debit_account = str(journal.get("借方科目", "") or "").strip()
     credit_account = str(journal.get("貸方科目", "") or "").strip()
     debit_sub = str(journal.get("借方補助", "") or "").strip()
     credit_sub = str(journal.get("貸方補助", "") or "").strip()
     summary = str(journal.get("摘要", "") or "").strip()
+    source_candidates = source_candidates or []
+    search_terms = [
+        customer_name,
+        summary,
+    ]
+
+    for candidate in source_candidates:
+        if not isinstance(candidate, dict):
+            continue
+
+        for column in ["取引先", "得意先名", "摘要", "未収補助"]:
+            value = str(candidate.get(column, "") or "").strip()
+            if value:
+                search_terms.append(value)
+
+    diagnostic = {
+        "DB雛形": "なし",
+        "理由": "",
+        "採用理由": "",
+        "借方科目": debit_account,
+        "貸方科目": credit_account,
+        "借方補助": debit_sub,
+        "貸方補助": credit_sub,
+        "取引先": str(customer_name or "").strip(),
+        "摘要": summary,
+        "科目一致": 0,
+        "借方補助一致": 0,
+        "貸方補助一致": 0,
+        "補助一致": "なし",
+        "摘要一致": 0,
+        "摘要一致有無": "なし",
+        "候補数": 0,
+        "採用スコア": 0,
+        "雛形日付": "",
+        "雛形摘要": "",
+        "雛形伝票摘要": "",
+        "雛形形式": "",
+        "雛形借方部門": "",
+        "雛形貸方部門": "",
+        "雛形借方税コード": "",
+        "雛形貸方税コード": "",
+        "雛形品質": 0,
+    }
 
     if not debit_account or not credit_account:
-        return build_empty_epson_template_row()
+        diagnostic["理由"] = "生成仕訳の借方科目または貸方科目が空欄です"
+        return None, diagnostic
 
     best_row = None
     best_rank = None
+    best_score = 0
+    best_debit_sub_matches = False
+    best_credit_sub_matches = False
+    best_text_matches = False
 
     for rec in records:
         for row in rec.get("rows", []):
@@ -842,30 +928,110 @@ def find_receivable_template_row(journal, source_candidates, customer_name):
             ):
                 continue
 
-            if not is_receivable_sub_template_match(
-                debit_sub,
-                row.get(COL_DEBIT_SUB, "")
-            ):
+            diagnostic["科目一致"] += 1
+
+            debit_sub_matches = (
+                bool(debit_sub)
+                and is_receivable_sub_template_match(
+                    debit_sub,
+                    row.get(COL_DEBIT_SUB, "")
+                )
+            )
+
+            if debit_sub_matches:
+                diagnostic["借方補助一致"] += 1
+
+            credit_sub_matches = (
+                bool(credit_sub)
+                and is_receivable_sub_template_match(
+                    credit_sub,
+                    row.get(COL_CREDIT_SUB, "")
+                )
+            )
+
+            if credit_sub_matches:
+                diagnostic["貸方補助一致"] += 1
+
+            text_matches = is_receivable_template_text_match(
+                search_terms,
+                row
+            )
+
+            if not text_matches:
                 continue
 
-            if not is_receivable_sub_template_match(
-                credit_sub,
-                row.get(COL_CREDIT_SUB, "")
-            ):
-                continue
-
-            if not is_receivable_summary_template_match(summary, row):
-                continue
-
+            diagnostic["摘要一致"] += 1
+            diagnostic["候補数"] += 1
             quality_score = get_receivable_template_quality(row)
+            score = (
+                quality_score * 10
+                + (30 if text_matches else 0)
+                + (10 if debit_sub_matches else 0)
+                + (10 if credit_sub_matches else 0)
+            )
             rank = (
-                -parse_receivable_template_date(row).toordinal(),
                 -quality_score,
+                -score,
+                -parse_receivable_template_date(row).toordinal(),
             )
 
             if best_rank is None or rank < best_rank:
                 best_rank = rank
                 best_row = row
+                best_score = score
+                best_debit_sub_matches = debit_sub_matches
+                best_credit_sub_matches = credit_sub_matches
+                best_text_matches = text_matches
+
+    if best_row is None:
+        if diagnostic["科目一致"] == 0:
+            reason = "同じ借方科目・貸方科目の過去仕訳がありません"
+        else:
+            reason = "科目一致したが摘要/補助に取引先名がなく不採用"
+
+        diagnostic["理由"] = reason
+        return None, diagnostic
+
+    diagnostic["DB雛形"] = "あり"
+    diagnostic["理由"] = "生成仕訳に近い過去仕訳をDB雛形として参照します"
+    diagnostic["摘要一致有無"] = "あり" if best_text_matches else "なし"
+    diagnostic["補助一致"] = (
+        "借方・貸方"
+        if best_debit_sub_matches and best_credit_sub_matches
+        else "借方"
+        if best_debit_sub_matches
+        else "貸方"
+        if best_credit_sub_matches
+        else "なし"
+    )
+    diagnostic["採用スコア"] = best_score
+    diagnostic["雛形日付"] = best_row.get(COL_DATE, "")
+    diagnostic["雛形摘要"] = best_row.get(COL_SUMMARY, "")
+    diagnostic["雛形伝票摘要"] = best_row.get("伝票摘要", "")
+    diagnostic["雛形形式"] = best_row.get("形式", "")
+    diagnostic["雛形借方部門"] = best_row.get("借方部門名", "")
+    diagnostic["雛形貸方部門"] = best_row.get("貸方部門名", "")
+    diagnostic["雛形借方税コード"] = best_row.get("借方消費税コード", "")
+    diagnostic["雛形貸方税コード"] = best_row.get("貸方消費税コード", "")
+    diagnostic["雛形品質"] = get_receivable_template_quality(best_row)
+    if diagnostic["補助一致"] == "なし":
+        diagnostic["採用理由"] = "補助不一致だが摘要一致で雛形採用"
+    else:
+        diagnostic["採用理由"] = "科目一致・摘要一致で雛形採用"
+
+    if diagnostic["雛形品質"] == 0:
+        diagnostic["採用理由"] += "（候補はあったが雛形品質が低い）"
+
+    return best_row, diagnostic
+
+
+def find_receivable_template_row(journal, source_candidates, customer_name):
+
+    best_row, _ = find_receivable_template_match(
+        journal,
+        customer_name,
+        source_candidates
+    )
 
     if best_row is None:
         return build_empty_epson_template_row()
@@ -4132,6 +4298,23 @@ elif mode == "未収消込":
 
                     st.dataframe(
                         pd.DataFrame(journal_rows),
+                        use_container_width=True
+                    )
+
+                    template_diagnostics = [
+                        find_receivable_template_match(
+                            journal,
+                            journal_customer_name,
+                            source_candidates
+                        )[1]
+                        for journal in journal_rows
+                    ]
+
+                    st.caption(
+                        "DB雛形検索の確認です。表示のみで、CSV出力値や消込処理は変更しません。"
+                    )
+                    st.dataframe(
+                        pd.DataFrame(template_diagnostics),
                         use_container_width=True
                     )
 
