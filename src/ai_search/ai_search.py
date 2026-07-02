@@ -1,3 +1,7 @@
+from ai_client import generate_ai_search_explanation
+from ai_search.prompt_builder import build_ai_search_prompt
+
+
 def build_ai_search_context(
     keyword="",
     amount=None,
@@ -21,18 +25,7 @@ def build_ai_search_context(
     }
 
 
-def run_ai_search(context):
-    """
-    AIサーチを実行する。
-    Phase 0〜1ではAIサーバー未接続のため、ダミー説明を返す。
-    将来ここをAIクライアント呼び出しに差し替える。
-    """
-
-    # TODO:
-    # Phase 2 でAIサーバーへ接続する。
-    # 通常時は4B、例外時のみ7Bを使う。
-    # ただしAI結果は画面表示専用で、仕訳・検索順位・CSVには反映しない。
-
+def build_fallback_ai_search_result():
     return {
         "summary": (
             "AIサーチ準備中です。現在は検索結果を変更せず、"
@@ -46,3 +39,27 @@ def run_ai_search(context):
             "候補の選択と登録は必ず人間が確認してください。",
         ],
     }
+
+
+def run_ai_search(context):
+    """
+    AIサーチを実行する。
+    Phase 2ではAIサーバー接続口を通し、失敗時はダミー説明を返す。
+    """
+
+    # TODO:
+    # Phase 2 でAIサーバーへ接続する。
+    # 通常時は4B、例外時のみ7Bを使う。
+    # ただしAI結果は画面表示専用で、仕訳・検索順位・CSVには反映しない。
+    try:
+        prompt = build_ai_search_prompt(context or {})
+        ai_result = generate_ai_search_explanation(
+            prompt,
+            model_role="normal"
+        )
+        if ai_result:
+            return ai_result
+    except Exception:
+        pass
+
+    return build_fallback_ai_search_result()
