@@ -1728,12 +1728,10 @@ if mode == "通常仕訳":
     # -----------------------------------------
     st.sidebar.header("🏢 システム設定")
     
-    company_name = st.sidebar.text_input(
+    st.sidebar.text_input(
         "入力会社",
-        value=st.session_state.company_name
+        key="company_name"
     )
-    
-    st.session_state.company_name = company_name
 
     if "account_candidate_success" in st.session_state:
         for message in st.session_state.pop(
@@ -2768,9 +2766,18 @@ if mode == "通常仕訳":
         # =====================================
         # エプソンCSV
         # =====================================
+        epson_company_name = str(
+            st.session_state.get("company_name", "")
+        ).strip()
+
+        if not epson_company_name:
+            st.warning(
+                "入力会社が空欄です。エプソン取込CSVの入力会社列も空欄になります。"
+            )
+
         epson_rows = build_epson_rows(
             all_rows,
-            st.session_state.company_name
+            epson_company_name
         )
     
         epson_df = pd.DataFrame(
