@@ -769,50 +769,60 @@ def get_receivable_template_quality(row):
     )
 
 
+def parse_receivable_template_date(row):
+
+    value = str(row.get(COL_DATE, "") or "").strip()
+
+    for date_format in ("%Y%m%d", "%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, date_format)
+        except ValueError:
+            continue
+
+    return datetime.min
+
+
+def is_receivable_sub_template_match(journal_sub, row_sub):
+
+    journal_sub = str(journal_sub or "").strip()
+    row_sub = str(row_sub or "").strip()
+
+    return journal_sub == row_sub
+
+
+def is_receivable_summary_template_match(journal_summary, row):
+
+    journal_summary = str(journal_summary or "").strip()
+
+    if not journal_summary:
+        return True
+
+    row_text = " ".join([
+        str(row.get(COL_SUMMARY, "") or ""),
+        str(row.get("伝票摘要", "") or ""),
+    ])
+
+    if is_receivable_text_close(journal_summary, row_text):
+        return True
+
+    journal_tokens = set(tokenize(journal_summary))
+    row_tokens = set(tokenize(row_text))
+
+    return bool(journal_tokens & row_tokens)
+
+
 def find_receivable_template_row(journal, source_candidates, customer_name):
 
-    template_candidates = get_receivable_template_candidates(
-        journal,
-        source_candidates
-    )
+    del source_candidates, customer_name
 
-    if not template_candidates:
+    debit_account = str(journal.get("借方科目", "") or "").strip()
+    credit_account = str(journal.get("貸方科目", "") or "").strip()
+    debit_sub = str(journal.get("借方補助", "") or "").strip()
+    credit_sub = str(journal.get("貸方補助", "") or "").strip()
+    summary = str(journal.get("摘要", "") or "").strip()
+
+    if not debit_account or not credit_account:
         return build_empty_epson_template_row()
-
-    context_values = (
-        [str(customer_name or ""), str(journal.get("摘要", "") or "")]
-        + [
-            str(candidate.get(column, "") or "")
-            for candidate in template_candidates
-            for column in [
-                "未収科目",
-                "未収補助",
-                "部門",
-                "取引先",
-                "摘要",
-                "請求日",
-                "残高",
-            ]
-        ]
-    )
-    context_text = " ".join(context_values)
-    context_tokens = set(tokenize(context_text))
-
-    receivable_accounts = {
-        str(candidate.get("未収科目", "") or "").strip()
-        for candidate in template_candidates
-        if candidate.get("未収科目")
-    }
-    receivable_subs = {
-        str(candidate.get("未収補助", "") or "").strip()
-        for candidate in template_candidates
-        if candidate.get("未収補助")
-    }
-    departments = {
-        str(candidate.get("部門", "") or "").strip()
-        for candidate in template_candidates
-        if candidate.get("部門")
-    }
 
     best_row = None
     best_rank = None
@@ -820,68 +830,33 @@ def find_receivable_template_row(journal, source_candidates, customer_name):
     for rec in records:
         for row in rec.get("rows", []):
 
-            row_text = " ".join([
-                str(row.get(COL_SUMMARY, "") or ""),
-                str(row.get("伝票摘要", "") or ""),
-                str(row.get(COL_DEBIT, "") or ""),
-                str(row.get(COL_CREDIT, "") or ""),
-                str(row.get(COL_DEBIT_SUB, "") or ""),
-                str(row.get(COL_CREDIT_SUB, "") or ""),
-            ])
-            row_tokens = set(tokenize(row_text))
-            text_score = len(context_tokens & row_tokens)
-
-            if any(
-                is_receivable_text_close(value, row_text)
-                for value in context_values
-            ):
-                text_score += 5
-
-            credit_matches_receivable = (
-                row.get(COL_CREDIT) in receivable_accounts
-            )
-            credit_sub_matches = (
-                bool(receivable_subs)
-                and row.get(COL_CREDIT_SUB) in receivable_subs
-            )
-            debit_is_cash = is_cash_account_name(row.get(COL_DEBIT))
-            credit_is_receivable = is_receivable_account_name(
-                row.get(COL_CREDIT)
-            )
-
             if (
-                credit_matches_receivable
-                and credit_sub_matches
-                and text_score > 0
+                str(row.get(COL_DEBIT, "") or "").strip()
+                != debit_account
+                or str(row.get(COL_CREDIT, "") or "").strip()
+                != credit_account
             ):
-                priority = 1
-            elif (
-                credit_matches_receivable
-                and receivable_subs
-                and credit_sub_matches
-            ):
-                priority = 2
-            elif credit_matches_receivable and debit_is_cash:
-                priority = 3
-            elif credit_is_receivable and debit_is_cash:
-                priority = 4
-            else:
                 continue
 
-            department_score = 0
-
-            if (
-                row.get("貸方部門名") in departments
-                or row.get("借方部門名") in departments
+            if not is_receivable_sub_template_match(
+                debit_sub,
+                row.get(COL_DEBIT_SUB, "")
             ):
-                department_score = 1
+                continue
+
+            if not is_receivable_sub_template_match(
+                credit_sub,
+                row.get(COL_CREDIT_SUB, "")
+            ):
+                continue
+
+            if not is_receivable_summary_template_match(summary, row):
+                continue
 
             quality_score = get_receivable_template_quality(row)
             rank = (
-                priority,
+                -parse_receivable_template_date(row).toordinal(),
                 -quality_score,
-                -text_score,
-                -department_score
             )
 
             if best_rank is None or rank < best_rank:
@@ -944,7 +919,6 @@ def build_receivable_transaction_row(
     row[COL_DEBIT_AMOUNT] = amount
     row[COL_CREDIT_AMOUNT] = amount
     row[COL_SUMMARY] = summary
-    row["伝票摘要"] = summary
 
     row["証番号"] = settlement_id
     row["入力マシン"] = platform.node()
@@ -1035,6 +1009,141 @@ def split_journal(rows):
 
     return rows
 
+
+INPUT_CSV_COLUMNS = [
+    "No",
+    "伝票日付",
+    "借方科目",
+    "借方補助",
+    "借方金額",
+    "貸方科目",
+    "貸方補助",
+    "貸方金額",
+    "摘要",
+    "伝票摘要",
+    "区分",
+    "注意",
+]
+
+
+def iter_confirmed_journal_rows(confirmed_journals):
+
+    for item in confirmed_journals:
+        if isinstance(item, dict):
+            yield item
+        elif isinstance(item, list):
+            for row in item:
+                if isinstance(row, dict):
+                    yield row
+
+
+def build_input_csv_rows(confirmed_journals):
+    """
+    登録済仕訳から、手入力・確認用の簡易CSV行を作成する。
+    エプソン45列取込CSVとは別物。
+    """
+
+    rows = []
+
+    def first_value(journal, *keys):
+
+        for key in keys:
+            value = journal.get(key, "")
+            if value not in (None, ""):
+                return value
+
+        return ""
+
+    for idx, journal in enumerate(
+        iter_confirmed_journal_rows(confirmed_journals),
+        start=1
+    ):
+
+        debit_account = first_value(
+            journal,
+            COL_DEBIT,
+            "借方科目名",
+            "借方科目"
+        )
+        debit_sub = first_value(
+            journal,
+            COL_DEBIT_SUB,
+            "借方補助科目名",
+            "借方補助"
+        )
+        debit_amount = first_value(
+            journal,
+            COL_DEBIT_AMOUNT,
+            "借方金額",
+            "金額"
+        )
+        debit_sub_code = first_value(
+            journal,
+            "借方補助コード",
+            "借方補助"
+        )
+
+        credit_account = first_value(
+            journal,
+            COL_CREDIT,
+            "貸方科目名",
+            "貸方科目"
+        )
+        credit_sub = first_value(
+            journal,
+            COL_CREDIT_SUB,
+            "貸方補助科目名",
+            "貸方補助"
+        )
+        credit_amount = first_value(
+            journal,
+            COL_CREDIT_AMOUNT,
+            "貸方金額",
+            "金額"
+        )
+        credit_sub_code = first_value(
+            journal,
+            "貸方補助コード",
+            "貸方補助"
+        )
+
+        description = first_value(journal, COL_SUMMARY, "摘要")
+        voucher_description = first_value(journal, "伝票摘要")
+
+        note_items = []
+
+        if (
+            journal.get("DB雛形") == "なし"
+            or journal.get("db_template_found") is False
+        ):
+            note_items.append("DB雛形なし")
+
+        if debit_sub and not debit_sub_code:
+            note_items.append("借方補助コード未取得")
+
+        if credit_sub and not credit_sub_code:
+            note_items.append("貸方補助コード未取得")
+
+        if not voucher_description:
+            note_items.append("伝票摘要なし")
+
+        rows.append({
+            "No": idx,
+            "伝票日付": first_value(journal, COL_DATE, "伝票日付", "日付"),
+            "借方科目": debit_account,
+            "借方補助": debit_sub,
+            "借方金額": debit_amount,
+            "貸方科目": credit_account,
+            "貸方補助": credit_sub,
+            "貸方金額": credit_amount,
+            "摘要": description,
+            "伝票摘要": voucher_description,
+            "区分": first_value(journal, "区分", "source", "処理区分"),
+            "注意": " / ".join(note_items),
+        })
+
+    return rows
+
 # =========================================
 # エプソンCSV変換
 # =========================================
@@ -1066,8 +1175,8 @@ def build_epson_rows(rows, company_name):
         row["伝票日付"] = r.get(COL_DATE, "")
         row["摘要"] = summary
 
-        if not row.get("伝票摘要") and summary:
-            row["伝票摘要"] = summary
+        # 伝票摘要はDB雛形の値を保持する。
+        # 摘要から伝票摘要への自動コピーは禁止。
 
         # =====================================
         # 借方
@@ -2406,12 +2515,6 @@ if mode == "通常仕訳":
                         else ""
                     )
     
-                    if (
-                        memo != r.get(COL_SUMMARY, "")
-                        or not new_row.get("伝票摘要")
-                    ):
-                        new_row["伝票摘要"] = memo
-
                     new_row[COL_SUMMARY] = memo
     
                     edited_rows.append(new_row)
@@ -2574,12 +2677,6 @@ if mode == "通常仕訳":
                     new_row[COL_DEBIT_AMOUNT] = str(amt)
                     new_row[COL_CREDIT_AMOUNT] = str(amt)
     
-                    if (
-                        memo != r.get(COL_SUMMARY, "")
-                        or not new_row.get("伝票摘要")
-                    ):
-                        new_row["伝票摘要"] = memo
-
                     new_row[COL_SUMMARY] = memo
     
                     edited_doc.append(new_row)
@@ -2632,21 +2729,40 @@ if mode == "通常仕訳":
         for doc in st.session_state.confirmed:
             all_rows.extend(doc)
     
-        df = pd.DataFrame(all_rows).fillna("")
-    
-        st.dataframe(df)
-    
         # =====================================
-        # 内部CSV
+        # 入力用CSV
         # =====================================
-        csv = df.to_csv(
+        st.subheader("入力用CSV（簡易仕訳帳）")
+        st.caption(
+            "エプソンへ手入力・修正するための確認用一覧です。45列インポート形式ではありません。"
+        )
+
+        input_rows = build_input_csv_rows(
+            st.session_state.get("confirmed", [])
+        )
+        input_df = pd.DataFrame(
+            input_rows,
+            columns=INPUT_CSV_COLUMNS
+        ).fillna("")
+
+        st.dataframe(
+            input_df,
+            use_container_width=True
+        )
+
+        input_csv = input_df.to_csv(
             index=False
         ).encode("cp932")
+        input_csv_filename = (
+            "input_journal_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        )
     
         st.download_button(
-            "確認用CSVダウンロード",
-            csv,
-            "journal_output.csv"
+            "入力用CSVをダウンロード",
+            data=input_csv,
+            file_name=input_csv_filename,
+            mime="text/csv"
         )
     
         # =====================================
@@ -3111,9 +3227,24 @@ elif mode == "未収消込":
                 )
             )
 
-            st.dataframe(
-                balance_df[["取引先", "残高", "件数"]],
-                use_container_width=True
+            st.subheader("① 取込サマリー（参照専用）")
+            st.caption(
+                "この一覧は確認用です。消込処理は下の『② 消込作業エリア』から行ってください。"
+            )
+
+            balance_summary_df = balance_df[
+                ["取引先", "残高", "件数"]
+            ].copy()
+            balance_summary_df["残高"] = balance_summary_df[
+                "残高"
+            ].map(lambda value: f"{int(value):,}")
+
+            st.table(balance_summary_df)
+            st.divider()
+
+            st.subheader("② 消込作業エリア")
+            st.caption(
+                "処理したい取引先を開いて、入金額を入力してください。"
             )
 
             for customer_idx, (_, customer) in enumerate(
@@ -3121,9 +3252,16 @@ elif mode == "未収消込":
             ):
 
                 customer_name = customer["取引先"]
+                customer_count = int(customer["件数"])
+                customer_balance = int(customer["残高"])
+                customer_balance_text = f"{customer_balance:,}"
 
                 with st.expander(
-                    f"{customer_name}の明細",
+                    (
+                        "消込作業を開始："
+                        f"{customer_name}"
+                        f"（{customer_count}件 / {customer_balance_text}円）"
+                    ),
                     expanded=(
                         st.session_state.get(
                             "active_receivable_customer"
@@ -3178,6 +3316,15 @@ elif mode == "未収消込":
                     detail_df = detail_df[
                         detail_storage_columns
                     ]
+
+                    st.info(
+                        "\n".join([
+                            "現在処理中：",
+                            f"取引先：{customer_name}",
+                            f"対象件数：{customer_count}件",
+                            f"残高合計：{customer_balance_text}円",
+                        ])
+                    )
 
                     st.dataframe(
                         detail_df[detail_display_columns],
