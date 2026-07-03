@@ -2085,17 +2085,24 @@ if mode == "通常仕訳":
         )
         st.session_state.pop("selected_candidate_index", None)
     
-    date_col, ocr_upload_col = st.columns([1, 2])
+    (
+        date_label_col,
+        date_input_col,
+        ocr_label_col,
+        ocr_upload_col,
+    ) = st.columns([0.9, 1.6, 0.9, 3.2])
 
     # =========================================
     # 日付
     # =========================================
-    with date_col:
-        st.subheader("📅 伝票日付")
+    with date_label_col:
+        st.markdown("**伝票日付**")
 
+    with date_input_col:
         process_date_obj = st.date_input(
             "日付",
-            datetime.today()
+            datetime.today(),
+            label_visibility="collapsed"
         )
 
     process_date = process_date_obj.strftime("%Y%m%d")
@@ -2247,12 +2254,14 @@ if mode == "通常仕訳":
     # =========================================
     # OCR読込
     # =========================================
-    with ocr_upload_col:
-        st.subheader("📄 OCR読込")
+    with ocr_label_col:
+        st.markdown("**OCR読込**")
 
+    with ocr_upload_col:
         uploaded_file = st.file_uploader(
-            "画像 / PDF アップロード",
-            type=["jpg", "jpeg", "png", "pdf"]
+            "JPG / PNG / PDF",
+            type=["jpg", "jpeg", "png", "pdf"],
+            label_visibility="collapsed"
         )
     
     current_file = None
