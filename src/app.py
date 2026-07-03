@@ -102,6 +102,23 @@ def is_ocr_api_connection_error(ocr_result):
     )
 
 
+def parse_journal_amount(value):
+
+    text = str(value or "").strip()
+    text = text.replace(",", "")
+    text = text.replace("￥", "")
+    text = text.replace("¥", "")
+    text = text.replace("円", "")
+
+    if not text:
+        return None
+
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
 def load_account_master():
 
     result = {}
@@ -2684,11 +2701,7 @@ if mode == "通常仕訳":
     
                 st.divider()
     
-                edited_rows = []
-    
-                d_sum = 0
-                c_sum = 0
-                entered_amounts_valid = True
+                row_edit_items = []
     
                 for r_idx, r in enumerate(rows):
     
@@ -2882,69 +2895,24 @@ if mode == "通常仕訳":
                             f"平均金額: ¥{suggest['avg']:,}"
                         )
 
-                    default_amt = (
-                        amount
+                    default_amount_text = (
+                        str(amount)
                         if len(rows) == 1
                         and amount is not None
                         and amount > 0
-                        else None
-                    )
-    
-                    amount_col, summary_col = st.columns([1, 2])
-
-                    with amount_col:
-                        amt = st.number_input(
-                            "金額",
-                            min_value=0,
-                            value=default_amt,
-                            step=1,
-                            placeholder="今回の金額",
-                            key=f"amt_{doc_id}_{r_idx}"
-                        )
-
-                    # =====================================
-                    # 摘要
-                    # =====================================
-                    with summary_col:
-                        memo = st.text_input(
-                            "摘要",
-                            value=r.get(COL_SUMMARY, ""),
-                            key=f"m_{doc_id}_{r_idx}"
-                        )
-    
-                    if amt is None or amt <= 0:
-                        entered_amounts_valid = False
-                        registered_amount = 0
-                    else:
-                        registered_amount = int(amt)
-
-                    d_sum += registered_amount
-                    c_sum += registered_amount
-    
-                    new_row = copy.deepcopy(r)
-    
-                    new_row[COL_DATE] = process_date
-    
-                    new_row[COL_DEBIT] = debit
-                    new_row[COL_CREDIT] = credit
-    
-                    new_row[COL_DEBIT_SUB] = debit_sub
-                    new_row[COL_CREDIT_SUB] = credit_sub
-    
-                    new_row[COL_DEBIT_AMOUNT] = (
-                        str(registered_amount)
-                        if registered_amount > 0
                         else ""
                     )
-                    new_row[COL_CREDIT_AMOUNT] = (
-                        str(registered_amount)
-                        if registered_amount > 0
-                        else ""
-                    )
-    
-                    new_row[COL_SUMMARY] = memo
-    
-                    edited_rows.append(new_row)
+
+                    row_edit_items.append({
+                        "row_index": r_idx,
+                        "row": r,
+                        "debit": debit,
+                        "credit": credit,
+                        "debit_sub": debit_sub,
+                        "credit_sub": credit_sub,
+                        "default_amount_text": default_amount_text,
+                        "default_summary": r.get(COL_SUMMARY, ""),
+                    })
     
                 st.divider()
                 
@@ -2957,25 +2925,108 @@ if mode == "通常仕訳":
                 # =====================================
                 # 登録
                 # =====================================
-                if st.button(
-                    "この内容で登録",
-                    key=f"save_{doc_id}",
-                    type="primary"
-                ):
-    
+                try:
+                    edit_form = st.form(
+                        f"journal_edit_form_{doc_id}",
+                        enter_to_submit=False
+                    )
+                except TypeError:
+                    edit_form = st.form(f"journal_edit_form_{doc_id}")
+
+                with edit_form:
+                    row_edit_values = []
+
+                    for item in row_edit_items:
+                        row_index = item["row_index"]
+
+                        if len(row_edit_items) > 1:
+                            st.markdown(f"**行 {row_index + 1}**")
+
+                        amount_col, summary_col = st.columns([1, 2])
+
+                        with amount_col:
+                            amount_text = st.text_input(
+                                "金額",
+                                value=item["default_amount_text"],
+                                placeholder="150,000",
+                                key=f"amt_text_{doc_id}_{row_index}"
+                            )
+
+                        with summary_col:
+                            memo = st.text_input(
+                                "摘要",
+                                value=item["default_summary"],
+                                key=f"m_{doc_id}_{row_index}"
+                            )
+
+                        row_edit_values.append({
+                            **item,
+                            "amount_text": amount_text,
+                            "summary": memo,
+                        })
+
+                    submitted = st.form_submit_button(
+                        "この内容で登録",
+                        key=f"save_{doc_id}",
+                        type="primary"
+                    )
+
+                if submitted:
+                    edited_rows = []
+                    d_sum = 0
+                    c_sum = 0
+                    entered_amounts_valid = True
+
+                    for item in row_edit_values:
+                        registered_amount = parse_journal_amount(
+                            item["amount_text"]
+                        )
+
+                        if registered_amount is None or registered_amount <= 0:
+                            entered_amounts_valid = False
+                            registered_amount = 0
+
+                        d_sum += registered_amount
+                        c_sum += registered_amount
+
+                        new_row = copy.deepcopy(item["row"])
+
+                        new_row[COL_DATE] = process_date
+
+                        new_row[COL_DEBIT] = item["debit"]
+                        new_row[COL_CREDIT] = item["credit"]
+
+                        new_row[COL_DEBIT_SUB] = item["debit_sub"]
+                        new_row[COL_CREDIT_SUB] = item["credit_sub"]
+
+                        new_row[COL_DEBIT_AMOUNT] = (
+                            str(registered_amount)
+                            if registered_amount > 0
+                            else ""
+                        )
+                        new_row[COL_CREDIT_AMOUNT] = (
+                            str(registered_amount)
+                            if registered_amount > 0
+                            else ""
+                        )
+
+                        new_row[COL_SUMMARY] = item["summary"]
+
+                        edited_rows.append(new_row)
+
                     if not entered_amounts_valid:
 
-                        st.warning("今回の金額を入力してください")
+                        st.error("金額を正しく入力してください")
 
                     elif d_sum != c_sum:
-    
+
                         st.error(
                             "借貸が一致していません。"
                             f"借方¥{d_sum:,} / 貸方¥{c_sum:,}"
                         )
-    
+
                     else:
-    
+
                         st.session_state.confirmed.append(
                             copy.deepcopy(edited_rows)
                         )
