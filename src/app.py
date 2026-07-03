@@ -399,6 +399,25 @@ def get_account_name(code):
         code
     )
 
+def format_account_name_with_code(account):
+
+    account = str(account or "").strip()
+
+    if not account:
+        return ""
+
+    code = get_account_code(account)
+    name = account
+
+    if not code:
+        for master_name, master_code in ACCOUNT_MASTER.items():
+            if str(master_code).strip() == account:
+                name = master_name
+                code = str(master_code).strip()
+                break
+
+    return f"{name}（{code}）" if code else name
+
 def build_account_select_options(
     records,
     summary,
@@ -2464,114 +2483,60 @@ if mode == "通常仕訳":
                 selected_rows = split_journal(selected_rec["rows"])
                 if selected_rows:
                     selected_first_row = selected_rows[0]
-                    selected_debit = get_account_name(
-                        selected_first_row.get(COL_DEBIT, "")
-                    )
-                    selected_credit = get_account_name(
-                        selected_first_row.get(COL_CREDIT, "")
-                    )
-                    st.info(
-                        "\n".join([
-                            (
-                                "現在の編集対象："
-                                f"候補 {selected_candidate_index + 1}"
-                            ),
-                            (
-                                "摘要："
-                                f"{selected_first_row.get(COL_SUMMARY, '')}"
-                            ),
-                            (
-                                "借方："
-                                f"{selected_debit}"
-                                " / 貸方："
-                                f"{selected_credit}"
-                            ),
-                            (
-                                "金額："
-                                f"¥{get_voucher_total(selected_rows):,}"
-                            ),
-                            f"スコア：{selected_score}",
-                        ])
-                    )
 
                     st.subheader("現在編集中の仕訳")
                     st.caption(
-                        "候補番号で選択した仕訳をここで確認・編集できます。"
+                        "候補番号で選択した仕訳をここで確認できます。"
                         "既存の候補内編集も引き続き使用できます。"
                     )
-                    st.write(
-                        "現在編集中の仕訳："
-                        f"候補 {selected_candidate_index + 1}"
-                        f" / スコア {selected_score}"
-                    )
-                    st.write(f"伝票日付：{process_date_obj:%Y/%m/%d}")
-                    st.write(f"摘要：{selected_first_row.get(COL_SUMMARY, '')}")
-                    st.write(f"行数：{len(selected_rows)}行")
-                    st.write(
-                        f"過去金額：¥{get_voucher_total(selected_rows):,}"
-                    )
-                    st.caption(
-                        "このエリアの入力値は仮編集として保持します。"
-                        "登録は下の候補詳細内の既存ボタンから行ってください。"
-                    )
 
-                    editing_candidate_values = st.session_state.setdefault(
-                        "editing_candidate_values",
-                        {}
+                    top_col1, top_col2, top_col3 = st.columns([2, 2, 2])
+                    top_col1.markdown(
+                        (
+                            "**候補 "
+                            f"{selected_candidate_index + 1}"
+                            "【選択中】**"
+                        )
+                    )
+                    top_col2.markdown(f"**日付：** {process_date_obj:%Y/%m/%d}")
+                    top_col3.markdown(
+                        f"**金額：** ¥{get_voucher_total(selected_rows):,}"
                     )
 
                     for row_index, selected_row in enumerate(selected_rows):
-                        edit_key = (
-                            f"candidate_{selected_candidate_index}"
-                            f"_row_{row_index}"
+                        debit_display = format_account_name_with_code(
+                            selected_row.get(COL_DEBIT, "")
                         )
-                        stored_edit_values = editing_candidate_values.get(
-                            edit_key,
-                            {}
+                        credit_display = format_account_name_with_code(
+                            selected_row.get(COL_CREDIT, "")
                         )
-                        default_edit_amount = stored_edit_values.get(
-                            "amount",
-                            to_int(selected_row.get(COL_DEBIT_AMOUNT, 0))
-                        )
-                        default_edit_summary = stored_edit_values.get(
-                            "summary",
-                            selected_row.get(COL_SUMMARY, "")
-                        )
+                        debit_sub = selected_row.get(COL_DEBIT_SUB, "")
+                        credit_sub = selected_row.get(COL_CREDIT_SUB, "")
 
-                        st.markdown(f"### 行 {row_index + 1}")
-                        st.write(
-                            "借方科目："
-                            f"{get_account_name(selected_row.get(COL_DEBIT, ''))}"
-                        )
-                        st.write(
-                            "貸方科目："
-                            f"{get_account_name(selected_row.get(COL_CREDIT, ''))}"
-                        )
-                        st.write(
-                            "借方補助："
-                            f"{selected_row.get(COL_DEBIT_SUB, '')}"
-                        )
-                        st.write(
-                            "貸方補助："
-                            f"{selected_row.get(COL_CREDIT_SUB, '')}"
-                        )
+                        if len(selected_rows) > 1:
+                            st.markdown(f"**行 {row_index + 1}**")
 
-                        edit_amount = st.number_input(
-                            "金額",
-                            min_value=0,
-                            value=int(default_edit_amount or 0),
-                            step=1,
-                            key=f"editing_candidate_amount_{edit_key}"
+                        account_col1, account_col2, account_col3 = st.columns(
+                            [3, 1, 3]
                         )
-                        edit_summary = st.text_input(
-                            "摘要",
-                            value=str(default_edit_summary or ""),
-                            key=f"editing_candidate_summary_{edit_key}"
-                        )
-                        editing_candidate_values[edit_key] = {
-                            "amount": int(edit_amount or 0),
-                            "summary": edit_summary,
-                        }
+                        account_col1.markdown(f"**借方：** {debit_display}")
+                        account_col2.markdown("**→**")
+                        account_col3.markdown(f"**貸方：** {credit_display}")
+
+                        sub_parts = []
+                        if debit_sub:
+                            sub_parts.append(f"借方補助：{debit_sub}")
+                        if credit_sub:
+                            sub_parts.append(f"貸方補助：{credit_sub}")
+                        if sub_parts:
+                            st.caption(" / ".join(sub_parts))
+
+                    st.markdown(
+                        f"**摘要：** {selected_first_row.get(COL_SUMMARY, '')}"
+                    )
+                    st.caption(
+                        "編集・登録は下の候補詳細から行ってください。"
+                    )
 
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
