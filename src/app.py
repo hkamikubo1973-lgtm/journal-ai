@@ -2494,6 +2494,85 @@ if mode == "通常仕訳":
                         ])
                     )
 
+                    st.subheader("現在編集中の仕訳")
+                    st.caption(
+                        "候補番号で選択した仕訳をここで確認・編集できます。"
+                        "既存の候補内編集も引き続き使用できます。"
+                    )
+                    st.write(
+                        "現在編集中の仕訳："
+                        f"候補 {selected_candidate_index + 1}"
+                        f" / スコア {selected_score}"
+                    )
+                    st.write(f"伝票日付：{process_date_obj:%Y/%m/%d}")
+                    st.write(f"摘要：{selected_first_row.get(COL_SUMMARY, '')}")
+                    st.write(f"行数：{len(selected_rows)}行")
+                    st.write(
+                        f"過去金額：¥{get_voucher_total(selected_rows):,}"
+                    )
+                    st.caption(
+                        "このエリアの入力値は仮編集として保持します。"
+                        "登録は下の候補詳細内の既存ボタンから行ってください。"
+                    )
+
+                    editing_candidate_values = st.session_state.setdefault(
+                        "editing_candidate_values",
+                        {}
+                    )
+
+                    for row_index, selected_row in enumerate(selected_rows):
+                        edit_key = (
+                            f"candidate_{selected_candidate_index}"
+                            f"_row_{row_index}"
+                        )
+                        stored_edit_values = editing_candidate_values.get(
+                            edit_key,
+                            {}
+                        )
+                        default_edit_amount = stored_edit_values.get(
+                            "amount",
+                            to_int(selected_row.get(COL_DEBIT_AMOUNT, 0))
+                        )
+                        default_edit_summary = stored_edit_values.get(
+                            "summary",
+                            selected_row.get(COL_SUMMARY, "")
+                        )
+
+                        st.markdown(f"### 行 {row_index + 1}")
+                        st.write(
+                            "借方科目："
+                            f"{get_account_name(selected_row.get(COL_DEBIT, ''))}"
+                        )
+                        st.write(
+                            "貸方科目："
+                            f"{get_account_name(selected_row.get(COL_CREDIT, ''))}"
+                        )
+                        st.write(
+                            "借方補助："
+                            f"{selected_row.get(COL_DEBIT_SUB, '')}"
+                        )
+                        st.write(
+                            "貸方補助："
+                            f"{selected_row.get(COL_CREDIT_SUB, '')}"
+                        )
+
+                        edit_amount = st.number_input(
+                            "金額",
+                            min_value=0,
+                            value=int(default_edit_amount or 0),
+                            step=1,
+                            key=f"editing_candidate_amount_{edit_key}"
+                        )
+                        edit_summary = st.text_input(
+                            "摘要",
+                            value=str(default_edit_summary or ""),
+                            key=f"editing_candidate_summary_{edit_key}"
+                        )
+                        editing_candidate_values[edit_key] = {
+                            "amount": int(edit_amount or 0),
+                            "summary": edit_summary,
+                        }
+
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
                 "検索結果をもとに、候補選択の理由や注意点を整理します。"
