@@ -2479,7 +2479,11 @@ if mode == "通常仕訳":
             )
             else st.session_state.get("selected_candidate_no", 1)
         )
-        if (
+        if "candidate_number_select_input" not in st.session_state:
+            st.session_state[
+                "candidate_number_select_input"
+            ] = default_candidate_no
+        elif (
             st.session_state.get("candidate_number_select_input", 1) < 1
             or st.session_state.get(
                 "candidate_number_select_input",
@@ -2533,11 +2537,11 @@ if mode == "通常仕訳":
             )
 
         with button_col:
-            if st.button(
+            st.button(
                 "編集対象にする",
                 key="apply_candidate_number_select",
-            ):
-                apply_candidate_selection()
+                on_click=apply_candidate_selection,
+            )
 
         candidate_select_message = st.session_state.pop(
             "candidate_select_message",
