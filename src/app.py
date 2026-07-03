@@ -1968,61 +1968,6 @@ if mode == "通常仕訳":
         ):
             st.sidebar.success(message)
 
-    with st.sidebar.expander("科目マスター管理"):
-
-        st.subheader("科目候補の追加")
-
-        st.caption(
-            "※ エプソン側に登録済みの科目だけを追加してください。"
-        )
-        st.caption(
-            "※ journal-aiで追加しても、エプソン側には登録されません。"
-        )
-        st.caption(
-            "※ 分類は検索・確認・AIチェック用の補助情報です。"
-        )
-
-        candidate_code = st.text_input(
-            "科目コード",
-            key="sidebar_account_candidate_code"
-        ).strip()
-
-        candidate_name = st.text_input(
-            "科目名",
-            key="sidebar_account_candidate_name"
-        ).strip()
-
-        candidate_category = st.selectbox(
-            "分類",
-            ACCOUNT_CATEGORIES,
-            key="sidebar_account_candidate_category"
-        )
-
-        candidate_add_to_payment = st.checkbox(
-            "入金科目候補にも追加する",
-            key="sidebar_account_candidate_payment"
-        )
-
-        if st.button(
-            "追加する",
-            key="sidebar_add_account_candidate"
-        ):
-            changed, messages = add_account_candidate(
-                candidate_code,
-                candidate_name,
-                candidate_category,
-                candidate_add_to_payment,
-            )
-
-            if changed:
-                st.session_state[
-                    "account_candidate_success"
-                ] = messages
-                st.rerun()
-            else:
-                for message in messages:
-                    st.warning(message)
-    
     st.sidebar.divider()
     
     # -----------------------------------------
@@ -2154,6 +2099,61 @@ if mode == "通常仕訳":
         )
 
     process_date = process_date_obj.strftime("%Y%m%d")
+
+    with st.sidebar.expander("科目マスター管理"):
+
+        st.subheader("科目候補の追加")
+
+        st.caption(
+            "※ エプソン側に登録済みの科目だけを追加してください。"
+        )
+        st.caption(
+            "※ journal-aiで追加しても、エプソン側には登録されません。"
+        )
+        st.caption(
+            "※ 分類は検索・確認・AIチェック用の補助情報です。"
+        )
+
+        candidate_code = st.text_input(
+            "科目コード",
+            key="sidebar_account_candidate_code"
+        ).strip()
+
+        candidate_name = st.text_input(
+            "科目名",
+            key="sidebar_account_candidate_name"
+        ).strip()
+
+        candidate_category = st.selectbox(
+            "分類",
+            ACCOUNT_CATEGORIES,
+            key="sidebar_account_candidate_category"
+        )
+
+        candidate_add_to_payment = st.checkbox(
+            "入金科目候補にも追加する",
+            key="sidebar_account_candidate_payment"
+        )
+
+        if st.button(
+            "追加する",
+            key="sidebar_add_account_candidate"
+        ):
+            changed, messages = add_account_candidate(
+                candidate_code,
+                candidate_name,
+                candidate_category,
+                candidate_add_to_payment,
+            )
+
+            if changed:
+                st.session_state[
+                    "account_candidate_success"
+                ] = messages
+                st.rerun()
+            else:
+                for message in messages:
+                    st.warning(message)
 
     # =========================================
     # 過去仕訳CSV取込
@@ -2444,11 +2444,11 @@ if mode == "通常仕訳":
 
         with st.form("candidate_number_select_form"):
             label_col, input_col, button_col, spacer_col = st.columns(
-                [1.2, 0.8, 1.8, 4]
+                [1.0, 0.55, 1.4, 5]
             )
 
             with label_col:
-                st.markdown("**候補番号で選択**")
+                st.markdown("**候補番号**")
 
             with input_col:
                 selected_candidate_no = st.number_input(
