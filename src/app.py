@@ -2954,12 +2954,6 @@ if mode == "通常仕訳":
                 if process_date_obj > datetime.today().date():
                     st.warning("⚠️ 未来日付")
     
-                if entered_amounts_valid:
-                    if d_sum != c_sum:
-                        st.error(
-                            f"借貸不一致: 借方¥{d_sum:,} / 貸方¥{c_sum:,}"
-                        )
-
                 # =====================================
                 # 登録
                 # =====================================
@@ -2975,7 +2969,10 @@ if mode == "通常仕訳":
 
                     elif d_sum != c_sum:
     
-                        st.error("登録不可")
+                        st.error(
+                            "借貸が一致していません。"
+                            f"借方¥{d_sum:,} / 貸方¥{c_sum:,}"
+                        )
     
                     else:
     
