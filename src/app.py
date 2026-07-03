@@ -3008,7 +3008,6 @@ if mode == "通常仕訳":
                         st.session_state[
                             f"next_search_ready_{doc_id}"
                         ] = True
-                        st.success("✔ 登録しました")
 
                 if st.session_state.get(f"next_search_ready_{doc_id}"):
                     st.success(
