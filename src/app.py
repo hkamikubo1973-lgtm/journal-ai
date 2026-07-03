@@ -2490,32 +2490,13 @@ if mode == "通常仕訳":
                 "candidate_number_select_input"
             ] = default_candidate_no
 
-        with st.form("candidate_number_select_form"):
-            label_col, input_col, button_col, spacer_col = st.columns(
-                [1.0, 0.55, 1.4, 5]
+        def apply_candidate_selection():
+            selected_no = int(
+                st.session_state.get(
+                    "candidate_number_select_input",
+                    default_candidate_no,
+                )
             )
-
-            with label_col:
-                st.markdown("**候補番号**")
-
-            with input_col:
-                selected_candidate_no = st.number_input(
-                    "候補番号",
-                    min_value=1,
-                    max_value=len(results),
-                    value=default_candidate_no,
-                    step=1,
-                    key="candidate_number_select_input",
-                    label_visibility="collapsed",
-                )
-
-            with button_col:
-                submitted = st.form_submit_button(
-                    "編集対象にする"
-                )
-
-        if submitted:
-            selected_no = int(selected_candidate_no)
             selected_index = selected_no - 1
             if 0 <= selected_index < len(results):
                 st.session_state[
@@ -2524,11 +2505,49 @@ if mode == "通常仕訳":
                 st.session_state[
                     "selected_candidate_no"
                 ] = selected_no
-                st.success(
+                st.session_state["candidate_select_message"] = (
                     f"候補{selected_no}を編集対象にしました。"
                 )
             else:
-                st.warning("候補番号が範囲外です。")
+                st.session_state[
+                    "candidate_select_message"
+                ] = "候補番号が範囲外です。"
+
+        label_col, input_col, button_col, spacer_col = st.columns(
+            [1.0, 0.55, 1.4, 5]
+        )
+
+        with label_col:
+            st.markdown("**候補番号**")
+
+        with input_col:
+            st.number_input(
+                "候補番号",
+                min_value=1,
+                max_value=len(results),
+                value=default_candidate_no,
+                step=1,
+                key="candidate_number_select_input",
+                label_visibility="collapsed",
+                on_change=apply_candidate_selection,
+            )
+
+        with button_col:
+            if st.button(
+                "編集対象にする",
+                key="apply_candidate_number_select",
+            ):
+                apply_candidate_selection()
+
+        candidate_select_message = st.session_state.pop(
+            "candidate_select_message",
+            "",
+        )
+        if candidate_select_message:
+            if "範囲外" in candidate_select_message:
+                st.warning(candidate_select_message)
+            else:
+                st.success(candidate_select_message)
 
         selected_candidate_index = st.session_state.get(
             "selected_candidate_index"
