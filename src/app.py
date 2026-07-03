@@ -1955,6 +1955,7 @@ if mode == "通常仕訳":
         st.session_state.pop("ocr_search_text_pending", None)
         st.session_state.pop("selected_candidate_index", None)
         st.session_state["selected_candidate_no"] = 1
+        st.session_state["candidate_number_select_input"] = 1
 
         if "editing_candidate_values" in st.session_state:
             st.session_state["editing_candidate_values"] = {}
@@ -2467,6 +2468,28 @@ if mode == "通常仕訳":
         ):
             st.session_state.pop("selected_candidate_no", None)
 
+        current_selected_index = st.session_state.get(
+            "selected_candidate_index"
+        )
+        default_candidate_no = (
+            current_selected_index + 1
+            if (
+                current_selected_index is not None
+                and 0 <= current_selected_index < len(results)
+            )
+            else st.session_state.get("selected_candidate_no", 1)
+        )
+        if (
+            st.session_state.get("candidate_number_select_input", 1) < 1
+            or st.session_state.get(
+                "candidate_number_select_input",
+                1
+            ) > len(results)
+        ):
+            st.session_state[
+                "candidate_number_select_input"
+            ] = default_candidate_no
+
         with st.form("candidate_number_select_form"):
             label_col, input_col, button_col, spacer_col = st.columns(
                 [1.0, 0.55, 1.4, 5]
@@ -2480,9 +2503,9 @@ if mode == "通常仕訳":
                     "候補番号",
                     min_value=1,
                     max_value=len(results),
-                    value=1,
+                    value=default_candidate_no,
                     step=1,
-                    key="selected_candidate_no",
+                    key="candidate_number_select_input",
                     label_visibility="collapsed",
                 )
 
@@ -2492,13 +2515,17 @@ if mode == "通常仕訳":
                 )
 
         if submitted:
-            selected_index = int(selected_candidate_no) - 1
+            selected_no = int(selected_candidate_no)
+            selected_index = selected_no - 1
             if 0 <= selected_index < len(results):
                 st.session_state[
                     "selected_candidate_index"
                 ] = selected_index
+                st.session_state[
+                    "selected_candidate_no"
+                ] = selected_no
                 st.success(
-                    f"候補 {selected_candidate_no} を編集対象にしました。"
+                    f"候補{selected_no}を編集対象にしました。"
                 )
             else:
                 st.warning("候補番号が範囲外です。")
