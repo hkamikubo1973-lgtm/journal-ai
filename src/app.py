@@ -2534,8 +2534,10 @@ if mode == "通常仕訳":
                     st.markdown(
                         f"**摘要：** {selected_first_row.get(COL_SUMMARY, '')}"
                     )
-                    st.caption(
-                        "編集・登録は下の候補詳細から行ってください。"
+                    st.info(
+                        "この候補は下の候補詳細で開いた状態になっています。"
+                        "金額・摘要・補助科目を確認し、問題なければ"
+                        "候補詳細内の登録ボタンで登録してください。"
                     )
 
         with st.expander("AIサーチ（補足説明）", expanded=False):
