@@ -2119,6 +2119,7 @@ if mode == "通常仕訳":
             amount,
             freq
         )
+        st.session_state.pop("selected_candidate_index", None)
     
     # =========================================
     # 日付
@@ -2412,6 +2413,87 @@ if mode == "通常仕訳":
     
         st.success(f"{len(results)}件ヒット")
 
+        if (
+            st.session_state.get("selected_candidate_no", 1) < 1
+            or st.session_state.get("selected_candidate_no", 1) > len(results)
+        ):
+            st.session_state.pop("selected_candidate_no", None)
+
+        st.subheader("候補番号で選択")
+        st.caption(
+            "候補番号を入力すると、対象候補を編集対象として保持します。"
+            "既存の候補展開操作も引き続き使用できます。"
+        )
+
+        with st.form("candidate_number_select_form"):
+            selected_candidate_no = st.number_input(
+                "候補番号",
+                min_value=1,
+                max_value=len(results),
+                value=1,
+                step=1,
+                key="selected_candidate_no",
+            )
+            submitted = st.form_submit_button(
+                "この候補を編集対象にする"
+            )
+
+        if submitted:
+            selected_index = int(selected_candidate_no) - 1
+            if 0 <= selected_index < len(results):
+                st.session_state[
+                    "selected_candidate_index"
+                ] = selected_index
+                st.success(
+                    f"候補 {selected_candidate_no} を編集対象にしました。"
+                )
+            else:
+                st.warning("候補番号が範囲外です。")
+
+        selected_candidate_index = st.session_state.get(
+            "selected_candidate_index"
+        )
+        if (
+            selected_candidate_index is not None
+            and 0 <= selected_candidate_index < len(results)
+        ):
+            selected_score, selected_rec, _ = results[
+                selected_candidate_index
+            ]
+            if isinstance(selected_rec, dict) and "rows" in selected_rec:
+                selected_rows = split_journal(selected_rec["rows"])
+                if selected_rows:
+                    selected_first_row = selected_rows[0]
+                    selected_debit = get_account_name(
+                        selected_first_row.get(COL_DEBIT, "")
+                    )
+                    selected_credit = get_account_name(
+                        selected_first_row.get(COL_CREDIT, "")
+                    )
+                    st.info(
+                        "\n".join([
+                            (
+                                "現在の編集対象："
+                                f"候補 {selected_candidate_index + 1}"
+                            ),
+                            (
+                                "摘要："
+                                f"{selected_first_row.get(COL_SUMMARY, '')}"
+                            ),
+                            (
+                                "借方："
+                                f"{selected_debit}"
+                                " / 貸方："
+                                f"{selected_credit}"
+                            ),
+                            (
+                                "金額："
+                                f"¥{get_voucher_total(selected_rows):,}"
+                            ),
+                            f"スコア：{selected_score}",
+                        ])
+                    )
+
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
                 "検索結果をもとに、候補選択の理由や注意点を整理します。"
@@ -2464,15 +2546,24 @@ if mode == "通常仕訳":
             rows = split_journal(rec["rows"])
     
             doc_id = f"{idx}_{id(rec)}"
+            is_selected_candidate = (
+                st.session_state.get("selected_candidate_index") == idx - 1
+            )
+            selected_marker = "【選択中】" if is_selected_candidate else ""
     
             summary = (
-                f"{idx}. ★{score} "
+                f"候補 {idx}{selected_marker} / スコア {score} "
                 f"{rows[0].get('摘要','')}"
                 f"　{len(rows)}行"
                 f"　¥{get_voucher_total(rows):,}"
             )
     
             with st.expander(summary):
+
+                if is_selected_candidate:
+                    st.info(
+                        "現在この候補が編集対象として選択されています。"
+                    )
     
                 with st.expander("検索理由"):
     
