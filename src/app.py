@@ -2625,7 +2625,24 @@ if mode == "通常仕訳":
                     for warning in warnings:
                         st.warning(warning)
     
-        for idx, (score, rec, score_detail) in enumerate(results, 1):
+        selected_candidate_index = st.session_state.get(
+            "selected_candidate_index"
+        )
+        display_indices = list(range(len(results)))
+        if (
+            selected_candidate_index is not None
+            and 0 <= selected_candidate_index < len(results)
+        ):
+            display_indices = [selected_candidate_index] + [
+                display_index
+                for display_index in display_indices
+                if display_index != selected_candidate_index
+            ]
+
+        for display_index in display_indices:
+
+            score, rec, score_detail = results[display_index]
+            idx = display_index + 1
     
             if not isinstance(rec, dict):
                 continue
@@ -2636,9 +2653,7 @@ if mode == "通常仕訳":
             rows = split_journal(rec["rows"])
     
             doc_id = f"{idx}_{id(rec)}"
-            is_selected_candidate = (
-                st.session_state.get("selected_candidate_index") == idx - 1
-            )
+            is_selected_candidate = selected_candidate_index == display_index
             selected_marker = "【選択中】" if is_selected_candidate else ""
     
             summary = (
