@@ -102,23 +102,6 @@ def is_ocr_api_connection_error(ocr_result):
     )
 
 
-def parse_journal_amount(value):
-
-    text = str(value or "").strip()
-    text = text.replace(",", "")
-    text = text.replace("￥", "")
-    text = text.replace("¥", "")
-    text = text.replace("円", "")
-
-    if not text:
-        return None
-
-    try:
-        return int(float(text))
-    except ValueError:
-        return None
-
-
 def load_account_master():
 
     result = {}
@@ -2536,60 +2519,24 @@ if mode == "通常仕訳":
                     selected_first_row = selected_rows[0]
 
                     st.subheader("現在編集中の仕訳")
-                    st.caption(
-                        "候補番号で選択した仕訳をここで確認できます。"
-                        "既存の候補内編集も引き続き使用できます。"
+
+                    st.dataframe(
+                        pd.DataFrame([{
+                            "候補": f"{selected_candidate_index + 1}【選択中】",
+                            "日付": f"{process_date_obj:%Y/%m/%d}",
+                            "借方": format_account_name_with_code(
+                                selected_first_row.get(COL_DEBIT, "")
+                            ),
+                            "貸方": format_account_name_with_code(
+                                selected_first_row.get(COL_CREDIT, "")
+                            ),
+                            "金額": f"{get_voucher_total(selected_rows):,}",
+                            "摘要": selected_first_row.get(COL_SUMMARY, ""),
+                        }]),
+                        hide_index=True,
+                        use_container_width=True
                     )
-
-                    top_col1, top_col2, top_col3 = st.columns([2, 2, 2])
-                    top_col1.markdown(
-                        (
-                            "**候補 "
-                            f"{selected_candidate_index + 1}"
-                            "【選択中】**"
-                        )
-                    )
-                    top_col2.markdown(f"**日付：** {process_date_obj:%Y/%m/%d}")
-                    top_col3.markdown(
-                        f"**金額：** ¥{get_voucher_total(selected_rows):,}"
-                    )
-
-                    for row_index, selected_row in enumerate(selected_rows):
-                        debit_display = format_account_name_with_code(
-                            selected_row.get(COL_DEBIT, "")
-                        )
-                        credit_display = format_account_name_with_code(
-                            selected_row.get(COL_CREDIT, "")
-                        )
-                        debit_sub = selected_row.get(COL_DEBIT_SUB, "")
-                        credit_sub = selected_row.get(COL_CREDIT_SUB, "")
-
-                        if len(selected_rows) > 1:
-                            st.markdown(f"**行 {row_index + 1}**")
-
-                        account_col1, account_col2, account_col3 = st.columns(
-                            [3, 1, 3]
-                        )
-                        account_col1.markdown(f"**借方：** {debit_display}")
-                        account_col2.markdown("**→**")
-                        account_col3.markdown(f"**貸方：** {credit_display}")
-
-                        sub_parts = []
-                        if debit_sub:
-                            sub_parts.append(f"借方補助：{debit_sub}")
-                        if credit_sub:
-                            sub_parts.append(f"貸方補助：{credit_sub}")
-                        if sub_parts:
-                            st.caption(" / ".join(sub_parts))
-
-                    st.markdown(
-                        f"**摘要：** {selected_first_row.get(COL_SUMMARY, '')}"
-                    )
-                    st.info(
-                        "この候補は下の候補詳細で開いた状態になっています。\n\n"
-                        "金額・摘要・補助科目を確認し、問題なければ"
-                        "候補詳細内の登録ボタンで登録してください。"
-                    )
+                    st.caption("下の候補詳細で編集・登録してください。")
 
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
@@ -2701,21 +2648,25 @@ if mode == "通常仕訳":
     
                 st.divider()
     
-                row_edit_items = []
-    
+                edited_rows = []
+
+                d_sum = 0
+                c_sum = 0
+                entered_amounts_valid = True
+
                 for r_idx, r in enumerate(rows):
-    
+
                     debit_account = get_account_name(
                         r.get("借方科目", "")
                     )
-    
+
                     credit_account = get_account_name(
                         r.get("貸方科目", "")
                     )
                     amount_value = to_int(
                         r.get(COL_DEBIT_AMOUNT, 0)
                     )
-    
+
                     row_summary = (
                         f"{r_idx+1}行目 "
                         f"🔵[借] {debit_account} "
@@ -2723,14 +2674,14 @@ if mode == "通常仕訳":
                         f"🔴[貸] {credit_account} "
                         f"/ ¥{amount_value:,}"
                     )
-    
+
                     with st.expander(
                         row_summary,
                         expanded=is_selected_candidate
                     ):
-    
+
                         col1, col2 = st.columns(2)
-    
+
                         # =====================================
                         # 借方 / 貸方
                         # =====================================
@@ -2743,7 +2694,7 @@ if mode == "通常仕訳":
                         credit_key = f"c_{doc_id}_{r_idx}"
 
                         with col1:
-    
+
                             default_debit = r.get(
                                 COL_DEBIT,
                                 ""
@@ -2761,7 +2712,7 @@ if mode == "通常仕訳":
                                     current_account=default_debit
                                 )
                             )
-    
+
                             debit = st.selectbox(
                                 "借方",
                                 debit_options,
@@ -2790,9 +2741,9 @@ if mode == "通常仕訳":
                                     "元データの科目が資金複合/諸口のため、"
                                     "選択可能な科目へ変更してください"
                                 )
-    
+
                         with col2:
-    
+
                             default_credit = r.get(
                                 COL_CREDIT,
                                 ""
@@ -2806,7 +2757,7 @@ if mode == "通常仕訳":
                                     current_account=default_credit
                                 )
                             )
-    
+
                             credit = st.selectbox(
                                 "貸方",
                                 credit_options,
@@ -2835,20 +2786,20 @@ if mode == "通常仕訳":
                                     "元データの科目が資金複合/諸口のため、"
                                     "選択可能な科目へ変更してください"
                                 )
-    
+
                     # =====================================
                     # 補助
                     # =====================================
                     col3, col4 = st.columns(2)
-    
+
                     with col3:
-    
+
                         default_ds = r.get(
                             COL_DEBIT_SUB,
                             ""
                         )
                         debit_sub_options = build_sub_options(default_ds)
-    
+
                         debit_sub = st.selectbox(
                             "借方補助",
                             debit_sub_options,
@@ -2859,15 +2810,15 @@ if mode == "通常仕訳":
                             ),
                             key=f"ds_{doc_id}_{r_idx}"
                         )
-    
+
                     with col4:
-    
+
                         default_cs = r.get(
                             COL_CREDIT_SUB,
                             ""
                         )
                         credit_sub_options = build_sub_options(default_cs)
-    
+
                         credit_sub = st.selectbox(
                             "貸方補助",
                             credit_sub_options,
@@ -2878,7 +2829,7 @@ if mode == "通常仕訳":
                             ),
                             key=f"cs_{doc_id}_{r_idx}"
                         )
-    
+
                     # =====================================
                     # 金額
                     # =====================================
@@ -2895,128 +2846,90 @@ if mode == "通常仕訳":
                             f"平均金額: ¥{suggest['avg']:,}"
                         )
 
-                    default_amount_text = (
-                        str(amount)
+                    default_amt = (
+                        amount
                         if len(rows) == 1
                         and amount is not None
                         and amount > 0
+                        else None
+                    )
+
+                    amount_col, summary_col = st.columns([1, 2])
+
+                    with amount_col:
+                        amt = st.number_input(
+                            "金額",
+                            min_value=0,
+                            value=default_amt,
+                            step=1,
+                            placeholder="今回の金額",
+                            key=f"amt_{doc_id}_{r_idx}"
+                        )
+
+                    # =====================================
+                    # 摘要
+                    # =====================================
+                    with summary_col:
+                        memo = st.text_input(
+                            "摘要",
+                            value=r.get(COL_SUMMARY, ""),
+                            key=f"m_{doc_id}_{r_idx}"
+                        )
+
+                    if amt is None or amt <= 0:
+                        entered_amounts_valid = False
+                        registered_amount = 0
+                    else:
+                        registered_amount = int(amt)
+
+                    d_sum += registered_amount
+                    c_sum += registered_amount
+
+                    new_row = copy.deepcopy(r)
+
+                    new_row[COL_DATE] = process_date
+
+                    new_row[COL_DEBIT] = debit
+                    new_row[COL_CREDIT] = credit
+
+                    new_row[COL_DEBIT_SUB] = debit_sub
+                    new_row[COL_CREDIT_SUB] = credit_sub
+
+                    new_row[COL_DEBIT_AMOUNT] = (
+                        str(registered_amount)
+                        if registered_amount > 0
+                        else ""
+                    )
+                    new_row[COL_CREDIT_AMOUNT] = (
+                        str(registered_amount)
+                        if registered_amount > 0
                         else ""
                     )
 
-                    row_edit_items.append({
-                        "row_index": r_idx,
-                        "row": r,
-                        "debit": debit,
-                        "credit": credit,
-                        "debit_sub": debit_sub,
-                        "credit_sub": credit_sub,
-                        "default_amount_text": default_amount_text,
-                        "default_summary": r.get(COL_SUMMARY, ""),
-                    })
-    
+                    new_row[COL_SUMMARY] = memo
+
+                    edited_rows.append(new_row)
+
                 st.divider()
-                
+
                 # =====================================
                 # 未来日付
                 # =====================================
                 if process_date_obj > datetime.today().date():
                     st.warning("⚠️ 未来日付")
-    
+
                 # =====================================
                 # 登録
                 # =====================================
-                try:
-                    edit_form = st.form(
-                        f"journal_edit_form_{doc_id}",
-                        enter_to_submit=False
-                    )
-                except TypeError:
-                    edit_form = st.form(f"journal_edit_form_{doc_id}")
-
-                with edit_form:
-                    row_edit_values = []
-
-                    for item in row_edit_items:
-                        row_index = item["row_index"]
-
-                        if len(row_edit_items) > 1:
-                            st.markdown(f"**行 {row_index + 1}**")
-
-                        amount_col, summary_col = st.columns([1, 2])
-
-                        with amount_col:
-                            amount_text = st.text_input(
-                                "金額",
-                                value=item["default_amount_text"],
-                                placeholder="150,000",
-                                key=f"amt_text_{doc_id}_{row_index}"
-                            )
-
-                        with summary_col:
-                            memo = st.text_input(
-                                "摘要",
-                                value=item["default_summary"],
-                                key=f"m_{doc_id}_{row_index}"
-                            )
-
-                        row_edit_values.append({
-                            **item,
-                            "amount_text": amount_text,
-                            "summary": memo,
-                        })
-
-                    submitted = st.form_submit_button(
-                        "この内容で登録",
-                        key=f"save_{doc_id}",
-                        type="primary"
-                    )
-
-                if submitted:
-                    edited_rows = []
-                    d_sum = 0
-                    c_sum = 0
-                    entered_amounts_valid = True
-
-                    for item in row_edit_values:
-                        registered_amount = parse_journal_amount(
-                            item["amount_text"]
-                        )
-
-                        if registered_amount is None or registered_amount <= 0:
-                            entered_amounts_valid = False
-                            registered_amount = 0
-
-                        d_sum += registered_amount
-                        c_sum += registered_amount
-
-                        new_row = copy.deepcopy(item["row"])
-
-                        new_row[COL_DATE] = process_date
-
-                        new_row[COL_DEBIT] = item["debit"]
-                        new_row[COL_CREDIT] = item["credit"]
-
-                        new_row[COL_DEBIT_SUB] = item["debit_sub"]
-                        new_row[COL_CREDIT_SUB] = item["credit_sub"]
-
-                        new_row[COL_DEBIT_AMOUNT] = (
-                            str(registered_amount)
-                            if registered_amount > 0
-                            else ""
-                        )
-                        new_row[COL_CREDIT_AMOUNT] = (
-                            str(registered_amount)
-                            if registered_amount > 0
-                            else ""
-                        )
-
-                        new_row[COL_SUMMARY] = item["summary"]
-
-                        edited_rows.append(new_row)
+                if st.button(
+                    "この内容で登録",
+                    key=f"save_{doc_id}",
+                    type="primary"
+                ):
 
                     if not entered_amounts_valid:
 
-                        st.error("金額を正しく入力してください")
+                        st.warning("今回の金額を入力してください")
 
                     elif d_sum != c_sum:
 
