@@ -2558,7 +2558,10 @@ if mode == "通常仕訳":
                 f"　¥{get_voucher_total(rows):,}"
             )
     
-            with st.expander(summary):
+            with st.expander(
+                summary,
+                expanded=is_selected_candidate
+            ):
 
                 if is_selected_candidate:
                     st.info(
@@ -2630,7 +2633,7 @@ if mode == "通常仕訳":
     
                     with st.expander(
                         row_summary,
-                        expanded=False
+                        expanded=is_selected_candidate
                     ):
     
                         col1, col2 = st.columns(2)
