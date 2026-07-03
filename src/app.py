@@ -2140,24 +2140,27 @@ if mode == "通常仕訳":
         )
         st.session_state.pop("selected_candidate_index", None)
     
+    date_col, ocr_upload_col = st.columns([1, 2])
+
     # =========================================
     # 日付
     # =========================================
-    st.subheader("📅 伝票日付")
-    
-    process_date_obj = st.date_input(
-        "日付",
-        datetime.today()
-    )
-    
+    with date_col:
+        st.subheader("📅 伝票日付")
+
+        process_date_obj = st.date_input(
+            "日付",
+            datetime.today()
+        )
+
     process_date = process_date_obj.strftime("%Y%m%d")
-    
-    st.divider()
 
     # =========================================
     # 過去仕訳CSV取込
     # =========================================
-    with st.expander("過去仕訳CSV取込"):
+    with st.sidebar.expander("過去仕訳CSV取込"):
+
+        st.caption("初回設定または過去DB更新時に使用します。")
 
         if "past_journal_import_success" in st.session_state:
             st.success(
@@ -2244,12 +2247,13 @@ if mode == "通常仕訳":
     # =========================================
     # OCR読込
     # =========================================
-    st.subheader("📄 OCR読込")
-    
-    uploaded_file = st.file_uploader(
-        "画像 / PDF アップロード",
-        type=["jpg", "jpeg", "png", "pdf"]
-    )
+    with ocr_upload_col:
+        st.subheader("📄 OCR読込")
+
+        uploaded_file = st.file_uploader(
+            "画像 / PDF アップロード",
+            type=["jpg", "jpeg", "png", "pdf"]
+        )
     
     current_file = None
     
@@ -2440,22 +2444,28 @@ if mode == "通常仕訳":
 
         st.subheader("候補番号で選択")
         st.caption(
-            "候補番号を入力すると、対象候補を編集対象として保持します。"
-            "既存の候補展開操作も引き続き使用できます。"
+            "番号を入力して候補を編集対象にします。"
         )
 
         with st.form("candidate_number_select_form"):
-            selected_candidate_no = st.number_input(
-                "候補番号",
-                min_value=1,
-                max_value=len(results),
-                value=1,
-                step=1,
-                key="selected_candidate_no",
-            )
-            submitted = st.form_submit_button(
-                "この候補を編集対象にする"
-            )
+            no_col, button_col = st.columns([1, 2])
+
+            with no_col:
+                selected_candidate_no = st.number_input(
+                    "候補番号",
+                    min_value=1,
+                    max_value=len(results),
+                    value=1,
+                    step=1,
+                    key="selected_candidate_no",
+                )
+
+            with button_col:
+                st.write("")
+                st.write("")
+                submitted = st.form_submit_button(
+                    "この候補を編集対象にする"
+                )
 
         if submitted:
             selected_index = int(selected_candidate_no) - 1
@@ -2856,23 +2866,27 @@ if mode == "通常仕訳":
                         else None
                     )
     
-                    amt = st.number_input(
-                        "金額",
-                        min_value=0,
-                        value=default_amt,
-                        step=1,
-                        placeholder="今回の金額",
-                        key=f"amt_{doc_id}_{r_idx}"
-                    )
-    
+                    amount_col, summary_col = st.columns([1, 2])
+
+                    with amount_col:
+                        amt = st.number_input(
+                            "金額",
+                            min_value=0,
+                            value=default_amt,
+                            step=1,
+                            placeholder="今回の金額",
+                            key=f"amt_{doc_id}_{r_idx}"
+                        )
+
                     # =====================================
                     # 摘要
                     # =====================================
-                    memo = st.text_input(
-                        "摘要",
-                        value=r.get(COL_SUMMARY, ""),
-                        key=f"m_{doc_id}_{r_idx}"
-                    )
+                    with summary_col:
+                        memo = st.text_input(
+                            "摘要",
+                            value=r.get(COL_SUMMARY, ""),
+                            key=f"m_{doc_id}_{r_idx}"
+                        )
     
                     if amt is None or amt <= 0:
                         entered_amounts_valid = False
