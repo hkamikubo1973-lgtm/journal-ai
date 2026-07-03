@@ -3113,19 +3113,25 @@ if mode == "通常仕訳":
                             key=f"conf_cs_{doc_idx}_{row_idx}"
                         )
     
-                    amt = st.number_input(
-                        "金額",
-                        value=to_int(
-                            r["借方金額"]
-                        ),
-                        key=f"conf_amt_{doc_idx}_{row_idx}"
-                    )
+                    amount_col, summary_col = st.columns([1, 2])
+
+                    with amount_col:
+
+                        amt = st.number_input(
+                            "金額",
+                            value=to_int(
+                                r["借方金額"]
+                            ),
+                            key=f"conf_amt_{doc_idx}_{row_idx}"
+                        )
     
-                    memo = st.text_input(
-                        "摘要",
-                        value=r.get(COL_SUMMARY, ""),
-                        key=f"conf_m_{doc_idx}_{row_idx}"
-                    )
+                    with summary_col:
+
+                        memo = st.text_input(
+                            "摘要",
+                            value=r.get(COL_SUMMARY, ""),
+                            key=f"conf_m_{doc_idx}_{row_idx}"
+                        )
     
                     new_row = copy.deepcopy(r)
     
