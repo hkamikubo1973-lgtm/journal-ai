@@ -1946,6 +1946,22 @@ if mode == "通常仕訳":
     
     if "company_name" not in st.session_state:
         st.session_state.company_name = ""
+
+    def reset_for_next_journal_search():
+
+        st.session_state["keyword_input"] = ""
+        st.session_state["search_amount"] = None
+        st.session_state.results = []
+        st.session_state.pop("ocr_search_text_pending", None)
+        st.session_state.pop("selected_candidate_index", None)
+        st.session_state["selected_candidate_no"] = 1
+
+        if "editing_candidate_values" in st.session_state:
+            st.session_state["editing_candidate_values"] = {}
+
+        for key in list(st.session_state.keys()):
+            if str(key).startswith("next_search_ready_"):
+                st.session_state.pop(key, None)
     
     
     # =========================================
@@ -2968,8 +2984,22 @@ if mode == "通常仕訳":
                         st.session_state.confirmed.append(
                             copy.deepcopy(edited_rows)
                         )
-    
+
+                        st.session_state[
+                            f"next_search_ready_{doc_id}"
+                        ] = True
                         st.success("✔ 登録しました")
+
+                if st.session_state.get(f"next_search_ready_{doc_id}"):
+                    st.success(
+                        "登録しました。次の仕訳検索へ進めます。"
+                    )
+                    st.button(
+                        "次の仕訳を検索する",
+                        key=f"reset_for_next_journal_{doc_id}",
+                        type="secondary",
+                        on_click=reset_for_next_journal_search
+                    )
     
     # =========================================
     # 登録済
