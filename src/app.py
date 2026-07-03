@@ -2442,15 +2442,15 @@ if mode == "通常仕訳":
         ):
             st.session_state.pop("selected_candidate_no", None)
 
-        st.subheader("候補番号で選択")
-        st.caption(
-            "番号を入力して候補を編集対象にします。"
-        )
-
         with st.form("candidate_number_select_form"):
-            no_col, button_col = st.columns([1, 2])
+            label_col, input_col, button_col, spacer_col = st.columns(
+                [1.2, 0.8, 1.8, 4]
+            )
 
-            with no_col:
+            with label_col:
+                st.markdown("**候補番号で選択**")
+
+            with input_col:
                 selected_candidate_no = st.number_input(
                     "候補番号",
                     min_value=1,
@@ -2458,13 +2458,12 @@ if mode == "通常仕訳":
                     value=1,
                     step=1,
                     key="selected_candidate_no",
+                    label_visibility="collapsed",
                 )
 
             with button_col:
-                st.write("")
-                st.write("")
                 submitted = st.form_submit_button(
-                    "この候補を編集対象にする"
+                    "編集対象にする"
                 )
 
         if submitted:
