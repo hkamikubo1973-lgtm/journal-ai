@@ -3267,7 +3267,7 @@ if mode == "通常仕訳":
 
         with input_download_col:
             st.download_button(
-                "入力用CSVをダウンロード",
+                "ブラウザでダウンロード",
                 data=input_csv,
                 file_name=input_csv_filename,
                 mime="text/csv"
@@ -3275,8 +3275,9 @@ if mode == "通常仕訳":
 
         with input_save_col:
             if st.button(
-                "入力用CSVを指定フォルダへ保存",
-                key="save_input_csv_to_export_dir"
+                "共有フォルダへ保存",
+                key="save_input_csv_to_export_dir",
+                type="primary"
             ):
                 saved, message = save_csv_to_export_dir(
                     input_csv,
@@ -3328,18 +3329,18 @@ if mode == "通常仕訳":
 
         with epson_download_col:
             st.download_button(
-                "エプソン取込CSVをダウンロード",
+                "ブラウザでダウンロード",
                 epson_csv,
                 epson_filename,
-                type="primary",
                 on_click=save_exported_journals,
                 args=(epson_rows,)
             )
 
         with epson_save_col:
             if st.button(
-                "エプソン取込CSVを指定フォルダへ保存",
-                key="save_epson_csv_to_export_dir"
+                "共有フォルダへ保存",
+                key="save_epson_csv_to_export_dir",
+                type="primary"
             ):
                 saved, message = save_csv_to_export_dir(
                     epson_csv,
