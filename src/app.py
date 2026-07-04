@@ -14,6 +14,7 @@ import platform
 import getpass
 import csv
 import io
+import os
 import uuid
 import re
 import unicodedata
@@ -1663,6 +1664,30 @@ def append_past_journals_to_transactions(new_df):
 
     return len(new_df)
 
+
+def save_csv_to_export_dir(csv_bytes, filename, export_dir):
+
+    export_dir = str(export_dir or "").strip()
+
+    if not export_dir:
+        return False, "CSV保存先フォルダを入力してください"
+
+    if not os.path.isdir(export_dir):
+        return False, "CSV保存先フォルダが存在しません"
+
+    save_path = os.path.join(
+        export_dir,
+        os.path.basename(filename)
+    )
+
+    try:
+        with open(save_path, "wb") as file:
+            file.write(csv_bytes)
+    except OSError as e:
+        return False, f"CSVを保存できませんでした: {e}"
+
+    return True, f"保存しました：{save_path}"
+
 # =========================================
 # 初期設定
 # =========================================
@@ -1947,6 +1972,9 @@ if mode == "通常仕訳":
     if "company_name" not in st.session_state:
         st.session_state.company_name = ""
 
+    if "csv_export_dir" not in st.session_state:
+        st.session_state["csv_export_dir"] = ""
+
     def reset_for_next_journal_search():
 
         st.session_state["keyword_input"] = ""
@@ -1977,6 +2005,12 @@ if mode == "通常仕訳":
     st.sidebar.text_input(
         "入力会社",
         key="company_name"
+    )
+
+    st.sidebar.text_input(
+        "CSV保存先フォルダ",
+        placeholder=r"\\NAS\share\journal-ai\csv",
+        key="csv_export_dir"
     )
 
     if "account_candidate_success" in st.session_state:
@@ -3229,12 +3263,30 @@ if mode == "通常仕訳":
             f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
         )
     
-        st.download_button(
-            "入力用CSVをダウンロード",
-            data=input_csv,
-            file_name=input_csv_filename,
-            mime="text/csv"
-        )
+        input_download_col, input_save_col = st.columns([1, 1])
+
+        with input_download_col:
+            st.download_button(
+                "入力用CSVをダウンロード",
+                data=input_csv,
+                file_name=input_csv_filename,
+                mime="text/csv"
+            )
+
+        with input_save_col:
+            if st.button(
+                "入力用CSVを指定フォルダへ保存",
+                key="save_input_csv_to_export_dir"
+            ):
+                saved, message = save_csv_to_export_dir(
+                    input_csv,
+                    input_csv_filename,
+                    st.session_state.get("csv_export_dir", "")
+                )
+                if saved:
+                    st.success(message)
+                else:
+                    st.warning(message)
     
         # =====================================
         # エプソンCSV
@@ -3272,14 +3324,32 @@ if mode == "通常仕訳":
             )
     
         st.caption("登録済み仕訳をエプソン取込形式で保存します。")
-        st.download_button(
-            "エプソン取込CSVをダウンロード",
-            epson_csv,
-            epson_filename,
-            type="primary",
-            on_click=save_exported_journals,
-            args=(epson_rows,)
-        )
+        epson_download_col, epson_save_col = st.columns([1, 1])
+
+        with epson_download_col:
+            st.download_button(
+                "エプソン取込CSVをダウンロード",
+                epson_csv,
+                epson_filename,
+                type="primary",
+                on_click=save_exported_journals,
+                args=(epson_rows,)
+            )
+
+        with epson_save_col:
+            if st.button(
+                "エプソン取込CSVを指定フォルダへ保存",
+                key="save_epson_csv_to_export_dir"
+            ):
+                saved, message = save_csv_to_export_dir(
+                    epson_csv,
+                    epson_filename,
+                    st.session_state.get("csv_export_dir", "")
+                )
+                if saved:
+                    st.success(message)
+                else:
+                    st.warning(message)
     
 
 elif mode == "未収消込":
