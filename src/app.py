@@ -3296,23 +3296,36 @@ elif mode == "未収消込":
 
     with st.expander("未収一覧CSV取込"):
 
-        import_format = st.selectbox(
-            "取込形式",
-            [
-                "標準未収CSV形式",
-                "請求一覧Excel形式"
-            ],
-            key=(
-                "receivable_import_format_"
-                f"{st.session_state.receivable_import_key}"
+        format_col, upload_col = st.columns([1, 2])
+
+        with format_col:
+            import_format = st.selectbox(
+                "取込形式",
+                [
+                    "標準未収CSV形式",
+                    "請求一覧Excel形式"
+                ],
+                key=(
+                    "receivable_import_format_"
+                    f"{st.session_state.receivable_import_key}"
+                )
             )
-        )
 
         import_preview = None
         import_errors = pd.DataFrame()
         excluded_duplicate_count = 0
 
         if import_format == "標準未収CSV形式":
+
+            with upload_col:
+                uploaded_receivables = st.file_uploader(
+                    "未収一覧CSV",
+                    type=["csv"],
+                    key=(
+                        "receivable_import_csv_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                )
 
             st.markdown(
                 "標準未収CSV 必須列：\n\n"
@@ -3338,24 +3351,53 @@ elif mode == "未収消込":
                 "- 請求額と残高は必須です"
             )
 
-            uploaded_receivables = st.file_uploader(
-                "未収一覧CSV",
-                type=["csv"],
-                key=(
-                    "receivable_import_csv_"
-                    f"{st.session_state.receivable_import_key}"
-                )
-            )
-
         else:
 
-            invoice_date = st.date_input(
-                "請求日",
-                key=(
-                    "company_invoice_date_"
-                    f"{st.session_state.receivable_import_key}"
+            with upload_col:
+                uploaded_receivables = st.file_uploader(
+                    "請求一覧Excel",
+                    type=["xlsx", "xls"],
+                    key=(
+                        "receivable_import_excel_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
                 )
-            )
+
+            date_col, account_col, dept_col = st.columns([1, 1.3, 1.3])
+
+            with date_col:
+                invoice_date = st.date_input(
+                    "請求日",
+                    key=(
+                        "company_invoice_date_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                )
+
+            with account_col:
+                default_receivable_account = st.selectbox(
+                    "既定の未収科目",
+                    account_master,
+                    index=(
+                        account_master.index("未収運賃")
+                        if "未収運賃" in account_master
+                        else 0
+                    ),
+                    key=(
+                        "company_receivable_account_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                )
+
+            with dept_col:
+                import_department = st.selectbox(
+                    "部門",
+                    [""] + department_master,
+                    key=(
+                        "company_receivable_department_"
+                        f"{st.session_state.receivable_import_key}"
+                    )
+                )
 
             specify_payment_due_date = st.checkbox(
                 "入金予定日を指定する",
@@ -3378,38 +3420,6 @@ elif mode == "未収消込":
                 st.caption(
                     "入金予定日は請求日の翌月末で設定します"
                 )
-
-            default_receivable_account = st.selectbox(
-                "既定の未収科目",
-                account_master,
-                index=(
-                    account_master.index("未収運賃")
-                    if "未収運賃" in account_master
-                    else 0
-                ),
-                key=(
-                    "company_receivable_account_"
-                    f"{st.session_state.receivable_import_key}"
-                )
-            )
-
-            import_department = st.selectbox(
-                "部門",
-                [""] + department_master,
-                key=(
-                    "company_receivable_department_"
-                    f"{st.session_state.receivable_import_key}"
-                )
-            )
-
-            uploaded_receivables = st.file_uploader(
-                "請求一覧Excel",
-                type=["xlsx", "xls"],
-                key=(
-                    "receivable_import_excel_"
-                    f"{st.session_state.receivable_import_key}"
-                )
-            )
 
         if uploaded_receivables is not None:
 
@@ -3707,9 +3717,10 @@ elif mode == "未収消込":
                 )
             )
 
+            st.divider()
             st.subheader("① 取込サマリー（参照専用）")
-            st.caption(
-                "この一覧は確認用です。消込処理は下の『② 消込作業エリア』から行ってください。"
+            st.info(
+                "取引先別の未収残高と件数を確認できます。消込処理は下の『② 消込作業エリア』から行ってください。"
             )
 
             balance_summary_df = balance_df[
@@ -3724,7 +3735,7 @@ elif mode == "未収消込":
 
             st.subheader("② 消込作業エリア")
             st.caption(
-                "処理したい取引先を開いて、入金額を入力してください。"
+                "処理したい取引先を開き、確認情報、入金入力、候補表示の順に進めてください。"
             )
 
             for customer_idx, (_, customer) in enumerate(
@@ -3806,6 +3817,7 @@ elif mode == "未収消込":
                         ])
                     )
 
+                    st.caption("確認情報")
                     st.dataframe(
                         detail_df[detail_display_columns],
                         use_container_width=True
@@ -3826,27 +3838,37 @@ elif mode == "未収消込":
                         key=f"payment_form_{customer_idx}_{customer_name}"
                     ):
 
-                        payment_date = st.date_input(
-                            "入金日",
-                            key=f"payment_date_{customer_idx}"
-                        )
+                        st.caption("入金入力")
+                        (
+                            payment_date_col,
+                            payment_amount_col,
+                            receipt_account_col
+                        ) = st.columns([1, 1, 1.4])
 
-                        payment_amount_text = st.text_input(
-                            "入金額",
-                            placeholder="0",
-                            key=payment_amount_key
-                        )
+                        with payment_date_col:
+                            payment_date = st.date_input(
+                                "入金日",
+                                key=f"payment_date_{customer_idx}"
+                            )
 
-                        receipt_account = st.selectbox(
-                            "入金科目",
-                            payment_accounts,
-                            index=(
-                                payment_accounts.index(
-                                    st.session_state.receipt_account
-                                )
-                            ),
-                            key=f"receipt_account_{customer_idx}"
-                        )
+                        with payment_amount_col:
+                            payment_amount_text = st.text_input(
+                                "入金額",
+                                placeholder="0",
+                                key=payment_amount_key
+                            )
+
+                        with receipt_account_col:
+                            receipt_account = st.selectbox(
+                                "入金科目",
+                                payment_accounts,
+                                index=(
+                                    payment_accounts.index(
+                                        st.session_state.receipt_account
+                                    )
+                                ),
+                                key=f"receipt_account_{customer_idx}"
+                            )
 
                         st.caption(
                             "入金額を入力し、Enterキーでも候補を表示できます。"
