@@ -14,6 +14,7 @@ import platform
 import getpass
 import csv
 import io
+import json
 import os
 import uuid
 import re
@@ -1688,6 +1689,65 @@ def save_csv_to_export_dir(csv_bytes, filename, export_dir):
 
     return True, f"保存しました：{save_path}"
 
+
+SETTINGS_PATH = os.path.join(
+    "config",
+    "settings.json"
+)
+
+
+def load_system_settings():
+
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as file:
+            settings = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+    if not isinstance(settings, dict):
+        return {}
+
+    return {
+        "company_name": str(settings.get("company_name", "") or ""),
+        "csv_export_dir": str(settings.get("csv_export_dir", "") or ""),
+    }
+
+
+def save_system_settings(company_name, csv_export_dir):
+
+    settings = {
+        "company_name": str(company_name or ""),
+        "csv_export_dir": str(csv_export_dir or ""),
+    }
+
+    try:
+        os.makedirs(
+            os.path.dirname(SETTINGS_PATH),
+            exist_ok=True
+        )
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as file:
+            json.dump(
+                settings,
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+    except OSError as e:
+        return False, f"システム設定を保存できませんでした: {e}"
+
+    return True, ""
+
+
+def save_system_settings_from_state():
+
+    saved, message = save_system_settings(
+        st.session_state.get("company_name", ""),
+        st.session_state.get("csv_export_dir", "")
+    )
+
+    if not saved:
+        st.session_state["system_settings_warning"] = message
+
 # =========================================
 # 初期設定
 # =========================================
@@ -1968,12 +2028,20 @@ if mode == "通常仕訳":
     
     if "confirmed" not in st.session_state:
         st.session_state.confirmed = []
-    
+
+    loaded_system_settings = load_system_settings()
+
     if "company_name" not in st.session_state:
-        st.session_state.company_name = ""
+        st.session_state.company_name = loaded_system_settings.get(
+            "company_name",
+            ""
+        )
 
     if "csv_export_dir" not in st.session_state:
-        st.session_state["csv_export_dir"] = ""
+        st.session_state["csv_export_dir"] = loaded_system_settings.get(
+            "csv_export_dir",
+            ""
+        )
 
     def reset_for_next_journal_search():
 
@@ -2004,14 +2072,21 @@ if mode == "通常仕訳":
     
     st.sidebar.text_input(
         "入力会社",
-        key="company_name"
+        key="company_name",
+        on_change=save_system_settings_from_state
     )
 
     st.sidebar.text_input(
         "CSV保存先フォルダ",
         placeholder=r"\\NAS\share\journal-ai\csv",
-        key="csv_export_dir"
+        key="csv_export_dir",
+        on_change=save_system_settings_from_state
     )
+
+    if "system_settings_warning" in st.session_state:
+        st.sidebar.warning(
+            st.session_state.pop("system_settings_warning")
+        )
 
     if "account_candidate_success" in st.session_state:
         for message in st.session_state.pop(

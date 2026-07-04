@@ -1,5 +1,6 @@
 # 実データ
 data/transactions.csv
+config/settings.json
 
 # Python
 __pycache__/
