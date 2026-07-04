@@ -2459,7 +2459,48 @@ if mode == "通常仕訳":
         st.info("検索結果がありません")
     
     else:
-    
+
+        with st.expander("AIサーチ（補足説明）", expanded=False):
+            st.caption(
+                "検索結果をもとに、候補選択の理由や注意点を整理します。"
+                "仕訳の決定や検索順位の変更は行いません。"
+            )
+
+            if st.button(
+                "AIサーチで説明を表示",
+                key="run_ai_search_explanation"
+            ):
+                ai_candidates, ai_score_detail = build_ai_search_candidates(
+                    results
+                )
+                context = build_ai_search_context(
+                    keyword=st.session_state.get("keyword_input", ""),
+                    amount=amount,
+                    department=dept,
+                    candidates=ai_candidates,
+                    score_detail=ai_score_detail,
+                    ocr_text=(
+                        getattr(ocr_result, "raw_text", "")
+                        if ocr_result is not None
+                        else ""
+                    ),
+                )
+                ai_result = run_ai_search(context)
+
+                st.info(ai_result.get("summary", ""))
+
+                reasons = ai_result.get("reason", [])
+                if reasons:
+                    st.markdown("**理由**")
+                    for reason in reasons:
+                        st.write(f"- {reason}")
+
+                warnings = ai_result.get("warning", [])
+                if warnings:
+                    st.markdown("**注意点**")
+                    for warning in warnings:
+                        st.warning(warning)
+
         st.success(f"{len(results)}件ヒット")
 
         if (
@@ -2588,47 +2629,6 @@ if mode == "通常仕訳":
                     )
                     st.caption("下の候補詳細で編集・登録してください。")
 
-        with st.expander("AIサーチ（補足説明）", expanded=False):
-            st.caption(
-                "検索結果をもとに、候補選択の理由や注意点を整理します。"
-                "仕訳の決定や検索順位の変更は行いません。"
-            )
-
-            if st.button(
-                "AIサーチで説明を表示",
-                key="run_ai_search_explanation"
-            ):
-                ai_candidates, ai_score_detail = build_ai_search_candidates(
-                    results
-                )
-                context = build_ai_search_context(
-                    keyword=st.session_state.get("keyword_input", ""),
-                    amount=amount,
-                    department=dept,
-                    candidates=ai_candidates,
-                    score_detail=ai_score_detail,
-                    ocr_text=(
-                        getattr(ocr_result, "raw_text", "")
-                        if ocr_result is not None
-                        else ""
-                    ),
-                )
-                ai_result = run_ai_search(context)
-
-                st.info(ai_result.get("summary", ""))
-
-                reasons = ai_result.get("reason", [])
-                if reasons:
-                    st.markdown("**理由**")
-                    for reason in reasons:
-                        st.write(f"- {reason}")
-
-                warnings = ai_result.get("warning", [])
-                if warnings:
-                    st.markdown("**注意点**")
-                    for warning in warnings:
-                        st.warning(warning)
-    
         selected_candidate_index = st.session_state.get(
             "selected_candidate_index"
         )
