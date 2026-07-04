@@ -1690,6 +1690,145 @@ def save_csv_to_export_dir(csv_bytes, filename, export_dir):
     return True, f"保存しました：{save_path}"
 
 
+def save_file_to_export_dir(file_bytes, filename, export_dir):
+
+    export_dir = str(export_dir or "").strip()
+
+    if not export_dir:
+        return False, "CSV保存先フォルダを入力してください"
+
+    if not os.path.isdir(export_dir):
+        return False, "CSV保存先フォルダが存在しません"
+
+    save_path = os.path.join(
+        export_dir,
+        os.path.basename(filename)
+    )
+
+    try:
+        with open(save_path, "wb") as file:
+            file.write(file_bytes)
+    except OSError as e:
+        return False, f"ファイルを保存できませんでした: {e}"
+
+    return True, f"保存しました：{save_path}"
+
+
+def build_input_journal_excel(input_df):
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "簡易仕訳帳"
+
+    headers = list(input_df.columns)
+    worksheet.append(headers)
+
+    amount_columns = {
+        "借方金額",
+        "貸方金額",
+    }
+    wrap_columns = {
+        "摘要",
+        "伝票摘要",
+        "注意",
+    }
+    wrap_column_letters = set()
+
+    for _, row in input_df.iterrows():
+        values = []
+        for column in headers:
+            value = row.get(column, "")
+            if column in amount_columns and value not in ("", None):
+                try:
+                    value = int(str(value).replace(",", ""))
+                except ValueError:
+                    pass
+            values.append(value)
+        worksheet.append(values)
+
+    column_widths = {
+        "No": 4,
+        "伝票日付": 10,
+        "借方科目": 12,
+        "借方補助": 14,
+        "借方金額": 11,
+        "貸方科目": 12,
+        "貸方補助": 14,
+        "貸方金額": 11,
+        "摘要": 24,
+        "伝票摘要": 18,
+        "区分": 8,
+        "注意": 18,
+    }
+
+    thin_side = Side(style="thin", color="B7B7B7")
+    cell_border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side
+    )
+    header_fill = PatternFill(
+        fill_type="solid",
+        fgColor="D9EAF7"
+    )
+
+    for column_index, column_name in enumerate(headers, start=1):
+        column_letter = worksheet.cell(
+            row=1,
+            column=column_index
+        ).column_letter
+        worksheet.column_dimensions[column_letter].width = (
+            column_widths.get(column_name, 12)
+        )
+        if column_name in wrap_columns:
+            wrap_column_letters.add(column_letter)
+
+    for row in worksheet.iter_rows():
+        for cell in row:
+            cell.border = cell_border
+            cell.alignment = Alignment(
+                vertical="top",
+                wrap_text=(cell.column_letter in wrap_column_letters)
+            )
+            if headers[cell.column - 1] in amount_columns and cell.row > 1:
+                cell.number_format = "#,##0"
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.freeze_panes = "A2"
+    worksheet.print_title_rows = "1:1"
+    worksheet.page_setup.paperSize = 9
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    if worksheet.sheet_properties.pageSetUpPr is None:
+        worksheet.sheet_properties.pageSetUpPr = PageSetupProperties()
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.page_margins.left = 0.25
+    worksheet.page_margins.right = 0.25
+    worksheet.page_margins.top = 0.5
+    worksheet.page_margins.bottom = 0.5
+    worksheet.page_margins.header = 0.2
+    worksheet.page_margins.footer = 0.2
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 SETTINGS_PATH = os.path.join(
     "config",
     "settings.json"
@@ -3298,11 +3437,11 @@ if mode == "通常仕訳":
                         st.rerun()
     
         # =========================================
-        # CSV
+        # 出力
         # =========================================
         st.divider()
     
-        st.header("📄 CSV")
+        st.header("📄 出力")
     
         all_rows = []
     
@@ -3310,11 +3449,11 @@ if mode == "通常仕訳":
             all_rows.extend(doc)
     
         # =====================================
-        # 入力用CSV
+        # 入力用Excel
         # =====================================
-        st.subheader("入力用CSV（簡易仕訳帳）")
+        st.subheader("入力用Excel（簡易仕訳帳・印刷用）")
         st.caption(
-            "エプソンへ手入力・修正するための確認用一覧です。45列インポート形式ではありません。"
+            "エプソンへ手入力・修正するための印刷用一覧です。45列インポート形式ではありません。"
         )
 
         input_rows = build_input_csv_rows(
@@ -3330,39 +3469,40 @@ if mode == "通常仕訳":
             use_container_width=True
         )
 
-        input_csv = input_df.to_csv(
-            index=False
-        ).encode("cp932")
-        input_csv_filename = (
-            "input_journal_"
-            f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        input_excel = build_input_journal_excel(input_df)
+        input_excel_filename = (
+            "input_journal_print_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
     
-        input_download_col, input_save_col = st.columns([1, 1])
-
-        with input_download_col:
-            st.download_button(
-                "ブラウザでダウンロード",
-                data=input_csv,
-                file_name=input_csv_filename,
-                mime="text/csv"
-            )
+        input_save_col, input_download_col = st.columns([1, 1])
 
         with input_save_col:
             if st.button(
                 "共有フォルダへ保存",
-                key="save_input_csv_to_export_dir",
+                key="save_input_excel_to_export_dir",
                 type="primary"
             ):
-                saved, message = save_csv_to_export_dir(
-                    input_csv,
-                    input_csv_filename,
+                saved, message = save_file_to_export_dir(
+                    input_excel,
+                    input_excel_filename,
                     st.session_state.get("csv_export_dir", "")
                 )
                 if saved:
                     st.success(message)
                 else:
                     st.warning(message)
+
+        with input_download_col:
+            st.download_button(
+                "ブラウザでダウンロード",
+                data=input_excel,
+                file_name=input_excel_filename,
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                )
+            )
     
         # =====================================
         # エプソンCSV
@@ -3399,17 +3539,9 @@ if mode == "通常仕訳":
                 st.session_state.pop("epson_export_success")
             )
     
+        st.subheader("エプソン取込CSV")
         st.caption("登録済み仕訳をエプソン取込形式で保存します。")
-        epson_download_col, epson_save_col = st.columns([1, 1])
-
-        with epson_download_col:
-            st.download_button(
-                "ブラウザでダウンロード",
-                epson_csv,
-                epson_filename,
-                on_click=save_exported_journals,
-                args=(epson_rows,)
-            )
+        epson_save_col, epson_download_col = st.columns([1, 1])
 
         with epson_save_col:
             if st.button(
@@ -3426,6 +3558,15 @@ if mode == "通常仕訳":
                     st.success(message)
                 else:
                     st.warning(message)
+
+        with epson_download_col:
+            st.download_button(
+                "ブラウザでダウンロード",
+                epson_csv,
+                epson_filename,
+                on_click=save_exported_journals,
+                args=(epson_rows,)
+            )
     
 
 elif mode == "未収消込":
