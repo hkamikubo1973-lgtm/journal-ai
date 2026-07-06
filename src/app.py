@@ -49,6 +49,55 @@ ACCOUNT_CATEGORIES = [
 ]
 
 
+def normalize_ocr_amount_value(value):
+
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = re.sub(r"[^\d]", "", normalized)
+
+    if not normalized:
+        return None
+
+    return int(normalized)
+
+
+def get_ocr_amount_candidate_value(candidate):
+
+    if isinstance(candidate, dict):
+        candidate = (
+            candidate.get("amount")
+            or candidate.get("value")
+            or candidate.get("total")
+        )
+
+    return normalize_ocr_amount_value(candidate)
+
+
+def get_representative_ocr_amount(ocr_result, amount_candidates):
+
+    amount = normalize_ocr_amount_value(
+        getattr(ocr_result, "amount", None)
+    )
+
+    if amount is not None:
+        return amount
+
+    for candidate in amount_candidates:
+        amount = get_ocr_amount_candidate_value(candidate)
+        if amount is not None:
+            return amount
+
+    return None
+
+
 def format_ocr_amount_candidate(candidate):
 
     if isinstance(candidate, dict):
@@ -2188,6 +2237,7 @@ if mode == "通常仕訳":
         st.session_state["search_amount"] = None
         st.session_state.results = []
         st.session_state.pop("ocr_search_text_pending", None)
+        st.session_state.pop("ocr_search_amount_pending", None)
         st.session_state.pop("selected_candidate_index", None)
         st.session_state["selected_candidate_no"] = 1
         st.session_state["candidate_number_select_input"] = 1
@@ -2246,6 +2296,11 @@ if mode == "通常仕訳":
     if "ocr_search_text_pending" in st.session_state:
         st.session_state["keyword_input"] = (
             st.session_state.pop("ocr_search_text_pending")
+        )
+
+    if "ocr_search_amount_pending" in st.session_state:
+        st.session_state["search_amount"] = (
+            st.session_state.pop("ocr_search_amount_pending")
         )
     
     with st.sidebar.form(key="journal_search_form"):
@@ -2606,6 +2661,29 @@ if mode == "通常仕訳":
             )
         )
         warnings = getattr(ocr_result, "warnings", None) or []
+        raw_text = getattr(ocr_result, "raw_text", "") or ""
+        representative_amount = get_representative_ocr_amount(
+            ocr_result,
+            amount_candidates,
+        )
+
+        with st.expander("OCRレスポンスデバッグ（一時）", expanded=True):
+            st.write("ocr_result.amount:", getattr(ocr_result, "amount", None))
+            st.write(
+                "ocr_result.amount_candidates:",
+                getattr(ocr_result, "amount_candidates", None),
+            )
+            st.write(
+                "ocr_result.invoice_registration_number:",
+                getattr(ocr_result, "invoice_registration_number", None),
+            )
+            st.write(
+                "ocr_result.invoice_number_candidates:",
+                getattr(ocr_result, "invoice_number_candidates", None),
+            )
+            st.write("ocr_result.raw_text 先頭300文字:", raw_text[:300])
+            if warnings:
+                st.write("warnings:", warnings)
 
         st.write(
             "検索文字列候補:",
@@ -2613,7 +2691,16 @@ if mode == "通常仕訳":
         )
     
         st.write(
-            "金額候補:",
+            "代表金額候補:",
+            (
+                format_ocr_amount_candidate(representative_amount)
+                if representative_amount is not None
+                else ""
+            )
+        )
+
+        st.write(
+            "金額候補一覧:",
             format_ocr_candidates(
                 amount_candidates,
                 format_ocr_amount_candidate,
@@ -2693,6 +2780,9 @@ if mode == "通常仕訳":
         ):
             st.session_state["ocr_search_text_pending"] = (
                 ocr_result.search_text
+            )
+            st.session_state["ocr_search_amount_pending"] = (
+                representative_amount
             )
             st.rerun()
     
