@@ -887,7 +887,7 @@ def calculate_score(
 # =========================================
 # 検索
 # =========================================
-def search(records, keyword, dept, amount, freq):
+def search(records, keyword, dept, amount, freq, limit=5):
 
     #templates = load_templates()
 
@@ -918,7 +918,7 @@ def search(records, keyword, dept, amount, freq):
         results,
         key=lambda x: x[0],
         reverse=True
-    )[:5]
+    )[:limit]
 
 # =========================================
 # 金額サジェスト（安全版）

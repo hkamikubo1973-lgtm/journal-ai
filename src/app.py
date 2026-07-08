@@ -2295,6 +2295,9 @@ if mode == "通常仕訳":
     # =========================================
     if "results" not in st.session_state:
         st.session_state.results = []
+
+    if "journal_result_limit" not in st.session_state:
+        st.session_state["journal_result_limit"] = 5
     
     if "confirmed" not in st.session_state:
         st.session_state.confirmed = []
@@ -2323,6 +2326,9 @@ if mode == "通常仕訳":
         st.session_state.pop("selected_candidate_index", None)
         st.session_state["selected_candidate_no"] = 1
         st.session_state["candidate_number_select_input"] = 1
+        st.session_state["last_journal_search_limit"] = (
+            st.session_state.get("journal_result_limit", 5)
+        )
 
         if "editing_candidate_values" in st.session_state:
             st.session_state["editing_candidate_values"] = {}
@@ -2477,14 +2483,26 @@ if mode == "通常仕訳":
     # 検索実行
     # =========================================
     if search_clicked:
+
+        result_limit = int(
+            st.session_state.get("journal_result_limit", 5)
+        )
+        search_params = {
+            "keyword": st.session_state["keyword_input"],
+            "dept": dept if dept else None,
+            "amount": amount,
+        }
     
         st.session_state.results = search(
             records,
-            st.session_state["keyword_input"],
-            dept if dept else None,
-            amount,
-            freq
+            search_params["keyword"],
+            search_params["dept"],
+            search_params["amount"],
+            freq,
+            limit=result_limit
         )
+        st.session_state["last_journal_search_params"] = search_params
+        st.session_state["last_journal_search_limit"] = result_limit
         st.session_state.pop("selected_candidate_index", None)
     
     (
@@ -2879,6 +2897,39 @@ if mode == "通常仕訳":
         st.info("検索結果がありません")
     
     else:
+
+        result_limit = st.selectbox(
+            "表示件数",
+            [5, 10, 20],
+            key="journal_result_limit"
+        )
+
+        if (
+            st.session_state.get("last_journal_search_limit")
+            != result_limit
+        ):
+            search_params = st.session_state.get(
+                "last_journal_search_params",
+                {
+                    "keyword": st.session_state.get("keyword_input", ""),
+                    "dept": dept if dept else None,
+                    "amount": amount,
+                }
+            )
+            st.session_state.results = search(
+                records,
+                search_params.get("keyword", ""),
+                search_params.get("dept"),
+                search_params.get("amount"),
+                freq,
+                limit=result_limit
+            )
+            st.session_state["last_journal_search_limit"] = result_limit
+            st.session_state.pop("selected_candidate_index", None)
+            st.session_state["selected_candidate_no"] = 1
+            st.session_state["candidate_number_select_input"] = 1
+
+        results = st.session_state.results
 
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
