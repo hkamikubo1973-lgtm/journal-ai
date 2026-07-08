@@ -3034,11 +3034,18 @@ if mode == "通常仕訳":
         ) = st.columns([1.0, 0.55, 1.4, 3.2, 1.0])
 
         with limit_col:
-            result_limit = st.selectbox(
-                "表示件数",
-                [5, 10, 20],
-                key="journal_result_limit"
-            )
+            limit_label_col, limit_select_col = st.columns([0.7, 1])
+
+            with limit_label_col:
+                st.markdown("**表示件数**")
+
+            with limit_select_col:
+                result_limit = st.selectbox(
+                    "表示件数",
+                    [5, 10, 20],
+                    key="journal_result_limit",
+                    label_visibility="collapsed"
+                )
 
         if (
             st.session_state.get("last_journal_search_limit")
