@@ -40,6 +40,8 @@ from receivable_engine import (
     organize_completed_receivables,
 )
 
+DEBUG_SEARCH_DIAGNOSTICS = False
+
 ACCOUNT_CATEGORIES = [
     "資産",
     "負債",
@@ -416,6 +418,7 @@ from engine import (
     tokenize,
     get_amount_suggestions,
     get_account_suggestions,
+    diagnose_debug_target,
     update_search_csv
 )
 
@@ -2931,6 +2934,87 @@ if mode == "通常仕訳":
 
         results = st.session_state.results
 
+        if DEBUG_SEARCH_DIAGNOSTICS:
+            debug_search_params = st.session_state.get(
+                "last_journal_search_params",
+                {
+                    "keyword": st.session_state.get("keyword_input", ""),
+                    "dept": dept if dept else None,
+                    "amount": amount,
+                }
+            )
+            debug_diagnostic = diagnose_debug_target(
+                records,
+                debug_search_params.get("keyword", ""),
+                debug_search_params.get("dept"),
+                debug_search_params.get("amount"),
+                freq,
+                results=results
+            )
+
+            with st.expander("検索DB診断（開発用）", expanded=False):
+                st.dataframe(
+                    pd.DataFrame([{
+                        "対象行": (
+                            "あり"
+                            if debug_diagnostic.get("target_exists")
+                            else "なし"
+                        ),
+                        "rows": (
+                            "あり"
+                            if debug_diagnostic.get("in_rows")
+                            else "なし"
+                        ),
+                        "search_rows": (
+                            "あり"
+                            if debug_diagnostic.get("in_search_rows")
+                            else "なし"
+                        ),
+                        "スコア": debug_diagnostic.get("score"),
+                        "順位": debug_diagnostic.get("rank"),
+                        "所属グループID": (
+                            debug_diagnostic.get("group_id")
+                        ),
+                        "matched_row保持": (
+                            "あり"
+                            if debug_diagnostic.get("matched_row_kept")
+                            else "なし"
+                        ),
+                        "候補表示へ渡る": (
+                            "あり"
+                            if debug_diagnostic.get("passed_to_display")
+                            else "なし"
+                        ),
+                    }]),
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                target_row = debug_diagnostic.get("target_row")
+                if target_row:
+                    st.markdown("**対象行**")
+                    st.dataframe(
+                        pd.DataFrame([target_row]),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+                representative_row = debug_diagnostic.get(
+                    "representative_row"
+                )
+                if representative_row:
+                    st.markdown("**グループ代表行**")
+                    st.dataframe(
+                        pd.DataFrame([representative_row]),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+                score_detail = debug_diagnostic.get("score_detail") or []
+                if score_detail:
+                    st.markdown("**スコア内訳**")
+                    st.write(score_detail)
+
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
                 "検索結果をもとに、候補選択の理由や注意点を整理します。"
@@ -3184,8 +3268,10 @@ if mode == "通常仕訳":
                         )
                     ):
                         st.caption(
-                            "検索一致行に資金複合/諸口が含まれるため、"
-                            "編集欄では選択可能な科目へ変更してください。"
+                            "この検索一致行には「資金複合 / 諸口」が"
+                            "含まれています。編集欄では直接選択できない"
+                            "ため、実際に登録する相手科目へ変更して"
+                            "ください。"
                         )
     
                 with st.expander("検索理由"):

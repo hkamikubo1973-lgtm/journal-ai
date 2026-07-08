@@ -507,6 +507,163 @@ def build_matched_row_info(row, amount=None, match_type=""):
     }
 
 
+def is_debug_target_row(row):
+
+    date = row.get(COL_DATE, row.get("date", ""))
+
+    if date != "20250327":
+        return False
+
+    amount = to_int(row.get("amount"))
+
+    if (
+        amount != 1966850
+        and to_int(row.get(COL_DEBIT_AMOUNT)) != 1966850
+        and to_int(row.get(COL_CREDIT_AMOUNT)) != 1966850
+    ):
+        return False
+
+    accounts = {
+        row.get(COL_DEBIT, row.get("debit", "")),
+        row.get(COL_CREDIT, row.get("credit", ""))
+    }
+
+    if not {"仮払金", "資金複合"}.issubset(accounts):
+        return False
+
+    summary_text = " ".join([
+        str(row.get(COL_SUMMARY, row.get("summary", "")) or ""),
+        str(row.get("伝票摘要", "") or "")
+    ])
+
+    return "健厚" in summary_text
+
+
+def build_row_debug_info(row):
+
+    if not row:
+        return {}
+
+    return {
+        "日付": row.get(COL_DATE, ""),
+        "借方科目コード": row.get("借方科目", ""),
+        "借方科目名": row.get(COL_DEBIT, ""),
+        "貸方科目コード": row.get("貸方科目", ""),
+        "貸方科目名": row.get(COL_CREDIT, ""),
+        "借方補助": row.get(COL_DEBIT_SUB, ""),
+        "貸方補助": row.get(COL_CREDIT_SUB, ""),
+        "借方金額": to_int(row.get(COL_DEBIT_AMOUNT)),
+        "貸方金額": to_int(row.get(COL_CREDIT_AMOUNT)),
+        "摘要": row.get(COL_SUMMARY, ""),
+        "伝票摘要": row.get("伝票摘要", ""),
+    }
+
+
+def diagnose_debug_target(records, keyword, dept, amount, freq, results=None):
+
+    diagnostic = {
+        "target_exists": False,
+        "in_rows": False,
+        "in_search_rows": False,
+        "score": None,
+        "rank": None,
+        "group_id": None,
+        "representative_row": None,
+        "target_row": None,
+        "matched_row_kept": False,
+        "passed_to_display": False,
+        "score_detail": [],
+    }
+
+    all_results = []
+
+    for group_id, rec in enumerate(records, start=1):
+
+        rows = rec.get("rows", [])
+        search_rows = rec.get("search_rows", rows)
+
+        rows_matches = [
+            row
+            for row in rows
+            if is_debug_target_row(row)
+        ]
+        search_rows_matches = [
+            row
+            for row in search_rows
+            if is_debug_target_row(row)
+        ]
+
+        s, score_detail, matched_amount_row = calculate_score(
+            rec,
+            keyword,
+            dept,
+            amount,
+            freq
+        )
+        all_results.append({
+            "group_id": group_id,
+            "record": rec,
+            "score": s,
+            "score_detail": score_detail,
+            "matched_amount_row": matched_amount_row,
+            "rows_matches": rows_matches,
+            "search_rows_matches": search_rows_matches,
+        })
+
+    ranked_results = sorted(
+        all_results,
+        key=lambda item: item["score"],
+        reverse=True
+    )
+
+    for rank, item in enumerate(ranked_results, start=1):
+
+        if not (
+            item["rows_matches"]
+            or item["search_rows_matches"]
+        ):
+            continue
+
+        rec = item["record"]
+        representative_row = (
+            rec.get("rows", [{}])[0]
+            if rec.get("rows")
+            else {}
+        )
+        target_row = (
+            item["rows_matches"][0]
+            if item["rows_matches"]
+            else item["search_rows_matches"][0]
+        )
+        matched_row = item.get("matched_amount_row") or {}
+
+        diagnostic.update({
+            "target_exists": True,
+            "in_rows": bool(item["rows_matches"]),
+            "in_search_rows": bool(item["search_rows_matches"]),
+            "score": item["score"],
+            "rank": rank,
+            "group_id": item["group_id"],
+            "representative_row": build_row_debug_info(
+                representative_row
+            ),
+            "target_row": build_row_debug_info(target_row),
+            "matched_row_kept": is_debug_target_row(matched_row),
+            "score_detail": item["score_detail"],
+        })
+        break
+
+    if results and diagnostic["target_exists"]:
+        for _, rec, _ in results:
+            if rec.get("matched_amount_row") and is_debug_target_row(
+                rec.get("matched_amount_row")
+            ):
+                diagnostic["passed_to_display"] = True
+                break
+
+    return diagnostic
+
+
 # =========================================
 # データ読込
 # =========================================
