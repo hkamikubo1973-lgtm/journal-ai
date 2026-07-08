@@ -657,6 +657,24 @@ def get_row_account(row, side):
     return str(row.get(COL_CREDIT, row.get("credit", "")) or "").strip()
 
 
+SETTLEMENT_REPLACEMENT_ACCOUNTS = {
+    "現金",
+    "普通預金",
+    "当座預金",
+}
+
+
+def is_settlement_replacement_account(account):
+
+    account = str(account or "").strip()
+
+    return (
+        account in SETTLEMENT_REPLACEMENT_ACCOUNTS
+        or "預金" in account
+        or "現金" in account
+    )
+
+
 def infer_block_replacement_accounts(rows, target_row, target_side):
 
     target_account = get_row_account(target_row, target_side)
@@ -665,21 +683,11 @@ def infer_block_replacement_accounts(rows, target_row, target_side):
         return []
 
     opposite_side = "credit" if target_side == "debit" else "debit"
-    preferred = []
-    fallback = []
+    candidates = []
 
     for row in rows:
         same_side_account = get_row_account(row, target_side)
         opposite_account = get_row_account(row, opposite_side)
-
-        if same_side_account == target_account:
-            if (
-                opposite_account
-                and not is_excluded_account(opposite_account)
-                and opposite_account != target_account
-            ):
-                fallback.append(opposite_account)
-            continue
 
         if opposite_account != target_account:
             continue
@@ -690,9 +698,26 @@ def infer_block_replacement_accounts(rows, target_row, target_side):
             and not is_excluded_account(replacement_account)
             and replacement_account != target_account
         ):
-            preferred.append(replacement_account)
+            candidates.append(replacement_account)
 
-    return list(dict.fromkeys(preferred + fallback))
+    candidates = list(dict.fromkeys(candidates))
+
+    return sorted(
+        candidates,
+        key=lambda account: (
+            0
+            if is_settlement_replacement_account(account)
+            else 1
+        )
+    )
+
+
+def get_account_label_set(recommended_accounts, priority_accounts):
+
+    if priority_accounts is not None:
+        return set(priority_accounts)
+
+    return recommended_accounts
 
 
 def should_show_voucher_block(rec, matched_row):
@@ -3561,6 +3586,14 @@ if mode == "通常仕訳":
                                     priority_accounts=block_debit_candidates
                                 )
                             )
+                            debit_label_accounts = get_account_label_set(
+                                recommended_debits,
+                                (
+                                    block_debit_candidates
+                                    if show_voucher_block
+                                    else None
+                                )
+                            )
 
                             debit = st.selectbox(
                                 "借方",
@@ -3578,7 +3611,7 @@ if mode == "通常仕訳":
                                 key=debit_key,
                                 format_func=(
                                     lambda account,
-                                    recommended=recommended_debits,
+                                    recommended=debit_label_accounts,
                                     label=recommendation_label:
                                     format_recommended_account(
                                         account,
@@ -3616,6 +3649,14 @@ if mode == "通常仕訳":
                                     priority_accounts=block_credit_candidates
                                 )
                             )
+                            credit_label_accounts = get_account_label_set(
+                                recommended_credits,
+                                (
+                                    block_credit_candidates
+                                    if show_voucher_block
+                                    else None
+                                )
+                            )
 
                             credit = st.selectbox(
                                 "貸方",
@@ -3633,7 +3674,7 @@ if mode == "通常仕訳":
                                 key=credit_key,
                                 format_func=(
                                     lambda account,
-                                    recommended=recommended_credits,
+                                    recommended=credit_label_accounts,
                                     label=recommendation_label:
                                     format_recommended_account(
                                         account,
