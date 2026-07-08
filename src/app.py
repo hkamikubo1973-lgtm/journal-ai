@@ -2901,39 +2901,6 @@ if mode == "通常仕訳":
     
     else:
 
-        result_limit = st.selectbox(
-            "表示件数",
-            [5, 10, 20],
-            key="journal_result_limit"
-        )
-
-        if (
-            st.session_state.get("last_journal_search_limit")
-            != result_limit
-        ):
-            search_params = st.session_state.get(
-                "last_journal_search_params",
-                {
-                    "keyword": st.session_state.get("keyword_input", ""),
-                    "dept": dept if dept else None,
-                    "amount": amount,
-                }
-            )
-            st.session_state.results = search(
-                records,
-                search_params.get("keyword", ""),
-                search_params.get("dept"),
-                search_params.get("amount"),
-                freq,
-                limit=result_limit
-            )
-            st.session_state["last_journal_search_limit"] = result_limit
-            st.session_state.pop("selected_candidate_index", None)
-            st.session_state["selected_candidate_no"] = 1
-            st.session_state["candidate_number_select_input"] = 1
-
-        results = st.session_state.results
-
         if DEBUG_SEARCH_DIAGNOSTICS:
             debug_search_params = st.session_state.get(
                 "last_journal_search_params",
@@ -3056,7 +3023,50 @@ if mode == "通常仕訳":
                     for warning in warnings:
                         st.warning(warning)
 
-        st.success(f"{len(results)}件ヒット")
+        result_count_message = st.empty()
+
+        (
+            label_col,
+            input_col,
+            button_col,
+            spacer_col,
+            limit_col,
+        ) = st.columns([1.0, 0.55, 1.4, 3.2, 1.0])
+
+        with limit_col:
+            result_limit = st.selectbox(
+                "表示件数",
+                [5, 10, 20],
+                key="journal_result_limit"
+            )
+
+        if (
+            st.session_state.get("last_journal_search_limit")
+            != result_limit
+        ):
+            search_params = st.session_state.get(
+                "last_journal_search_params",
+                {
+                    "keyword": st.session_state.get("keyword_input", ""),
+                    "dept": dept if dept else None,
+                    "amount": amount,
+                }
+            )
+            st.session_state.results = search(
+                records,
+                search_params.get("keyword", ""),
+                search_params.get("dept"),
+                search_params.get("amount"),
+                freq,
+                limit=result_limit
+            )
+            st.session_state["last_journal_search_limit"] = result_limit
+            st.session_state.pop("selected_candidate_index", None)
+            st.session_state["selected_candidate_no"] = 1
+            st.session_state["candidate_number_select_input"] = 1
+
+        results = st.session_state.results
+        result_count_message.success(f"{len(results)}件ヒット")
 
         if (
             st.session_state.get("selected_candidate_no", 1) < 1
@@ -3112,10 +3122,6 @@ if mode == "通常仕訳":
                 st.session_state[
                     "candidate_select_message"
                 ] = "候補番号が範囲外です。"
-
-        label_col, input_col, button_col, spacer_col = st.columns(
-            [1.0, 0.55, 1.4, 5]
-        )
 
         with label_col:
             st.markdown("**候補番号**")
