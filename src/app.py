@@ -1621,7 +1621,10 @@ def build_input_csv_rows(confirmed_journals):
     return rows
 
 
-def build_ai_search_candidates(results):
+AI_SEARCH_RESULT_LIMIT = 20
+
+
+def build_ai_search_candidates(results, visible_count=0):
 
     candidates = []
     score_details = []
@@ -1643,10 +1646,14 @@ def build_ai_search_candidates(results):
         candidate = {
             "rank": index,
             "score": score,
+            "visible": index <= visible_count,
             "date": first_row.get(COL_DATE, ""),
             "summary": first_row.get(COL_SUMMARY, ""),
+            "description": first_row.get(COL_SUMMARY, ""),
             "debit": first_row.get(COL_DEBIT, ""),
             "credit": first_row.get(COL_CREDIT, ""),
+            "debit_account": first_row.get(COL_DEBIT, ""),
+            "credit_account": first_row.get(COL_CREDIT, ""),
             "row_count": len(rows),
             "amount": get_voucher_total(rows),
         }
@@ -2450,6 +2457,9 @@ if mode == "通常仕訳":
     if "results" not in st.session_state:
         st.session_state.results = []
 
+    if "ai_search_results" not in st.session_state:
+        st.session_state.ai_search_results = []
+
     if "journal_result_limit" not in st.session_state:
         st.session_state["journal_result_limit"] = 5
     
@@ -2475,6 +2485,7 @@ if mode == "通常仕訳":
         st.session_state["keyword_input"] = ""
         st.session_state["search_amount"] = None
         st.session_state.results = []
+        st.session_state.ai_search_results = []
         st.session_state.pop("ocr_search_text_pending", None)
         st.session_state.pop("ocr_search_amount_pending", None)
         st.session_state.pop("selected_candidate_index", None)
@@ -2654,6 +2665,14 @@ if mode == "通常仕訳":
             search_params["amount"],
             freq,
             limit=result_limit
+        )
+        st.session_state.ai_search_results = search(
+            records,
+            search_params["keyword"],
+            search_params["dept"],
+            search_params["amount"],
+            freq,
+            limit=AI_SEARCH_RESULT_LIMIT
         )
         st.session_state["last_journal_search_params"] = search_params
         st.session_state["last_journal_search_limit"] = result_limit
@@ -3143,15 +3162,32 @@ if mode == "通常仕訳":
                 "AIサーチで説明を表示",
                 key="run_ai_search_explanation"
             ):
+                ai_search_results = (
+                    st.session_state.get("ai_search_results") or results
+                )
+                ai_search_params = st.session_state.get(
+                    "last_journal_search_params",
+                    {
+                        "keyword": st.session_state.get(
+                            "keyword_input",
+                            ""
+                        ),
+                        "dept": dept if dept else None,
+                        "amount": amount,
+                    }
+                )
                 ai_candidates, ai_score_detail = build_ai_search_candidates(
-                    results
+                    ai_search_results,
+                    visible_count=len(results)
                 )
                 context = build_ai_search_context(
-                    keyword=st.session_state.get("keyword_input", ""),
-                    amount=amount,
-                    department=dept,
+                    keyword=ai_search_params.get("keyword", ""),
+                    amount=ai_search_params.get("amount"),
+                    department=ai_search_params.get("dept"),
                     candidates=ai_candidates,
                     score_detail=ai_score_detail,
+                    visible_count=len(results),
+                    max_candidate_count=AI_SEARCH_RESULT_LIMIT,
                     ocr_text=(
                         getattr(ocr_result, "raw_text", "")
                         if ocr_result is not None
@@ -3215,6 +3251,14 @@ if mode == "通常仕訳":
                 search_params.get("amount"),
                 freq,
                 limit=result_limit
+            )
+            st.session_state.ai_search_results = search(
+                records,
+                search_params.get("keyword", ""),
+                search_params.get("dept"),
+                search_params.get("amount"),
+                freq,
+                limit=AI_SEARCH_RESULT_LIMIT
             )
             st.session_state["last_journal_search_limit"] = result_limit
             st.session_state.pop("selected_candidate_index", None)

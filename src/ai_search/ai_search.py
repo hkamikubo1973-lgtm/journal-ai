@@ -8,6 +8,8 @@ def build_ai_search_context(
     department="",
     candidates=None,
     score_detail=None,
+    visible_count=0,
+    max_candidate_count=20,
     ocr_text=""
 ):
     """
@@ -21,6 +23,8 @@ def build_ai_search_context(
         "department": department or "",
         "candidates": candidates or [],
         "score_detail": score_detail or [],
+        "visible_count": visible_count or 0,
+        "max_candidate_count": max_candidate_count or 20,
         "ocr_text": ocr_text or "",
     }
 
