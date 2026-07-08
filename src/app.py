@@ -526,6 +526,16 @@ def format_recommended_account(account, recommended_accounts):
     return account
 
 
+def extract_amount_match_detail(score_detail):
+
+    for detail in score_detail:
+        if detail.startswith("金額一致行:"):
+            text = detail[len("金額一致行:"):]
+            return text.rsplit(" +", 1)[0]
+
+    return ""
+
+
 RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED = {
     "資金複合",
     "諸口",
@@ -2997,6 +3007,7 @@ if mode == "通常仕訳":
             doc_id = f"{idx}_{id(rec)}"
             is_selected_candidate = selected_candidate_index == display_index
             selected_marker = "【選択中】" if is_selected_candidate else ""
+            amount_match_detail = extract_amount_match_detail(score_detail)
     
             summary = (
                 f"候補 {idx}{selected_marker} / スコア {score} "
@@ -3004,6 +3015,8 @@ if mode == "通常仕訳":
                 f"　{len(rows)}行"
                 f"　¥{get_voucher_total(rows):,}"
             )
+            if amount_match_detail:
+                summary += f"　金額一致行: {amount_match_detail}"
     
             with st.expander(
                 summary,
@@ -3048,6 +3061,11 @@ if mode == "通常仕訳":
                         for d in score_detail
                     ):
                         st.write("✅ 複数キーワード一致")
+
+                    if amount_match_detail:
+                        st.write(
+                            f"✅ 金額一致行: {amount_match_detail}"
+                        )
     
                 st.divider()
     

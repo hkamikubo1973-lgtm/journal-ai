@@ -473,6 +473,16 @@ def get_voucher_total(rows):
     )
 
 
+def build_search_rows(rows):
+
+    expanded_rows = explode_fukugo(rows)
+
+    if expanded_rows is rows or expanded_rows == rows:
+        return rows
+
+    return rows + expanded_rows
+
+
 # =========================================
 # データ読込
 # =========================================
@@ -507,7 +517,7 @@ def load_data():
 
     for g in groups:
 
-        g = explode_fukugo(g)
+        search_rows = build_search_rows(g)
 
         # 空伝票防止
         if not g:
@@ -515,7 +525,7 @@ def load_data():
 
         tokens = []
 
-        for r in g:
+        for r in search_rows:
 
             text = " ".join(
                 str(r.get(col, ""))
@@ -541,6 +551,9 @@ def load_data():
 
             "rows":
                 g,
+
+            "search_rows":
+                search_rows,
 
             "tokens":
                 list(set(tokens)),
@@ -669,6 +682,10 @@ def calculate_score(
     score_detail = []
 
     tokens = rec["tokens"]
+    search_rows = rec.get(
+        "search_rows",
+        rec["rows"]
+    )
 
     q = tokenize(keyword)
 
@@ -677,7 +694,7 @@ def calculate_score(
     # =========================================
     # 補助科目一致
     # =========================================
-    for r in rec["rows"]:
+    for r in search_rows:
 
         debit_sub = normalize(
             r.get(COL_DEBIT_SUB, "")
@@ -747,7 +764,7 @@ def calculate_score(
 
     # 部門
     if dept:
-        for r in rec["rows"]:
+        for r in search_rows:
             if dept in get_department(r):
                 score += 120
 
@@ -765,6 +782,23 @@ def calculate_score(
             score_detail.append(
                 f"金額一致:{amount} +200"
             )
+        else:
+            for r in search_rows:
+                if (
+                    to_int(r.get(COL_DEBIT_AMOUNT)) == amount
+                    or to_int(r.get(COL_CREDIT_AMOUNT)) == amount
+                ):
+                    score += 200
+
+                    score_detail.append(
+                        "金額一致行:"
+                        f"{r.get(COL_DATE, '')} "
+                        f"{r.get(COL_DEBIT, '')}/"
+                        f"{r.get(COL_CREDIT, '')} "
+                        f"{amount} "
+                        f"{r.get(COL_SUMMARY, '')} +200"
+                    )
+                    break
 
     # =========================================
     # 年度（相対化）
