@@ -613,6 +613,62 @@ def build_matched_row_display(matched_row):
     }
 
 
+def row_has_excluded_account(row):
+
+    if not isinstance(row, dict):
+        return False
+
+    debit = row.get(COL_DEBIT, row.get("debit", ""))
+    credit = row.get(COL_CREDIT, row.get("credit", ""))
+
+    return (
+        is_excluded_account(debit)
+        or is_excluded_account(credit)
+    )
+
+
+def should_show_voucher_block(rec, matched_row):
+
+    if row_has_excluded_account(matched_row):
+        return True
+
+    for row in rec.get("rows", []):
+        if row_has_excluded_account(row):
+            return True
+
+    return False
+
+
+def build_voucher_block_display(rows):
+
+    display_rows = []
+
+    for row in rows:
+        amount = max(
+            to_int(row.get(COL_DEBIT_AMOUNT)),
+            to_int(row.get(COL_CREDIT_AMOUNT))
+        )
+
+        display_rows.append({
+            "日付": format_search_match_date(
+                row.get(COL_DATE, "")
+            ),
+            "借方": format_account_name_with_code(
+                row.get(COL_DEBIT, "")
+            ),
+            "貸方": format_account_name_with_code(
+                row.get(COL_CREDIT, "")
+            ),
+            "借方補助": row.get(COL_DEBIT_SUB, ""),
+            "貸方補助": row.get(COL_CREDIT_SUB, ""),
+            "金額": f"{amount:,}" if amount else "",
+            "摘要": row.get(COL_SUMMARY, ""),
+            "伝票摘要": row.get("伝票摘要", ""),
+        })
+
+    return display_rows
+
+
 RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED = {
     "資金複合",
     "諸口",
@@ -3233,6 +3289,10 @@ if mode == "通常仕訳":
             is_selected_candidate = selected_candidate_index == display_index
             selected_marker = "【選択中】" if is_selected_candidate else ""
             matched_amount_row = get_matched_amount_row(rec)
+            show_voucher_block = should_show_voucher_block(
+                rec,
+                matched_amount_row
+            )
             matched_row_title = format_matched_row_title(
                 matched_amount_row
             )
@@ -3286,6 +3346,29 @@ if mode == "通常仕訳":
                             "ため、実際に登録する相手科目へ変更して"
                             "ください。"
                         )
+
+                if show_voucher_block:
+                    st.info(
+                        "この候補は「資金複合 / 諸口」を含む"
+                        "複合仕訳です。編集欄では資金複合 / 諸口を"
+                        "直接選択できないため、下の同一伝票ブロックを"
+                        "確認し、実際に登録する相手科目へ変更して"
+                        "ください。"
+                    )
+                    st.markdown("**同一伝票ブロック（参考）**")
+                    st.dataframe(
+                        pd.DataFrame(
+                            build_voucher_block_display(
+                                rec.get("rows", [])
+                            )
+                        ),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                    st.caption(
+                        "表示のみです。登録内容やCSV出力値は、"
+                        "下の編集欄で確定した内容が使われます。"
+                    )
     
                 with st.expander("検索理由"):
     
