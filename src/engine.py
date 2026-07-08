@@ -1185,6 +1185,60 @@ def calculate_score(
 # =========================================
 # 検索
 # =========================================
+def get_journal_pattern_key(rec):
+
+    matched_row = rec.get("matched_amount_row") or {}
+
+    if matched_row:
+        return (
+            str(matched_row.get("debit_code") or matched_row.get("debit", "")),
+            str(matched_row.get("credit_code") or matched_row.get("credit", "")),
+            str(matched_row.get("debit_sub", "")),
+            str(matched_row.get("credit_sub", "")),
+        )
+
+    rows = rec.get("rows", [])
+    row = rows[0] if rows else {}
+
+    return (
+        str(row.get("借方科目") or row.get(COL_DEBIT, "")),
+        str(row.get("貸方科目") or row.get(COL_CREDIT, "")),
+        str(row.get("借方補助") or row.get(COL_DEBIT_SUB, "")),
+        str(row.get("貸方補助") or row.get(COL_CREDIT_SUB, "")),
+    )
+
+
+def diversify_search_results(
+    results,
+    limit,
+    max_per_pattern=2
+):
+
+    selected = []
+    pattern_counts = Counter()
+
+    for score, rec, score_detail in results:
+        pattern_key = get_journal_pattern_key(rec)
+        pattern_rank = pattern_counts[pattern_key] + 1
+
+        if pattern_rank > max_per_pattern:
+            continue
+
+        result_rec = dict(rec)
+        result_rec["pattern_key"] = pattern_key
+        result_rec["pattern_rank"] = pattern_rank
+
+        selected.append(
+            (score, result_rec, score_detail)
+        )
+        pattern_counts[pattern_key] += 1
+
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def search(records, keyword, dept, amount, freq, limit=5):
 
     #templates = load_templates()
@@ -1212,11 +1266,16 @@ def search(records, keyword, dept, amount, freq, limit=5):
                 (s, result_rec, score_detail)
             )
 
-    return sorted(
+    sorted_results = sorted(
         results,
         key=lambda x: x[0],
         reverse=True
-    )[:limit]
+    )
+
+    return diversify_search_results(
+        sorted_results,
+        limit
+    )
 
 # =========================================
 # 金額サジェスト（安全版）
