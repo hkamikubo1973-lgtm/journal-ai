@@ -521,10 +521,14 @@ def is_excluded_account(account):
     return str(account or "").strip() in EXCLUDED_SUGGESTION_ACCOUNTS
 
 
-def format_recommended_account(account, recommended_accounts):
+def format_recommended_account(
+    account,
+    recommended_accounts,
+    label="推奨"
+):
 
     if account in recommended_accounts:
-        return f"【推奨】{account}"
+        return f"【{label}】{account}"
 
     return account
 
@@ -3293,6 +3297,11 @@ if mode == "通常仕訳":
                 rec,
                 matched_amount_row
             )
+            recommendation_label = (
+                "候補"
+                if show_voucher_block
+                else "推奨"
+            )
             matched_row_title = format_matched_row_title(
                 matched_amount_row
             )
@@ -3497,10 +3506,12 @@ if mode == "通常仕訳":
                                 key=debit_key,
                                 format_func=(
                                     lambda account,
-                                    recommended=recommended_debits:
+                                    recommended=recommended_debits,
+                                    label=recommendation_label:
                                     format_recommended_account(
                                         account,
-                                        recommended
+                                        recommended,
+                                        label=label
                                     )
                                 )
                             )
@@ -3542,10 +3553,12 @@ if mode == "通常仕訳":
                                 key=credit_key,
                                 format_func=(
                                     lambda account,
-                                    recommended=recommended_credits:
+                                    recommended=recommended_credits,
+                                    label=recommendation_label:
                                     format_recommended_account(
                                         account,
-                                        recommended
+                                        recommended,
+                                        label=label
                                     )
                                 )
                             )
