@@ -536,6 +536,78 @@ def extract_amount_match_detail(score_detail):
     return ""
 
 
+def get_matched_amount_row(rec):
+
+    if not isinstance(rec, dict):
+        return None
+
+    matched_row = rec.get("matched_amount_row")
+
+    if isinstance(matched_row, dict) and matched_row:
+        return matched_row
+
+    return None
+
+
+def format_search_match_date(date_value):
+
+    text = str(date_value or "").strip()
+
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}/{text[4:6]}/{text[6:]}"
+
+    return text
+
+
+def format_matched_row_title(matched_row):
+
+    if not matched_row:
+        return ""
+
+    debit = matched_row.get("debit", "")
+    credit = matched_row.get("credit", "")
+    amount = to_int(matched_row.get("amount"))
+    summary = matched_row.get("summary", "")
+
+    parts = []
+
+    if summary:
+        parts.append(summary)
+
+    account_text = f"{debit}→{credit}".strip("→")
+    if account_text:
+        parts.append(f"一致行：{account_text}")
+
+    if amount:
+        parts.append(f"¥{amount:,}")
+
+    return " / ".join(parts)
+
+
+def build_matched_row_display(matched_row):
+
+    if not matched_row:
+        return {}
+
+    amount = to_int(matched_row.get("amount"))
+
+    return {
+        "日付": format_search_match_date(
+            matched_row.get("date", "")
+        ),
+        "借方": format_account_name_with_code(
+            matched_row.get("debit", "")
+        ),
+        "貸方": format_account_name_with_code(
+            matched_row.get("credit", "")
+        ),
+        "借方補助": matched_row.get("debit_sub", ""),
+        "貸方補助": matched_row.get("credit_sub", ""),
+        "金額": f"{amount:,}" if amount else "",
+        "摘要": matched_row.get("summary", ""),
+    }
+
+
 RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED = {
     "資金複合",
     "諸口",
@@ -2953,6 +3025,7 @@ if mode == "通常仕訳":
                 selected_candidate_index
             ]
             if isinstance(selected_rec, dict) and "rows" in selected_rec:
+                selected_matched_row = get_matched_amount_row(selected_rec)
                 selected_rows = split_journal(selected_rec["rows"])
                 if selected_rows:
                     selected_first_row = selected_rows[0]
@@ -2976,6 +3049,10 @@ if mode == "通常仕訳":
                         use_container_width=True
                     )
                     st.caption("下の候補詳細で編集・登録してください。")
+                    if selected_matched_row:
+                        st.caption(
+                            "検索一致行は下の候補詳細に別表示しています。"
+                        )
 
         selected_candidate_index = st.session_state.get(
             "selected_candidate_index"
@@ -3007,16 +3084,26 @@ if mode == "通常仕訳":
             doc_id = f"{idx}_{id(rec)}"
             is_selected_candidate = selected_candidate_index == display_index
             selected_marker = "【選択中】" if is_selected_candidate else ""
+            matched_amount_row = get_matched_amount_row(rec)
+            matched_row_title = format_matched_row_title(
+                matched_amount_row
+            )
             amount_match_detail = extract_amount_match_detail(score_detail)
     
-            summary = (
-                f"候補 {idx}{selected_marker} / スコア {score} "
-                f"{rows[0].get('摘要','')}"
-                f"　{len(rows)}行"
-                f"　¥{get_voucher_total(rows):,}"
-            )
-            if amount_match_detail:
-                summary += f"　金額一致行: {amount_match_detail}"
+            if matched_row_title:
+                summary = (
+                    f"候補 {idx}{selected_marker} / スコア {score} "
+                    f"{matched_row_title}"
+                )
+            else:
+                summary = (
+                    f"候補 {idx}{selected_marker} / スコア {score} "
+                    f"{rows[0].get('摘要','')}"
+                    f"　{len(rows)}行"
+                    f"　¥{get_voucher_total(rows):,}"
+                )
+                if amount_match_detail:
+                    summary += f"　金額一致行: {amount_match_detail}"
     
             with st.expander(
                 summary,
@@ -3027,6 +3114,28 @@ if mode == "通常仕訳":
                     st.info(
                         "現在この候補が編集対象として選択されています。"
                     )
+
+                if matched_amount_row:
+                    st.markdown("**検索一致行**")
+                    st.dataframe(
+                        pd.DataFrame([
+                            build_matched_row_display(matched_amount_row)
+                        ]),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                    if (
+                        is_excluded_account(
+                            matched_amount_row.get("debit", "")
+                        )
+                        or is_excluded_account(
+                            matched_amount_row.get("credit", "")
+                        )
+                    ):
+                        st.caption(
+                            "検索一致行に資金複合/諸口が含まれるため、"
+                            "編集欄では選択可能な科目へ変更してください。"
+                        )
     
                 with st.expander("検索理由"):
     
@@ -3062,7 +3171,12 @@ if mode == "通常仕訳":
                     ):
                         st.write("✅ 複数キーワード一致")
 
-                    if amount_match_detail:
+                    if matched_amount_row:
+                        st.write(
+                            "✅ 金額一致行: "
+                            f"{format_matched_row_title(matched_amount_row)}"
+                        )
+                    elif amount_match_detail:
                         st.write(
                             f"✅ 金額一致行: {amount_match_detail}"
                         )

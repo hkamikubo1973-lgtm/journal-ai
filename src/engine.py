@@ -483,6 +483,30 @@ def build_search_rows(rows):
     return rows + expanded_rows
 
 
+def build_matched_row_info(row, amount=None, match_type=""):
+
+    matched_amount = amount
+
+    if matched_amount is None:
+        matched_amount = max(
+            to_int(row.get(COL_DEBIT_AMOUNT)),
+            to_int(row.get(COL_CREDIT_AMOUNT))
+        )
+
+    return {
+        "match_type": match_type,
+        "date": row.get(COL_DATE, ""),
+        "debit_code": row.get("借方科目", ""),
+        "debit": row.get(COL_DEBIT, ""),
+        "credit_code": row.get("貸方科目", ""),
+        "credit": row.get(COL_CREDIT, ""),
+        "debit_sub": row.get(COL_DEBIT_SUB, ""),
+        "credit_sub": row.get(COL_CREDIT_SUB, ""),
+        "amount": matched_amount,
+        "summary": row.get(COL_SUMMARY, ""),
+    }
+
+
 # =========================================
 # データ読込
 # =========================================
@@ -680,6 +704,7 @@ def calculate_score(
 
     score = 0
     score_detail = []
+    matched_amount_row = None
 
     tokens = rec["tokens"]
     search_rows = rec.get(
@@ -782,6 +807,17 @@ def calculate_score(
             score_detail.append(
                 f"金額一致:{amount} +200"
             )
+            for r in search_rows:
+                if (
+                    to_int(r.get(COL_DEBIT_AMOUNT)) == amount
+                    or to_int(r.get(COL_CREDIT_AMOUNT)) == amount
+                ):
+                    matched_amount_row = build_matched_row_info(
+                        r,
+                        amount=amount,
+                        match_type="amount"
+                    )
+                    break
         else:
             for r in search_rows:
                 if (
@@ -789,6 +825,11 @@ def calculate_score(
                     or to_int(r.get(COL_CREDIT_AMOUNT)) == amount
                 ):
                     score += 200
+                    matched_amount_row = build_matched_row_info(
+                        r,
+                        amount=amount,
+                        match_type="amount"
+                    )
 
                     score_detail.append(
                         "金額一致行:"
@@ -818,7 +859,7 @@ def calculate_score(
 
     score *= year_weight
 
-    return int(score), score_detail
+    return int(score), score_detail, matched_amount_row
 
 # =========================================
 # テンプレ検索
@@ -858,7 +899,7 @@ def search(records, keyword, dept, amount, freq):
     # 通常検索
     for rec in records:
 
-        s, score_detail = calculate_score(
+        s, score_detail, matched_amount_row = calculate_score(
             rec,
             keyword,
             dept,
@@ -867,8 +908,10 @@ def search(records, keyword, dept, amount, freq):
         )
 
         if s > 50:
+            result_rec = dict(rec)
+            result_rec["matched_amount_row"] = matched_amount_row
             results.append(
-                (s, rec, score_detail)
+                (s, result_rec, score_detail)
             )
 
     return sorted(
