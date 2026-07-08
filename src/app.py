@@ -477,7 +477,8 @@ def build_account_select_options(
     summary,
     opposite_account,
     sub_account=None,
-    current_account=""
+    current_account="",
+    priority_accounts=None
 ):
 
     suggestions = get_account_suggestions(
@@ -493,6 +494,20 @@ def build_account_select_options(
             account in account_master
             and account not in EXCLUDED_SUGGESTION_ACCOUNTS
         )
+    ]
+    priority_accounts = [
+        account
+        for account in (priority_accounts or [])
+        if (
+            account in account_master
+            and account not in EXCLUDED_SUGGESTION_ACCOUNTS
+        )
+    ]
+    priority_accounts = list(dict.fromkeys(priority_accounts))
+    recommended_accounts = priority_accounts + [
+        account
+        for account in recommended_accounts
+        if account not in priority_accounts
     ]
 
     options = recommended_accounts + [
@@ -629,6 +644,55 @@ def row_has_excluded_account(row):
         is_excluded_account(debit)
         or is_excluded_account(credit)
     )
+
+
+def get_row_account(row, side):
+
+    if not isinstance(row, dict):
+        return ""
+
+    if side == "debit":
+        return str(row.get(COL_DEBIT, row.get("debit", "")) or "").strip()
+
+    return str(row.get(COL_CREDIT, row.get("credit", "")) or "").strip()
+
+
+def infer_block_replacement_accounts(rows, target_row, target_side):
+
+    target_account = get_row_account(target_row, target_side)
+
+    if not is_excluded_account(target_account):
+        return []
+
+    opposite_side = "credit" if target_side == "debit" else "debit"
+    preferred = []
+    fallback = []
+
+    for row in rows:
+        same_side_account = get_row_account(row, target_side)
+        opposite_account = get_row_account(row, opposite_side)
+
+        if same_side_account == target_account:
+            if (
+                opposite_account
+                and not is_excluded_account(opposite_account)
+                and opposite_account != target_account
+            ):
+                fallback.append(opposite_account)
+            continue
+
+        if opposite_account != target_account:
+            continue
+
+        replacement_account = same_side_account
+        if (
+            replacement_account
+            and not is_excluded_account(replacement_account)
+            and replacement_account != target_account
+        ):
+            preferred.append(replacement_account)
+
+    return list(dict.fromkeys(preferred + fallback))
 
 
 def should_show_voucher_block(rec, matched_row):
@@ -3476,6 +3540,13 @@ if mode == "通常仕訳":
                                 COL_DEBIT,
                                 ""
                             )
+                            block_debit_candidates = (
+                                infer_block_replacement_accounts(
+                                    rec.get("rows", rows),
+                                    r,
+                                    "debit"
+                                )
+                            )
                             current_credit = st.session_state.get(
                                 credit_key,
                                 r.get(COL_CREDIT, "")
@@ -3486,7 +3557,8 @@ if mode == "通常仕訳":
                                     summary_for_suggestions,
                                     current_credit,
                                     sub_account=r.get(COL_DEBIT_SUB, ""),
-                                    current_account=default_debit
+                                    current_account=default_debit,
+                                    priority_accounts=block_debit_candidates
                                 )
                             )
 
@@ -3527,13 +3599,21 @@ if mode == "通常仕訳":
                                 COL_CREDIT,
                                 ""
                             )
+                            block_credit_candidates = (
+                                infer_block_replacement_accounts(
+                                    rec.get("rows", rows),
+                                    r,
+                                    "credit"
+                                )
+                            )
                             credit_options, recommended_credits = (
                                 build_account_select_options(
                                     records,
                                     summary_for_suggestions,
                                     debit,
                                     sub_account=r.get(COL_CREDIT_SUB, ""),
-                                    current_account=default_credit
+                                    current_account=default_credit,
+                                    priority_accounts=block_credit_candidates
                                 )
                             )
 
