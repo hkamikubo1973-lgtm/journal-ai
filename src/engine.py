@@ -483,7 +483,14 @@ def build_search_rows(rows):
     return rows + expanded_rows
 
 
-def build_matched_row_info(row, amount=None, match_type=""):
+def build_matched_row_info(
+    row,
+    amount=None,
+    match_type="",
+    input_amount=None,
+    diff=None,
+    diff_rate=None
+):
 
     matched_amount = amount
 
@@ -503,8 +510,99 @@ def build_matched_row_info(row, amount=None, match_type=""):
         "debit_sub": row.get(COL_DEBIT_SUB, ""),
         "credit_sub": row.get(COL_CREDIT_SUB, ""),
         "amount": matched_amount,
+        "input_amount": input_amount,
+        "diff": diff,
+        "diff_rate": diff_rate,
         "summary": row.get(COL_SUMMARY, ""),
     }
+
+
+def get_amount_proximity(input_amount, past_amount):
+
+    input_amount = to_int(input_amount)
+    past_amount = to_int(past_amount)
+
+    if input_amount <= 0 or past_amount <= 0:
+        return None
+
+    diff = abs(past_amount - input_amount)
+    rate = diff / input_amount
+
+    if diff == 0:
+        return {
+            "score": 200,
+            "diff": diff,
+            "rate": rate,
+            "label": "一致",
+        }
+
+    thresholds = [
+        (0.01, 160),
+        (0.03, 120),
+        (0.05, 80),
+        (0.10, 40),
+        (0.20, 15),
+    ]
+
+    for threshold, add_score in thresholds:
+        if rate <= threshold:
+            return {
+                "score": add_score,
+                "diff": diff,
+                "rate": rate,
+                "label": "近似",
+            }
+
+    return None
+
+
+def format_amount_proximity_detail(input_amount, past_amount, proximity):
+
+    rate_percent = proximity["rate"] * 100
+
+    return (
+        f"金額近似:入力 {input_amount:,} / "
+        f"過去 {past_amount:,} / "
+        f"差額 {proximity['diff']:,} / "
+        f"約{rate_percent:.1f}% "
+        f"+{proximity['score']}"
+    )
+
+
+def find_best_amount_match(rows, input_amount):
+
+    best = None
+
+    for row in rows:
+        for candidate_amount in {
+            to_int(row.get(COL_DEBIT_AMOUNT)),
+            to_int(row.get(COL_CREDIT_AMOUNT)),
+        }:
+            proximity = get_amount_proximity(
+                input_amount,
+                candidate_amount
+            )
+
+            if not proximity:
+                continue
+
+            candidate = {
+                "row": row,
+                "amount": candidate_amount,
+                "proximity": proximity,
+            }
+
+            if (
+                best is None
+                or proximity["score"] > best["proximity"]["score"]
+                or (
+                    proximity["score"] == best["proximity"]["score"]
+                    and proximity["diff"] < best["proximity"]["diff"]
+                )
+            ):
+                best = candidate
+
+    return best
 
 
 def is_debug_target_row(row):
@@ -957,6 +1055,7 @@ def calculate_score(
 
     # 金額
     if amount:
+        score_before_amount = score
         total = get_voucher_total(rec["rows"])
         if total == amount:
             score += 200
@@ -976,27 +1075,69 @@ def calculate_score(
                     )
                     break
         else:
-            for r in search_rows:
-                if (
-                    to_int(r.get(COL_DEBIT_AMOUNT)) == amount
-                    or to_int(r.get(COL_CREDIT_AMOUNT)) == amount
-                ):
+            best_row_match = find_best_amount_match(
+                search_rows,
+                amount
+            )
+
+            if best_row_match:
+                row = best_row_match["row"]
+                row_amount = best_row_match["amount"]
+                proximity = best_row_match["proximity"]
+
+                if proximity["label"] == "一致":
                     score += 200
                     matched_amount_row = build_matched_row_info(
-                        r,
-                        amount=amount,
-                        match_type="amount"
+                        row,
+                        amount=row_amount,
+                        match_type="amount",
+                        input_amount=amount,
+                        diff=proximity["diff"],
+                        diff_rate=proximity["rate"]
                     )
 
                     score_detail.append(
                         "金額一致行:"
-                        f"{r.get(COL_DATE, '')} "
-                        f"{r.get(COL_DEBIT, '')}/"
-                        f"{r.get(COL_CREDIT, '')} "
-                        f"{amount} "
-                        f"{r.get(COL_SUMMARY, '')} +200"
+                        f"{row.get(COL_DATE, '')} "
+                        f"{row.get(COL_DEBIT, '')}/"
+                        f"{row.get(COL_CREDIT, '')} "
+                        f"{row_amount} "
+                        f"{row.get(COL_SUMMARY, '')} +200"
                     )
-                    break
+                elif score_before_amount > 0:
+                    score += proximity["score"]
+                    matched_amount_row = build_matched_row_info(
+                        row,
+                        amount=row_amount,
+                        match_type="amount_near",
+                        input_amount=amount,
+                        diff=proximity["diff"],
+                        diff_rate=proximity["rate"]
+                    )
+
+                    score_detail.append(
+                        format_amount_proximity_detail(
+                            amount,
+                            row_amount,
+                            proximity
+                        )
+                    )
+            elif score_before_amount > 0:
+                proximity = get_amount_proximity(
+                    amount,
+                    total
+                )
+
+                if proximity and proximity["label"] == "近似":
+                    score += proximity["score"]
+
+                    score_detail.append(
+                        format_amount_proximity_detail(
+                            amount,
+                            total,
+                            proximity
+                        )
+                    )
 
     # =========================================
     # 年度（相対化）

@@ -535,6 +535,8 @@ def extract_amount_match_detail(score_detail):
         if detail.startswith("金額一致行:"):
             text = detail[len("金額一致行:"):]
             return text.rsplit(" +", 1)[0]
+        if detail.startswith("金額近似:"):
+            return detail.rsplit(" +", 1)[0]
 
     return ""
 
@@ -3031,13 +3033,13 @@ if mode == "通常仕訳":
             button_col,
             spacer_col,
             limit_col,
-        ) = st.columns([1.0, 0.55, 1.4, 3.2, 1.0])
+        ) = st.columns([1.0, 0.55, 1.4, 2.8, 1.4])
 
         with limit_col:
-            limit_label_col, limit_select_col = st.columns([0.7, 1])
+            limit_label_col, limit_select_col = st.columns([0.55, 1.2])
 
             with limit_label_col:
-                st.markdown("**表示件数**")
+                st.markdown("**件数**")
 
             with limit_select_col:
                 result_limit = st.selectbox(
@@ -3251,7 +3253,7 @@ if mode == "通常仕訳":
                     f"　¥{get_voucher_total(rows):,}"
                 )
                 if amount_match_detail:
-                    summary += f"　金額一致行: {amount_match_detail}"
+                    summary += f"　金額一致/近似行: {amount_match_detail}"
     
             with st.expander(
                 summary,
@@ -3323,12 +3325,12 @@ if mode == "通常仕訳":
 
                     if matched_amount_row:
                         st.write(
-                            "✅ 金額一致行: "
+                            "✅ 金額一致/近似行: "
                             f"{format_matched_row_title(matched_amount_row)}"
                         )
                     elif amount_match_detail:
                         st.write(
-                            f"✅ 金額一致行: {amount_match_detail}"
+                            f"✅ 金額一致/近似行: {amount_match_detail}"
                         )
     
                 st.divider()
