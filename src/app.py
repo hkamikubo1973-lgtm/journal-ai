@@ -3031,23 +3031,21 @@ if mode == "通常仕訳":
             label_col,
             input_col,
             button_col,
-            spacer_col,
+            limit_label_col,
             limit_col,
-        ) = st.columns([1.0, 0.55, 1.4, 2.8, 1.4])
+            spacer_col,
+        ) = st.columns([0.8, 0.65, 1.35, 0.65, 0.85, 3.7])
+
+        with limit_label_col:
+            st.markdown("**件数**")
 
         with limit_col:
-            limit_label_col, limit_select_col = st.columns([0.55, 1.2])
-
-            with limit_label_col:
-                st.markdown("**件数**")
-
-            with limit_select_col:
-                result_limit = st.selectbox(
-                    "表示件数",
-                    [5, 10, 20],
-                    key="journal_result_limit",
-                    label_visibility="collapsed"
-                )
+            result_limit = st.selectbox(
+                "表示件数",
+                [5, 10, 20],
+                key="journal_result_limit",
+                label_visibility="collapsed"
+            )
 
         if (
             st.session_state.get("last_journal_search_limit")
