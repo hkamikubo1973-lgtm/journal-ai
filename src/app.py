@@ -5776,7 +5776,7 @@ elif mode == "未収消込":
 
                 with receivable_check_save_col:
                     if st.button(
-                        "保存先フォルダへ保存",
+                        "保存先へ保存",
                         key="save_receivable_check_excel_to_export_dir",
                         type="primary"
                     ):
