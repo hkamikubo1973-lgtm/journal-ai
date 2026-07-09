@@ -111,6 +111,7 @@ DISPLAY_COLUMNS = [
 ]
 
 COL_DATE = "伝票日付"
+COL_VOUCHER_NO = "伝票番号"
 
 COL_DEBIT = "借方科目名"
 COL_CREDIT = "貸方科目名"

@@ -21,6 +21,7 @@ from columns import (
     COL_DEBIT_AMOUNT,
     COL_CREDIT_AMOUNT,
     COL_SUMMARY,
+    COL_VOUCHER_NO,
 )
 
 
@@ -471,6 +472,35 @@ def get_voucher_total(rows):
         d_total,
         c_total
     )
+
+
+def diagnose_voucher_numbers_in_rows(rows):
+
+    rows = rows or []
+    voucher_numbers = []
+    debit_total = 0
+    credit_total = 0
+
+    for row in rows:
+        voucher_no = str(row.get(COL_VOUCHER_NO, "") or "").strip()
+
+        if voucher_no and voucher_no not in voucher_numbers:
+            voucher_numbers.append(voucher_no)
+
+        debit_total += to_int(row.get(COL_DEBIT_AMOUNT))
+        credit_total += to_int(row.get(COL_CREDIT_AMOUNT))
+
+    voucher_count = len(voucher_numbers)
+
+    return {
+        "voucher_numbers": voucher_numbers,
+        "voucher_count": voucher_count,
+        "has_multiple_voucher_numbers": voucher_count > 1,
+        "row_count": len(rows),
+        "debit_total": debit_total,
+        "credit_total": credit_total,
+        "balance_diff": debit_total - credit_total,
+    }
 
 
 def build_search_rows(rows):

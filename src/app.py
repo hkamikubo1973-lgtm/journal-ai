@@ -419,6 +419,7 @@ from engine import (
     get_amount_suggestions,
     get_account_suggestions,
     diagnose_debug_target,
+    diagnose_voucher_numbers_in_rows,
     update_search_csv
 )
 
@@ -3151,6 +3152,66 @@ if mode == "通常仕訳":
                 if score_detail:
                     st.markdown("**スコア内訳**")
                     st.write(score_detail)
+
+                voucher_diagnostics = []
+
+                for result_index, result in enumerate(results, start=1):
+                    if len(result) != 3:
+                        continue
+
+                    _, rec, _ = result
+                    if not isinstance(rec, dict):
+                        continue
+
+                    voucher_diagnostic = (
+                        diagnose_voucher_numbers_in_rows(
+                            rec.get("rows", [])
+                        )
+                    )
+                    voucher_diagnostics.append({
+                        "候補": result_index,
+                        "伝票番号一覧": "、".join(
+                            voucher_diagnostic.get("voucher_numbers", [])
+                        ),
+                        "伝票番号数": voucher_diagnostic.get(
+                            "voucher_count"
+                        ),
+                        "複数伝票番号あり": (
+                            "あり"
+                            if voucher_diagnostic.get(
+                                "has_multiple_voucher_numbers"
+                            )
+                            else "なし"
+                        ),
+                        "ブロック行数": voucher_diagnostic.get(
+                            "row_count"
+                        ),
+                        "借方合計": voucher_diagnostic.get(
+                            "debit_total"
+                        ),
+                        "貸方合計": voucher_diagnostic.get(
+                            "credit_total"
+                        ),
+                        "差額": voucher_diagnostic.get("balance_diff"),
+                    })
+
+                if voucher_diagnostics:
+                    st.markdown("**伝票番号ブロック診断**")
+                    st.dataframe(
+                        pd.DataFrame(voucher_diagnostics),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+                    if any(
+                        row["複数伝票番号あり"] == "あり"
+                        for row in voucher_diagnostics
+                    ):
+                        st.warning(
+                            "この同一伝票ブロックには複数の伝票番号が"
+                            "含まれています。ブロック境界を確認して"
+                            "ください。"
+                        )
 
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
