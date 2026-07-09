@@ -2740,6 +2740,42 @@ mode = st.sidebar.radio(
     ]
 )
 
+loaded_system_settings = load_system_settings()
+
+if "company_name" not in st.session_state:
+    st.session_state.company_name = loaded_system_settings.get(
+        "company_name",
+        ""
+    )
+
+if "csv_export_dir" not in st.session_state:
+    st.session_state["csv_export_dir"] = loaded_system_settings.get(
+        "csv_export_dir",
+        ""
+    )
+
+st.sidebar.header("🏢 システム設定")
+
+st.sidebar.text_input(
+    "入力会社",
+    key="company_name",
+    on_change=save_system_settings_from_state
+)
+
+st.sidebar.text_input(
+    "CSV保存先フォルダ",
+    placeholder=r"\\NAS\share\journal-ai\csv",
+    key="csv_export_dir",
+    on_change=save_system_settings_from_state
+)
+
+if "system_settings_warning" in st.session_state:
+    st.sidebar.warning(
+        st.session_state.pop("system_settings_warning")
+    )
+
+st.sidebar.divider()
+
 if mode == "通常仕訳":
 
     st.title("📘 仕訳検索システム")
@@ -2758,20 +2794,6 @@ if mode == "通常仕訳":
     
     if "confirmed" not in st.session_state:
         st.session_state.confirmed = []
-
-    loaded_system_settings = load_system_settings()
-
-    if "company_name" not in st.session_state:
-        st.session_state.company_name = loaded_system_settings.get(
-            "company_name",
-            ""
-        )
-
-    if "csv_export_dir" not in st.session_state:
-        st.session_state["csv_export_dir"] = loaded_system_settings.get(
-            "csv_export_dir",
-            ""
-        )
 
     def reset_for_next_journal_search():
 
@@ -2796,33 +2818,6 @@ if mode == "通常仕訳":
                 st.session_state.pop(key, None)
     
     
-    # =========================================
-    # サイドバー
-    # =========================================
-    
-    # -----------------------------------------
-    # システム設定
-    # -----------------------------------------
-    st.sidebar.header("🏢 システム設定")
-    
-    st.sidebar.text_input(
-        "入力会社",
-        key="company_name",
-        on_change=save_system_settings_from_state
-    )
-
-    st.sidebar.text_input(
-        "CSV保存先フォルダ",
-        placeholder=r"\\NAS\share\journal-ai\csv",
-        key="csv_export_dir",
-        on_change=save_system_settings_from_state
-    )
-
-    if "system_settings_warning" in st.session_state:
-        st.sidebar.warning(
-            st.session_state.pop("system_settings_warning")
-        )
-
     if "account_candidate_success" in st.session_state:
         for message in st.session_state.pop(
             "account_candidate_success"
@@ -4482,7 +4477,7 @@ if mode == "通常仕訳":
 
         with input_download_col:
             st.download_button(
-                "ブラウザでダウンロード",
+                "ダウンロード",
                 data=input_excel,
                 file_name=input_excel_filename,
                 mime=(
@@ -4549,7 +4544,7 @@ if mode == "通常仕訳":
 
         with epson_download_col:
             st.download_button(
-                "ブラウザでダウンロード",
+                "ダウンロード",
                 epson_csv,
                 epson_filename,
                 on_click=save_exported_journals,
@@ -5841,7 +5836,7 @@ elif mode == "未収消込":
 
                 with receivable_check_download_col:
                     st.download_button(
-                        "ブラウザでダウンロード",
+                        "ダウンロード",
                         data=receivable_check_excel,
                         file_name=receivable_check_filename,
                         mime=(
