@@ -420,6 +420,7 @@ from engine import (
     get_account_suggestions,
     diagnose_debug_target,
     diagnose_voucher_numbers_in_rows,
+    update_search_csv,
 )
 
 from columns import (
@@ -1894,20 +1895,28 @@ def append_past_journals_to_transactions(new_df):
     return len(new_df)
 
 
-def register_epson_csv_to_search_db(epson_df):
+def register_epson_rows_to_search_db(registered_rows):
 
-    existing_df = load_transactions_df()
-    import_result, error_message = prepare_past_journal_import(
-        epson_df,
-        existing_df
-    )
+    registered_rows = [
+        row
+        for row in (registered_rows or [])
+        if isinstance(row, dict)
+    ]
 
-    if error_message:
-        return False, error_message
+    if not registered_rows:
+        return False, "登録対象の仕訳がありません"
 
-    appended_count = append_past_journals_to_transactions(
-        import_result["new_df"]
-    )
+    try:
+        before_count = len(load_transactions_df())
+        update_search_csv([registered_rows])
+        after_count = len(load_transactions_df())
+    except Exception as e:
+        return False, str(e)
+
+    appended_count = after_count - before_count
+
+    if appended_count <= 0:
+        return False, "transactions.csvへの追記を確認できませんでした"
 
     return True, appended_count
 
@@ -4499,7 +4508,7 @@ if mode == "通常仕訳":
                 )
                 if saved:
                     registered, register_message = (
-                        register_epson_csv_to_search_db(epson_df)
+                        register_epson_rows_to_search_db(all_rows)
                     )
                     if registered:
                         message = (
@@ -4510,7 +4519,7 @@ if mode == "通常仕訳":
                         saved = False
                         message = (
                             "エプソン取込CSVは保存しましたが、"
-                            f"検索DBへ登録できませんでした: {register_message}"
+                            f"検索DB登録に失敗しました：{register_message}"
                         )
                 st.session_state["epson_csv_save_message"] = (
                     saved,
