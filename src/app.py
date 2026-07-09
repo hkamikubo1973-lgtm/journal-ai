@@ -2122,6 +2122,252 @@ def build_input_journal_excel(input_df):
     return output.getvalue()
 
 
+def format_receivable_check_date(value):
+
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y/%m/%d")
+
+    text = str(value or "").strip()
+
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}/{text[4:6]}/{text[6:]}"
+
+    if "-" in text:
+        return text.replace("-", "/")
+
+    return text
+
+
+def format_receivable_check_amount(value):
+
+    amount = to_int(value)
+
+    return f"{amount:,}" if amount else "0"
+
+
+def build_receivable_check_rows(generated_journals):
+
+    rows = []
+
+    for index, generated_journal in enumerate(
+        generated_journals or [],
+        start=1
+    ):
+        if not isinstance(generated_journal, dict):
+            continue
+
+        journal_rows = generated_journal.get("rows", [])
+        source_candidates = generated_journal.get(
+            "source_candidates",
+            []
+        )
+
+        if isinstance(journal_rows, dict):
+            journal_rows = [journal_rows]
+
+        target_total = generated_journal.get("target_total")
+        if target_total in ("", None):
+            target_total = sum(
+                to_int(candidate.get("消込予定"))
+                for candidate in source_candidates
+                if isinstance(candidate, dict)
+            )
+        else:
+            target_total = to_int(target_total)
+
+        payment_amount = generated_journal.get("payment_amount")
+        if payment_amount in ("", None):
+            difference = generated_journal.get("difference")
+            if difference not in ("", None):
+                payment_amount = target_total + to_int(difference)
+            else:
+                payment_amount = sum(
+                    to_int(journal.get("金額"))
+                    for journal in journal_rows
+                    if isinstance(journal, dict)
+                )
+        payment_amount = to_int(payment_amount)
+
+        difference = generated_journal.get("difference")
+        if difference in ("", None):
+            difference = payment_amount - target_total
+        else:
+            difference = to_int(difference)
+
+        receivable_lines = []
+        for candidate in source_candidates:
+            if not isinstance(candidate, dict):
+                continue
+
+            account = str(candidate.get("未収科目", "") or "").strip()
+            amount = to_int(candidate.get("消込予定"))
+
+            if account or amount:
+                receivable_lines.append(
+                    f"{account} {format_receivable_check_amount(amount)}"
+                )
+
+        journal_lines = []
+        summaries = []
+        for journal in journal_rows:
+            if not isinstance(journal, dict):
+                continue
+
+            debit = str(journal.get("借方科目", "") or "").strip()
+            credit = str(journal.get("貸方科目", "") or "").strip()
+            amount = to_int(journal.get("金額"))
+            summary = str(journal.get("摘要", "") or "").strip()
+
+            if debit or credit or amount:
+                journal_lines.append(
+                    f"{debit} / {credit} "
+                    f"{format_receivable_check_amount(amount)}"
+                )
+
+            if summary and summary not in summaries:
+                summaries.append(summary)
+
+        if not summaries:
+            summaries = [
+                str(candidate.get("摘要", "") or "").strip()
+                for candidate in source_candidates
+                if (
+                    isinstance(candidate, dict)
+                    and str(candidate.get("摘要", "") or "").strip()
+                )
+            ]
+
+        rows.append({
+            "No": index,
+            "入金日": format_receivable_check_date(
+                generated_journal.get("settlement_date", "")
+            ),
+            "取引先": generated_journal.get("customer_name", ""),
+            "入金額": payment_amount,
+            "消込額": target_total,
+            "差額": difference,
+            "未収内容": "\n".join(receivable_lines),
+            "生成仕訳": "\n".join(journal_lines),
+            "摘要": summaries[0] if summaries else "",
+        })
+
+    return rows
+
+
+def build_receivable_check_excel(check_rows):
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "未収消込確認表"
+
+    headers = [
+        "No",
+        "入金日",
+        "取引先",
+        "入金額",
+        "消込額",
+        "差額",
+        "未収内容",
+        "生成仕訳",
+        "摘要",
+    ]
+    worksheet.append(headers)
+
+    amount_columns = {
+        "入金額",
+        "消込額",
+        "差額",
+    }
+    wrap_columns = {
+        "未収内容",
+        "生成仕訳",
+        "摘要",
+    }
+    column_widths = {
+        "No": 4,
+        "入金日": 11,
+        "取引先": 16,
+        "入金額": 11,
+        "消込額": 11,
+        "差額": 10,
+        "未収内容": 18,
+        "生成仕訳": 22,
+        "摘要": 20,
+    }
+
+    for row in check_rows:
+        worksheet.append([
+            row.get(header, "")
+            for header in headers
+        ])
+
+    thin_side = Side(style="thin", color="B7B7B7")
+    cell_border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side
+    )
+    header_fill = PatternFill(
+        fill_type="solid",
+        fgColor="D9EAF7"
+    )
+
+    for column_index, column_name in enumerate(headers, start=1):
+        column_letter = worksheet.cell(
+            row=1,
+            column=column_index
+        ).column_letter
+        worksheet.column_dimensions[column_letter].width = (
+            column_widths.get(column_name, 12)
+        )
+
+    for row in worksheet.iter_rows():
+        for cell in row:
+            column_name = headers[cell.column - 1]
+            cell.border = cell_border
+            cell.alignment = Alignment(
+                vertical="top",
+                wrap_text=column_name in wrap_columns
+            )
+            if column_name in amount_columns and cell.row > 1:
+                cell.number_format = "#,##0"
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.freeze_panes = "A2"
+    worksheet.print_title_rows = "1:1"
+    worksheet.page_setup.paperSize = 9
+    worksheet.page_setup.orientation = "portrait"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    if worksheet.sheet_properties.pageSetUpPr is None:
+        worksheet.sheet_properties.pageSetUpPr = PageSetupProperties()
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.page_margins.left = 0.2
+    worksheet.page_margins.right = 0.2
+    worksheet.page_margins.top = 0.35
+    worksheet.page_margins.bottom = 0.35
+    worksheet.page_margins.header = 0.15
+    worksheet.page_margins.footer = 0.15
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 SETTINGS_PATH = os.path.join(
     "config",
     "settings.json"
@@ -5121,12 +5367,33 @@ elif mode == "未収消込":
                                 )
 
                                 settlement_id = uuid.uuid4().hex
+                                settlement_target_total = sum(
+                                    int(
+                                        candidate.get(
+                                            "消込予定",
+                                            0
+                                        )
+                                    )
+                                    for candidate
+                                    in settlement_candidates
+                                )
+                                settlement_difference = (
+                                    calculate_receivable_difference(
+                                        candidate_state["payment_amount"],
+                                        settlement_target_total
+                                    )
+                                )
 
                                 generated_receivable_journal = {
                                     "settlement_id": settlement_id,
                                     "settlement_date": candidate_state[
                                         "payment_date"
                                     ],
+                                    "payment_amount": candidate_state[
+                                        "payment_amount"
+                                    ],
+                                    "target_total": settlement_target_total,
+                                    "difference": settlement_difference,
                                     "rows": journal_rows,
                                     "source_candidates": copy.deepcopy(
                                         settlement_candidates
@@ -5456,6 +5723,84 @@ elif mode == "未収消込":
         else:
 
             has_unregistered_journal = False
+            receivable_check_journals = []
+
+            for generated_journal in generated_journals:
+                if not isinstance(generated_journal, dict):
+                    continue
+
+                settlement_id = generated_journal.get("settlement_id")
+                journal_registered = False
+
+                if settlement_id is not None:
+                    try:
+                        journal_registered = (
+                            is_receivable_journal_registered(
+                                settlement_id
+                            )
+                        )
+                    except Exception:
+                        journal_registered = False
+
+                if not journal_registered:
+                    receivable_check_journals.append(
+                        generated_journal
+                    )
+
+            receivable_check_rows = build_receivable_check_rows(
+                receivable_check_journals
+            )
+
+            if receivable_check_rows:
+                st.subheader("未収消込確認表")
+                st.caption(
+                    "経理起票伝票との突合せ用です。"
+                    "エプソン取込形式ではありません。"
+                )
+
+                receivable_check_excel = (
+                    build_receivable_check_excel(
+                        receivable_check_rows
+                    )
+                )
+                receivable_check_filename = (
+                    "receivable_check_"
+                    f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                )
+
+                (
+                    receivable_check_save_col,
+                    receivable_check_download_col,
+                    _receivable_check_spacer_col,
+                ) = st.columns([1.2, 1.2, 4.0])
+
+                with receivable_check_save_col:
+                    if st.button(
+                        "保存先フォルダへ保存",
+                        key="save_receivable_check_excel_to_export_dir",
+                        type="primary"
+                    ):
+                        saved, message = save_file_to_export_dir(
+                            receivable_check_excel,
+                            receivable_check_filename,
+                            st.session_state.get("csv_export_dir", "")
+                        )
+                        if saved:
+                            st.success(message)
+                        else:
+                            st.warning(message)
+
+                with receivable_check_download_col:
+                    st.download_button(
+                        "ブラウザでダウンロード",
+                        data=receivable_check_excel,
+                        file_name=receivable_check_filename,
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                        key="download_receivable_check_excel"
+                    )
 
             for journal_idx, generated_journal in enumerate(
                 list(generated_journals)
