@@ -1894,6 +1894,24 @@ def append_past_journals_to_transactions(new_df):
     return len(new_df)
 
 
+def register_epson_csv_to_search_db(epson_df):
+
+    existing_df = load_transactions_df()
+    import_result, error_message = prepare_past_journal_import(
+        epson_df,
+        existing_df
+    )
+
+    if error_message:
+        return False, error_message
+
+    appended_count = append_past_journals_to_transactions(
+        import_result["new_df"]
+    )
+
+    return True, appended_count
+
+
 def ensure_output_subdir(base_dir, subdir_name):
 
     base_dir = str(base_dir or "").strip()
@@ -4479,6 +4497,21 @@ if mode == "通常仕訳":
                     st.session_state.get("csv_export_dir", ""),
                     "01_エプソン取込CSV"
                 )
+                if saved:
+                    registered, register_message = (
+                        register_epson_csv_to_search_db(epson_df)
+                    )
+                    if registered:
+                        message = (
+                            "エプソン取込CSVを保存し、検索DBへ登録しました："
+                            f"{message.replace('保存しました：', '')}"
+                        )
+                    else:
+                        saved = False
+                        message = (
+                            "エプソン取込CSVは保存しましたが、"
+                            f"検索DBへ登録できませんでした: {register_message}"
+                        )
                 st.session_state["epson_csv_save_message"] = (
                     saved,
                     message
