@@ -1959,18 +1959,59 @@ def append_past_journals_to_transactions(new_df):
     return len(new_df)
 
 
-def save_csv_to_export_dir(csv_bytes, filename, export_dir):
+def ensure_output_subdir(base_dir, subdir_name):
+
+    base_dir = str(base_dir or "").strip()
+
+    if not base_dir:
+        return False, "CSV保存先フォルダを入力してください"
+
+    if not os.path.isdir(base_dir):
+        return False, "CSV保存先フォルダが存在しません"
+
+    output_dir = os.path.join(base_dir, subdir_name)
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError as e:
+        return False, f"保存先フォルダを作成できませんでした: {e}"
+
+    return True, output_dir
+
+
+def get_export_target_dir(export_dir, subdir_name=None):
 
     export_dir = str(export_dir or "").strip()
 
-    if not export_dir:
-        return False, "CSV保存先フォルダを入力してください"
+    if not subdir_name:
+        if not export_dir:
+            return False, "CSV保存先フォルダを入力してください"
 
-    if not os.path.isdir(export_dir):
-        return False, "CSV保存先フォルダが存在しません"
+        if not os.path.isdir(export_dir):
+            return False, "CSV保存先フォルダが存在しません"
+
+        return True, export_dir
+
+    return ensure_output_subdir(export_dir, subdir_name)
+
+
+def save_csv_to_export_dir(
+    csv_bytes,
+    filename,
+    export_dir,
+    subdir_name=None
+):
+
+    target_ready, target_dir_or_message = get_export_target_dir(
+        export_dir,
+        subdir_name
+    )
+
+    if not target_ready:
+        return False, target_dir_or_message
 
     save_path = os.path.join(
-        export_dir,
+        target_dir_or_message,
         os.path.basename(filename)
     )
 
@@ -1983,18 +2024,23 @@ def save_csv_to_export_dir(csv_bytes, filename, export_dir):
     return True, f"保存しました：{save_path}"
 
 
-def save_file_to_export_dir(file_bytes, filename, export_dir):
+def save_file_to_export_dir(
+    file_bytes,
+    filename,
+    export_dir,
+    subdir_name=None
+):
 
-    export_dir = str(export_dir or "").strip()
+    target_ready, target_dir_or_message = get_export_target_dir(
+        export_dir,
+        subdir_name
+    )
 
-    if not export_dir:
-        return False, "CSV保存先フォルダを入力してください"
-
-    if not os.path.isdir(export_dir):
-        return False, "CSV保存先フォルダが存在しません"
+    if not target_ready:
+        return False, target_dir_or_message
 
     save_path = os.path.join(
-        export_dir,
+        target_dir_or_message,
         os.path.basename(filename)
     )
 
@@ -4426,7 +4472,8 @@ if mode == "通常仕訳":
                 saved, message = save_file_to_export_dir(
                     input_excel,
                     input_excel_filename,
-                    st.session_state.get("csv_export_dir", "")
+                    st.session_state.get("csv_export_dir", ""),
+                    "02_入力用Excel"
                 )
                 if saved:
                     st.success(message)
@@ -4492,7 +4539,8 @@ if mode == "通常仕訳":
                 saved, message = save_csv_to_export_dir(
                     epson_csv,
                     epson_filename,
-                    st.session_state.get("csv_export_dir", "")
+                    st.session_state.get("csv_export_dir", ""),
+                    "01_エプソン取込CSV"
                 )
                 if saved:
                     st.success(message)
@@ -5783,7 +5831,8 @@ elif mode == "未収消込":
                         saved, message = save_file_to_export_dir(
                             receivable_check_excel,
                             receivable_check_filename,
-                            st.session_state.get("csv_export_dir", "")
+                            st.session_state.get("csv_export_dir", ""),
+                            "03_未収消込確認表"
                         )
                         if saved:
                             st.success(message)
