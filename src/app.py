@@ -4173,7 +4173,7 @@ if mode == "通常仕訳":
 
         with input_save_col:
             if st.button(
-                "共有フォルダへ保存",
+                "保存先フォルダへ保存",
                 key="save_input_excel_to_export_dir",
                 type="primary"
             ):
@@ -4239,7 +4239,7 @@ if mode == "通常仕訳":
 
         with epson_save_col:
             if st.button(
-                "共有フォルダへ保存",
+                "保存先フォルダへ保存",
                 key="save_epson_csv_to_export_dir",
                 type="primary"
             ):
