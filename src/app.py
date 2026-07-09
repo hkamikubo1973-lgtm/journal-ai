@@ -420,7 +420,6 @@ from engine import (
     get_account_suggestions,
     diagnose_debug_target,
     diagnose_voucher_numbers_in_rows,
-    update_search_csv
 )
 
 from columns import (
@@ -1748,70 +1747,6 @@ def build_epson_rows(rows, company_name):
         result.append(row)
 
     return result
-
-
-def save_exported_journals(rows):
-
-    duplicate_columns = [
-        COL_DATE,
-        "借方科目",
-        COL_DEBIT,
-        COL_DEBIT_SUB,
-        "貸方科目",
-        COL_CREDIT,
-        COL_CREDIT_SUB,
-        COL_DEBIT_AMOUNT,
-        COL_SUMMARY,
-    ]
-
-    def row_key(row):
-
-        values = []
-
-        for column in duplicate_columns:
-            value = " ".join(
-                str(row.get(column, "")).split()
-            )
-
-            if column == COL_DATE:
-                value = value.replace("/", "").replace("-", "")
-            elif column == COL_DEBIT_AMOUNT:
-                value = value.replace(",", "")
-
-            values.append(value)
-
-        return tuple(values)
-
-    try:
-        existing_df = pd.read_csv(
-            "data/transactions.csv",
-            dtype=str
-        ).fillna("")
-    except (FileNotFoundError, pd.errors.EmptyDataError):
-        existing_df = pd.DataFrame()
-
-    registered_keys = {
-        row_key(row)
-        for _, row in existing_df.iterrows()
-    }
-    new_rows = []
-
-    for row in rows:
-        key = row_key(row)
-
-        if key in registered_keys:
-            continue
-
-        registered_keys.add(key)
-        new_rows.append(row)
-
-    if new_rows:
-        update_search_csv([new_rows])
-
-    st.session_state["epson_export_success"] = (
-        "エプソンCSVを作成し、検索DBも更新しました"
-    )
-    st.cache_data.clear()
 
 
 TRANSACTIONS_PATH = "data/transactions.csv"
@@ -4460,7 +4395,7 @@ if mode == "通常仕訳":
 
         with input_save_col:
             if st.button(
-                "保存先フォルダへ保存",
+                "保存先へ保存",
                 key="save_input_excel_to_export_dir",
                 type="primary"
             ):
@@ -4470,21 +4405,33 @@ if mode == "通常仕訳":
                     st.session_state.get("csv_export_dir", ""),
                     "02_入力用Excel"
                 )
-                if saved:
-                    st.success(message)
-                else:
-                    st.warning(message)
+                st.session_state["input_excel_save_message"] = (
+                    saved,
+                    message
+                )
+                st.session_state.pop("epson_csv_save_message", None)
 
         with input_download_col:
             st.download_button(
                 "ダウンロード",
                 data=input_excel,
                 file_name=input_excel_filename,
+                key="download_input_excel",
                 mime=(
                     "application/vnd.openxmlformats-officedocument."
                     "spreadsheetml.sheet"
                 )
             )
+
+        input_excel_save_message = st.session_state.get(
+            "input_excel_save_message"
+        )
+        if input_excel_save_message:
+            saved, message = input_excel_save_message
+            if saved:
+                st.success(message)
+            else:
+                st.warning(message)
     
         # =====================================
         # エプソンCSV
@@ -4516,18 +4463,13 @@ if mode == "通常仕訳":
             f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
         )
 
-        if "epson_export_success" in st.session_state:
-            st.success(
-                st.session_state.pop("epson_export_success")
-            )
-    
         st.subheader("エプソン取込CSV")
         st.caption("登録済み仕訳をエプソン取込形式で保存します。")
         epson_save_col, epson_download_col = st.columns([1, 1])
 
         with epson_save_col:
             if st.button(
-                "保存先フォルダへ保存",
+                "保存先へ保存",
                 key="save_epson_csv_to_export_dir",
                 type="primary"
             ):
@@ -4537,19 +4479,29 @@ if mode == "通常仕訳":
                     st.session_state.get("csv_export_dir", ""),
                     "01_エプソン取込CSV"
                 )
-                if saved:
-                    st.success(message)
-                else:
-                    st.warning(message)
+                st.session_state["epson_csv_save_message"] = (
+                    saved,
+                    message
+                )
+                st.session_state.pop("input_excel_save_message", None)
 
         with epson_download_col:
             st.download_button(
                 "ダウンロード",
-                epson_csv,
-                epson_filename,
-                on_click=save_exported_journals,
-                args=(epson_rows,)
+                data=epson_csv,
+                file_name=epson_filename,
+                key="download_epson_csv"
             )
+
+        epson_csv_save_message = st.session_state.get(
+            "epson_csv_save_message"
+        )
+        if epson_csv_save_message:
+            saved, message = epson_csv_save_message
+            if saved:
+                st.success(message)
+            else:
+                st.warning(message)
     
 
 elif mode == "未収消込":
@@ -5829,10 +5781,12 @@ elif mode == "未収消込":
                             st.session_state.get("csv_export_dir", ""),
                             "03_未収消込確認表"
                         )
-                        if saved:
-                            st.success(message)
-                        else:
-                            st.warning(message)
+                        st.session_state[
+                            "receivable_check_save_message"
+                        ] = (
+                            saved,
+                            message
+                        )
 
                 with receivable_check_download_col:
                     st.download_button(
@@ -5845,6 +5799,16 @@ elif mode == "未収消込":
                         ),
                         key="download_receivable_check_excel"
                     )
+
+                receivable_check_save_message = st.session_state.get(
+                    "receivable_check_save_message"
+                )
+                if receivable_check_save_message:
+                    saved, message = receivable_check_save_message
+                    if saved:
+                        st.success(message)
+                    else:
+                        st.warning(message)
 
             for journal_idx, generated_journal in enumerate(
                 list(generated_journals)
