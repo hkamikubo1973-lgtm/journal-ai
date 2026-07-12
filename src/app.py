@@ -2256,7 +2256,7 @@ def build_receivable_check_rows(generated_journals):
             "差額": difference,
             "未収内容": "\n".join(receivable_lines),
             "生成仕訳": "\n".join(journal_lines),
-            "摘要": summaries[0] if summaries else "",
+            "摘要": "\n".join(summaries),
         })
 
     return rows
@@ -5369,7 +5369,8 @@ elif mode == "未収消込":
                             def execute_receivable_settlement(
                                 settlement_candidates,
                                 difference_account=None,
-                                difference_side=None
+                                difference_side=None,
+                                difference_summary=None
                             ):
 
                                 selected_accounts = [
@@ -5400,7 +5401,8 @@ elif mode == "未収消込":
                                     candidate_state["receipt_account"],
                                     customer_name,
                                     difference_account,
-                                    difference_side
+                                    difference_side,
+                                    difference_summary
                                 )
 
                                 settlement_id = uuid.uuid4().hex
@@ -5541,6 +5543,10 @@ elif mode == "未収消込":
                                     "shortage_difference_account_"
                                     f"{customer_idx}"
                                 )
+                                shortage_difference_summary_key = (
+                                    "shortage_difference_summary_"
+                                    f"{customer_idx}"
+                                )
                                 shortage_method = st.radio(
                                     "処理方法",
                                     [
@@ -5562,22 +5568,33 @@ elif mode == "未収消込":
                                             shortage_difference_account_key
                                         ] = default_expense_account
 
-                                    shortage_difference_account = st.selectbox(
-                                        "差額処理科目",
-                                        shortage_account_options,
-                                        index=shortage_account_options.index(
-                                            default_expense_account
-                                        ),
-                                        key=shortage_difference_account_key,
-                                        format_func=(
-                                            lambda account,
-                                            recommended=shortage_recommended_accounts:
-                                            format_recommended_account(
-                                                account,
-                                                recommended
+                                    (
+                                        shortage_account_col,
+                                        shortage_summary_col
+                                    ) = st.columns(2)
+                                    with shortage_account_col:
+                                        shortage_difference_account = st.selectbox(
+                                            "差額処理科目",
+                                            shortage_account_options,
+                                            index=shortage_account_options.index(
+                                                default_expense_account
+                                            ),
+                                            key=shortage_difference_account_key,
+                                            format_func=(
+                                                lambda account,
+                                                recommended=shortage_recommended_accounts:
+                                                format_recommended_account(
+                                                    account,
+                                                    recommended
+                                                )
                                             )
                                         )
-                                    )
+                                    with shortage_summary_col:
+                                        shortage_difference_summary = st.text_input(
+                                            "差額摘要",
+                                            value=f"{customer_name} 差額調整",
+                                            key=shortage_difference_summary_key
+                                        )
                                     st.caption(
                                         "選択した借方科目で不足額を処理します。"
                                     )
@@ -5605,7 +5622,8 @@ elif mode == "未収消込":
                                             execute_receivable_settlement(
                                                 target_candidates,
                                                 selected_difference_account,
-                                                "debit"
+                                                "debit",
+                                                shortage_difference_summary
                                             )
                                     except Exception as e:
                                         st.error(str(e))
@@ -5644,6 +5662,10 @@ elif mode == "未収消込":
                                     "overpaid_difference_account_"
                                     f"{customer_idx}"
                                 )
+                                overpaid_difference_summary_key = (
+                                    "overpaid_difference_summary_"
+                                    f"{customer_idx}"
+                                )
                                 if (
                                     st.session_state.get(
                                         overpaid_difference_account_key
@@ -5655,22 +5677,33 @@ elif mode == "未収消込":
                                     ] = default_suspense_account
 
                                 st.write("処理方法:", "差額を科目で処理する")
-                                overpaid_difference_account = st.selectbox(
-                                    "差額処理科目",
-                                    overpaid_account_options,
-                                    index=overpaid_account_options.index(
-                                        default_suspense_account
-                                    ),
-                                    key=overpaid_difference_account_key,
-                                    format_func=(
-                                        lambda account,
-                                        recommended=overpaid_recommended_accounts:
-                                        format_recommended_account(
-                                            account,
-                                            recommended
+                                (
+                                    overpaid_account_col,
+                                    overpaid_summary_col
+                                ) = st.columns(2)
+                                with overpaid_account_col:
+                                    overpaid_difference_account = st.selectbox(
+                                        "差額処理科目",
+                                        overpaid_account_options,
+                                        index=overpaid_account_options.index(
+                                            default_suspense_account
+                                        ),
+                                        key=overpaid_difference_account_key,
+                                        format_func=(
+                                            lambda account,
+                                            recommended=overpaid_recommended_accounts:
+                                            format_recommended_account(
+                                                account,
+                                                recommended
+                                            )
                                         )
                                     )
-                                )
+                                with overpaid_summary_col:
+                                    overpaid_difference_summary = st.text_input(
+                                        "差額摘要",
+                                        value=f"{customer_name} 過入金調整",
+                                        key=overpaid_difference_summary_key
+                                    )
                                 st.caption(
                                     "選択した貸方科目で過入金額を処理します。"
                                 )
@@ -5690,7 +5723,8 @@ elif mode == "未収消込":
                                         execute_receivable_settlement(
                                             target_candidates,
                                             selected_difference_account,
-                                            "credit"
+                                            "credit",
+                                            overpaid_difference_summary
                                         )
                                     except Exception as e:
                                         st.error(str(e))

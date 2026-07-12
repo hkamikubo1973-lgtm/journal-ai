@@ -1092,7 +1092,8 @@ def build_receivable_journal_rows(
     receipt_account,
     customer_name,
     difference_account=None,
-    difference_side=None
+    difference_side=None,
+    difference_summary=None
 ):
 
     payment_amount = int(payment_amount)
@@ -1185,6 +1186,11 @@ def build_receivable_journal_rows(
 
     rows = []
     difference_amount = abs(difference)
+    difference_summary = (
+        str(difference_summary).strip()
+        if difference_summary is not None
+        else f"{customer_name}差額処理"
+    )
 
     if difference_side == "debit":
 
@@ -1202,7 +1208,7 @@ def build_receivable_journal_rows(
                     offset=payment_amount
                 ),
                 difference_account,
-                f"{customer_name}差額処理"
+                difference_summary
             )
         )
 
@@ -1221,7 +1227,7 @@ def build_receivable_journal_rows(
             "貸方補助": "",
             "部門": "",
             "金額": difference_amount,
-            "摘要": f"{customer_name}差額処理"
+            "摘要": difference_summary
         })
     else:
         raise ValueError("差額処理区分が不正です")
