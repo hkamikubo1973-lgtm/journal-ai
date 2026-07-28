@@ -20,6 +20,7 @@ import os
 import uuid
 import re
 import unicodedata
+from collections import Counter
 
 from ocr_gateway import OcrResult, PaddleOcrGateway
 from ai_search.ai_search import (
@@ -1818,6 +1819,93 @@ def journal_import_key(row):
         normalize_import_value(row.get(COL_CREDIT, "")),
         normalize_import_value(amount, amount=True),
         normalize_import_value(row.get(COL_SUMMARY, "")),
+    )
+
+
+NORMAL_JOURNAL_BATCH_COLUMNS = [
+    COL_DATE,
+    "借方科目",
+    COL_DEBIT,
+    "借方補助",
+    COL_DEBIT_SUB,
+    COL_DEBIT_AMOUNT,
+    "貸方科目",
+    COL_CREDIT,
+    "貸方補助",
+    COL_CREDIT_SUB,
+    COL_CREDIT_AMOUNT,
+    COL_SUMMARY,
+    "伝票摘要",
+    "入力会社",
+]
+
+
+def normalize_normal_journal_batch_value(column, value):
+
+    value = unicodedata.normalize(
+        "NFKC",
+        str(value or "")
+    )
+    value = " ".join(value.split())
+
+    if column == COL_DATE:
+        value = value.replace("/", "").replace("-", "")
+
+    if column in {COL_DEBIT_AMOUNT, COL_CREDIT_AMOUNT}:
+        value = value.replace(",", "")
+
+    return value
+
+
+def normal_journal_batch_row_key(row):
+
+    return tuple(
+        normalize_normal_journal_batch_value(
+            column,
+            row.get(column, "")
+        )
+        for column in NORMAL_JOURNAL_BATCH_COLUMNS
+    )
+
+
+def build_normal_journal_batch_id(rows):
+
+    row_keys = sorted(
+        normal_journal_batch_row_key(row)
+        for row in (rows or [])
+        if isinstance(row, dict)
+    )
+    serialized_rows = json.dumps(
+        row_keys,
+        ensure_ascii=False,
+        separators=(",", ":")
+    )
+
+    return hashlib.sha256(
+        serialized_rows.encode("utf-8")
+    ).hexdigest()
+
+
+def is_normal_journal_batch_in_transactions(rows):
+
+    target_keys = Counter(
+        normal_journal_batch_row_key(row)
+        for row in (rows or [])
+        if isinstance(row, dict)
+    )
+
+    if not target_keys:
+        return False
+
+    existing_df = load_transactions_df()
+    existing_keys = Counter(
+        normal_journal_batch_row_key(row)
+        for _, row in existing_df.iterrows()
+    )
+
+    return all(
+        existing_keys[key] >= count
+        for key, count in target_keys.items()
     )
 
 
@@ -4436,9 +4524,29 @@ if mode == "通常仕訳":
         st.header("📄 出力")
     
         all_rows = []
-    
+
         for doc in st.session_state.confirmed:
             all_rows.extend(doc)
+
+        normal_journal_batch_id = build_normal_journal_batch_id(
+            all_rows
+        )
+        registered_batch_ids_key = (
+            "registered_normal_journal_batch_ids"
+        )
+        if registered_batch_ids_key not in st.session_state:
+            st.session_state[registered_batch_ids_key] = set()
+
+        registered_normal_journal_batch_ids = st.session_state[
+            registered_batch_ids_key
+        ]
+        if not isinstance(registered_normal_journal_batch_ids, set):
+            registered_normal_journal_batch_ids = set(
+                registered_normal_journal_batch_ids
+            )
+            st.session_state[
+                registered_batch_ids_key
+            ] = registered_normal_journal_batch_ids
     
         # =====================================
         # 入力用Excel
@@ -4556,20 +4664,55 @@ if mode == "通常仕訳":
                     "01_エプソン取込CSV"
                 )
                 if saved:
-                    registered, register_message = (
-                        register_epson_rows_to_search_db(all_rows)
+                    already_registered = (
+                        normal_journal_batch_id
+                        in registered_normal_journal_batch_ids
                     )
-                    if registered:
+
+                    if not already_registered:
+                        try:
+                            already_registered = (
+                                is_normal_journal_batch_in_transactions(
+                                    all_rows
+                                )
+                            )
+                        except Exception:
+                            already_registered = False
+
+                    if already_registered:
+                        registered_normal_journal_batch_ids.add(
+                            normal_journal_batch_id
+                        )
+                        save_path = message.replace(
+                            "保存しました：",
+                            "",
+                            1
+                        )
                         message = (
-                            "エプソン取込CSVを保存し、検索DBへ登録しました："
-                            f"{message.replace('保存しました：', '')}"
+                            "エプソン取込CSVを保存しました。"
+                            "この仕訳はすでに検索DBへ登録済みのため、"
+                            "DB追記は行いませんでした："
+                            f"{save_path}"
                         )
                     else:
-                        saved = False
-                        message = (
-                            "エプソン取込CSVは保存しましたが、"
-                            f"検索DB登録に失敗しました：{register_message}"
+                        registered, register_message = (
+                            register_epson_rows_to_search_db(all_rows)
                         )
+                        if registered:
+                            registered_normal_journal_batch_ids.add(
+                                normal_journal_batch_id
+                            )
+                            message = (
+                                "エプソン取込CSVを保存し、検索DBへ登録しました："
+                                f"{message.replace('保存しました：', '')}"
+                            )
+                        else:
+                            saved = False
+                            message = (
+                                "エプソン取込CSVは保存しましたが、"
+                                "検索DB登録に失敗しました："
+                                f"{register_message}"
+                            )
                 epson_csv_save_message = (
                     saved,
                     message
