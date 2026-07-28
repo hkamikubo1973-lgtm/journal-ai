@@ -5760,6 +5760,21 @@ elif mode == "未収消込":
         if "receivable_generated_journals" not in st.session_state:
             st.session_state["receivable_generated_journals"] = []
 
+        registered_journal_ids_key = (
+            "registered_receivable_journal_ids"
+        )
+        if registered_journal_ids_key not in st.session_state:
+            st.session_state[registered_journal_ids_key] = set()
+
+        registered_journal_ids = st.session_state[
+            registered_journal_ids_key
+        ]
+        if not isinstance(registered_journal_ids, set):
+            registered_journal_ids = set(registered_journal_ids)
+            st.session_state[
+                registered_journal_ids_key
+            ] = registered_journal_ids
+
         legacy_generated_journal = st.session_state.pop(
             "generated_receivable_journal",
             None
@@ -5801,15 +5816,19 @@ elif mode == "未収消込":
                     continue
 
                 settlement_id = generated_journal.get("settlement_id")
-                journal_registered = False
+                journal_registered = (
+                    settlement_id in registered_journal_ids
+                )
 
-                if settlement_id is not None:
+                if settlement_id is not None and not journal_registered:
                     try:
                         journal_registered = (
                             is_receivable_journal_registered(
                                 settlement_id
                             )
                         )
+                        if journal_registered:
+                            registered_journal_ids.add(settlement_id)
                     except Exception:
                         journal_registered = False
 
@@ -5911,35 +5930,26 @@ elif mode == "未収消込":
                 if isinstance(journal_rows, dict):
                     journal_rows = [journal_rows]
 
-                journal_registered = False
+                journal_registered = (
+                    settlement_id in registered_journal_ids
+                )
 
-                if settlement_id is not None:
+                if settlement_id is not None and not journal_registered:
                     try:
                         journal_registered = (
                             is_receivable_journal_registered(
                                 settlement_id
                             )
                         )
+                        if journal_registered:
+                            registered_journal_ids.add(settlement_id)
                     except Exception:
                         journal_registered = False
 
                 if journal_registered:
-                    st.session_state[
-                        "receivable_generated_journals"
-                    ] = [
-                        journal
-                        for journal in st.session_state[
-                            "receivable_generated_journals"
-                        ]
-                        if (
-                            not isinstance(journal, dict)
-                            or journal.get("settlement_id")
-                            != settlement_id
-                        )
-                    ]
-                    continue
-
-                has_unregistered_journal = True
+                    registered_journal_ids.add(settlement_id)
+                else:
+                    has_unregistered_journal = True
                 expander_label = (
                     f"{journal_customer_name or '未収消込'}"
                     f" / {settlement_id or 'IDなし'}"
@@ -6001,7 +6011,19 @@ elif mode == "未収消込":
                             "生成した仕訳をCSV出力対象へ追加します。"
                         )
 
-                    if (
+                    if journal_registered:
+                        st.button(
+                            "登録済み",
+                            key=(
+                                "registered_receivable_"
+                                f"{settlement_id}_{journal_idx}"
+                            ),
+                            disabled=True
+                        )
+                        st.info(
+                            "この仕訳はすでにCSV出力対象へ登録済みです。"
+                        )
+                    elif (
                         settlement_id is not None
                         and st.button(
                             "この仕訳をCSV出力対象へ登録",
@@ -6014,6 +6036,21 @@ elif mode == "未収消込":
                     ):
 
                         try:
+
+                            if (
+                                settlement_id
+                                in registered_journal_ids
+                                or is_receivable_journal_registered(
+                                    settlement_id
+                                )
+                            ):
+                                registered_journal_ids.add(
+                                    settlement_id
+                                )
+                                st.warning(
+                                    "この仕訳はすでにCSV出力対象へ登録済みです。"
+                                )
+                                continue
 
                             transaction_rows = []
 
@@ -6029,30 +6066,17 @@ elif mode == "未収消込":
 
                                 transaction_rows.append(row)
 
+                            mark_receivable_journal_registered(
+                                settlement_id
+                            )
+                            registered_journal_ids.add(settlement_id)
+
                             if "confirmed" not in st.session_state:
                                 st.session_state.confirmed = []
 
                             st.session_state.confirmed.append(
                                 copy.deepcopy(transaction_rows)
                             )
-
-                            mark_receivable_journal_registered(
-                                settlement_id
-                            )
-
-                            st.session_state[
-                                "receivable_generated_journals"
-                            ] = [
-                                journal
-                                for journal in st.session_state[
-                                    "receivable_generated_journals"
-                                ]
-                                if (
-                                    not isinstance(journal, dict)
-                                    or journal.get("settlement_id")
-                                    != settlement_id
-                                )
-                            ]
 
                             st.session_state[
                                 "receivable_success"
