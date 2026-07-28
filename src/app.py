@@ -4540,10 +4540,6 @@ if mode == "通常仕訳":
         )
 
         st.subheader("エプソン取込CSV")
-        st.caption(
-            "保存先へ保存すると検索DBへ登録します。"
-            "ダウンロードは確認用で、検索DBへは登録しません。"
-        )
         epson_csv_save_message = None
         epson_save_col, epson_download_col = st.columns([1, 1])
 
@@ -4579,6 +4575,9 @@ if mode == "通常仕訳":
                     message
                 )
                 st.session_state.pop("input_excel_save_message", None)
+            st.caption(
+                "保存先へ保存すると検索DBへ登録します。"
+            )
 
         with epson_download_col:
             st.download_button(
@@ -4588,8 +4587,7 @@ if mode == "通常仕訳":
                 key="download_epson_csv"
             )
             st.caption(
-                "※ダウンロードでは検索DBへ登録しません。"
-                "DB登録する場合は「保存先へ保存」を押してください。"
+                "ダウンロードでは検索DBへ登録しません。"
             )
 
         if epson_csv_save_message:
