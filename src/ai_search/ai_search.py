@@ -1,5 +1,8 @@
 from ai_client import generate_ai_search_explanation
-from ai_search.prompt_builder import build_ai_search_prompt
+from ai_search.prompt_builder import (
+    build_ai_search_payload,
+    build_ai_search_prompt,
+)
 
 
 def build_ai_search_context(

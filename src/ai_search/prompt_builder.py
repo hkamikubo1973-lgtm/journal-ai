@@ -1,13 +1,11 @@
 import json
 
 
-def build_ai_search_prompt(context):
-    """
-    AIサーチ用プロンプトを生成する。
-    AIサーチは検索結果の補足説明だけを行い、検索順位や仕訳内容は変更しない。
-    """
+def build_ai_search_payload(context):
 
-    prompt_payload = {
+    context = context or {}
+
+    return {
         "keyword": context.get("keyword", ""),
         "amount": context.get("amount", ""),
         "department": context.get("department", ""),
@@ -17,6 +15,15 @@ def build_ai_search_prompt(context):
         "max_candidate_count": context.get("max_candidate_count", 20),
         "ocr_text": context.get("ocr_text", ""),
     }
+
+
+def build_ai_search_prompt(context):
+    """
+    AIサーチ用プロンプトを生成する。
+    AIサーチは検索結果の補足説明だけを行い、検索順位や仕訳内容は変更しない。
+    """
+
+    prompt_payload = build_ai_search_payload(context)
 
     return "\n".join([
         "あなたは経理アシスタントです。",

@@ -25,6 +25,7 @@ from collections import Counter
 from ocr_gateway import OcrResult, PaddleOcrGateway
 from ai_search.ai_search import (
     build_ai_search_context,
+    build_ai_search_payload,
     run_ai_search,
 )
 from receivable_engine import (
@@ -1632,7 +1633,10 @@ def build_ai_search_candidates(results, visible_count=0):
     candidates = []
     score_details = []
 
-    for index, result in enumerate(results or [], start=1):
+    for index, result in enumerate(
+        (results or [])[:AI_SEARCH_RESULT_LIMIT],
+        start=1
+    ):
         if len(result) != 3:
             continue
 
@@ -1646,6 +1650,42 @@ def build_ai_search_candidates(results, visible_count=0):
             continue
 
         first_row = rows[0]
+        matched_amount_row = rec.get("matched_amount_row") or {}
+        block_rows = [
+            {
+                "date": row.get(COL_DATE, ""),
+                "debit": row.get(COL_DEBIT, ""),
+                "credit": row.get(COL_CREDIT, ""),
+                "debit_sub": row.get(COL_DEBIT_SUB, ""),
+                "credit_sub": row.get(COL_CREDIT_SUB, ""),
+                "debit_amount": row.get(COL_DEBIT_AMOUNT, ""),
+                "credit_amount": row.get(COL_CREDIT_AMOUNT, ""),
+                "summary": row.get(COL_SUMMARY, ""),
+                "voucher_summary": row.get("伝票摘要", ""),
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        has_fukugo = any(
+            "資金複合" in (
+                str(row.get(COL_DEBIT, ""))
+                + str(row.get(COL_CREDIT, ""))
+            )
+            for row in rows
+            if isinstance(row, dict)
+        )
+        has_sundry = any(
+            "諸口" in (
+                str(row.get(COL_DEBIT, ""))
+                + str(row.get(COL_CREDIT, ""))
+            )
+            for row in rows
+            if isinstance(row, dict)
+        )
+        pattern_key = rec.get("pattern_key", ())
+        if isinstance(pattern_key, tuple):
+            pattern_key = list(pattern_key)
+
         candidate = {
             "rank": index,
             "score": score,
@@ -1657,8 +1697,22 @@ def build_ai_search_candidates(results, visible_count=0):
             "credit": first_row.get(COL_CREDIT, ""),
             "debit_account": first_row.get(COL_DEBIT, ""),
             "credit_account": first_row.get(COL_CREDIT, ""),
+            "debit_sub": first_row.get(COL_DEBIT_SUB, ""),
+            "credit_sub": first_row.get(COL_CREDIT_SUB, ""),
             "row_count": len(rows),
+            "block_row_count": len(block_rows),
             "amount": get_voucher_total(rows),
+            "voucher_summary": first_row.get("伝票摘要", ""),
+            "search_reason": list(score_detail or []),
+            "has_fukugo": has_fukugo,
+            "has_sundry": has_sundry,
+            "contains_fukugo_or_sundry": has_fukugo or has_sundry,
+            "is_complex": has_fukugo or has_sundry or len(rows) > 1,
+            "block_rows": block_rows,
+            "matched_amount_row_present": bool(matched_amount_row),
+            "matched_amount_row": matched_amount_row,
+            "pattern_key": pattern_key,
+            "pattern_rank": rec.get("pattern_rank"),
         }
         candidates.append(candidate)
 
@@ -3458,6 +3512,39 @@ if mode == "通常仕訳":
     
     else:
 
+        ai_search_results = (
+            st.session_state.get("ai_search_results") or results
+        )
+        ai_search_params = st.session_state.get(
+            "last_journal_search_params",
+            {
+                "keyword": st.session_state.get(
+                    "keyword_input",
+                    ""
+                ),
+                "dept": dept if dept else None,
+                "amount": amount,
+            }
+        )
+        ai_candidates, ai_score_detail = build_ai_search_candidates(
+            ai_search_results,
+            visible_count=len(results)
+        )
+        ai_search_context = build_ai_search_context(
+            keyword=ai_search_params.get("keyword", ""),
+            amount=ai_search_params.get("amount"),
+            department=ai_search_params.get("dept"),
+            candidates=ai_candidates,
+            score_detail=ai_score_detail,
+            visible_count=len(results),
+            max_candidate_count=AI_SEARCH_RESULT_LIMIT,
+            ocr_text=(
+                getattr(ocr_result, "raw_text", "")
+                if ocr_result is not None
+                else ""
+            ),
+        )
+
         if DEBUG_SEARCH_DIAGNOSTICS:
             debug_search_params = st.session_state.get(
                 "last_journal_search_params",
@@ -3599,6 +3686,20 @@ if mode == "通常仕訳":
                             "ください。"
                         )
 
+            with st.expander(
+                "AIサーチ送信予定JSON（開発用）",
+                expanded=False
+            ):
+                ai_search_payload = build_ai_search_payload(
+                    ai_search_context
+                )
+                st.caption(
+                    f"候補数: {len(ai_candidates)} / "
+                    f"画面表示中: {len(results)} / "
+                    f"最大: {AI_SEARCH_RESULT_LIMIT}"
+                )
+                st.json(ai_search_payload)
+
         with st.expander("AIサーチ（補足説明）", expanded=False):
             st.caption(
                 "検索結果をもとに、候補選択の理由や注意点を整理します。"
@@ -3609,39 +3710,7 @@ if mode == "通常仕訳":
                 "AIサーチで説明を表示",
                 key="run_ai_search_explanation"
             ):
-                ai_search_results = (
-                    st.session_state.get("ai_search_results") or results
-                )
-                ai_search_params = st.session_state.get(
-                    "last_journal_search_params",
-                    {
-                        "keyword": st.session_state.get(
-                            "keyword_input",
-                            ""
-                        ),
-                        "dept": dept if dept else None,
-                        "amount": amount,
-                    }
-                )
-                ai_candidates, ai_score_detail = build_ai_search_candidates(
-                    ai_search_results,
-                    visible_count=len(results)
-                )
-                context = build_ai_search_context(
-                    keyword=ai_search_params.get("keyword", ""),
-                    amount=ai_search_params.get("amount"),
-                    department=ai_search_params.get("dept"),
-                    candidates=ai_candidates,
-                    score_detail=ai_score_detail,
-                    visible_count=len(results),
-                    max_candidate_count=AI_SEARCH_RESULT_LIMIT,
-                    ocr_text=(
-                        getattr(ocr_result, "raw_text", "")
-                        if ocr_result is not None
-                        else ""
-                    ),
-                )
-                ai_result = run_ai_search(context)
+                ai_result = run_ai_search(ai_search_context)
 
                 st.info(ai_result.get("summary", ""))
 
