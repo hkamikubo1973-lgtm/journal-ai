@@ -13,6 +13,7 @@ import copy
 import platform
 import getpass
 import csv
+import hashlib
 import io
 import json
 import os
@@ -2151,6 +2152,54 @@ def format_receivable_check_amount(value):
     amount = to_int(value)
 
     return f"{amount:,}" if amount else "0"
+
+
+def build_receivable_check_filename(generated_journals):
+
+    journals = [
+        journal
+        for journal in (generated_journals or [])
+        if isinstance(journal, dict)
+    ]
+    settlement_ids = sorted({
+        str(journal.get("settlement_id", "") or "").strip()
+        for journal in journals
+        if str(journal.get("settlement_id", "") or "").strip()
+    })
+
+    settlement_dates = []
+    for journal in journals:
+        date_digits = re.sub(
+            r"\D",
+            "",
+            format_receivable_check_date(
+                journal.get("settlement_date", "")
+            )
+        )
+        if len(date_digits) >= 8:
+            settlement_dates.append(date_digits[:8])
+
+    settlement_date = (
+        sorted(settlement_dates)[0]
+        if settlement_dates
+        else "undated"
+    )
+
+    if len(settlement_ids) == 1:
+        id_part = re.sub(
+            r"[^0-9A-Za-z_-]",
+            "",
+            settlement_ids[0]
+        )[:8]
+    else:
+        id_part = hashlib.sha256(
+            "|".join(settlement_ids).encode("utf-8")
+        ).hexdigest()[:8]
+
+    if not id_part:
+        id_part = "no_id"
+
+    return f"receivable_check_{settlement_date}_{id_part}.xlsx"
 
 
 def build_receivable_check_rows(generated_journals):
@@ -5844,8 +5893,12 @@ elif mode == "未収消込":
             if receivable_check_rows:
                 st.subheader("未収消込確認表")
                 st.caption(
-                    "経理起票伝票との突合せ用です。"
+                    "未収一覧との突合せ用です。"
                     "エプソン取込形式ではありません。"
+                )
+                st.caption(
+                    "確認表の保存のみです。仕訳を出力対象へ反映するには"
+                    "「この仕訳をCSV出力対象へ登録」を押してください。"
                 )
 
                 receivable_check_excel = (
@@ -5854,8 +5907,9 @@ elif mode == "未収消込":
                     )
                 )
                 receivable_check_filename = (
-                    "receivable_check_"
-                    f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                    build_receivable_check_filename(
+                        receivable_check_journals
+                    )
                 )
 
                 (
