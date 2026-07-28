@@ -4445,7 +4445,8 @@ if mode == "通常仕訳":
         # =====================================
         st.subheader("入力用Excel（簡易仕訳帳・印刷用）")
         st.caption(
-            "エプソンへ手入力・修正するための印刷用一覧です。45列インポート形式ではありません。"
+            "エプソンへ手入力・修正するための印刷用一覧です。"
+            "検索DBへは登録しません。45列インポート形式ではありません。"
         )
 
         input_rows = build_input_csv_rows(
@@ -4485,7 +4486,6 @@ if mode == "通常仕訳":
                     saved,
                     message
                 )
-                st.session_state.pop("epson_csv_save_message", None)
 
         with input_download_col:
             st.download_button(
@@ -4540,7 +4540,11 @@ if mode == "通常仕訳":
         )
 
         st.subheader("エプソン取込CSV")
-        st.caption("登録済み仕訳をエプソン取込形式で保存します。")
+        st.caption(
+            "保存先へ保存すると検索DBへ登録します。"
+            "ダウンロードは確認用で、検索DBへは登録しません。"
+        )
+        epson_csv_save_message = None
         epson_save_col, epson_download_col = st.columns([1, 1])
 
         with epson_save_col:
@@ -4570,7 +4574,7 @@ if mode == "通常仕訳":
                             "エプソン取込CSVは保存しましたが、"
                             f"検索DB登録に失敗しました：{register_message}"
                         )
-                st.session_state["epson_csv_save_message"] = (
+                epson_csv_save_message = (
                     saved,
                     message
                 )
@@ -4583,10 +4587,11 @@ if mode == "通常仕訳":
                 file_name=epson_filename,
                 key="download_epson_csv"
             )
+            st.caption(
+                "※ダウンロードでは検索DBへ登録しません。"
+                "DB登録する場合は「保存先へ保存」を押してください。"
+            )
 
-        epson_csv_save_message = st.session_state.get(
-            "epson_csv_save_message"
-        )
         if epson_csv_save_message:
             saved, message = epson_csv_save_message
             if saved:
