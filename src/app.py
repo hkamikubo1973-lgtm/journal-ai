@@ -5199,7 +5199,7 @@ elif mode == "未収消込":
 
     if receivables_df.empty:
 
-        st.info("未収データがありません")
+        st.info("未収台帳に消込対象データはありません。")
 
     else:
 
@@ -5222,7 +5222,7 @@ elif mode == "未収消込":
 
         if receivables_df.empty:
 
-            st.info("未収データがありません")
+            st.info("未収台帳に消込対象データはありません。")
 
         else:
 
