@@ -46,6 +46,7 @@ from events_engine import (
     add_event,
     calculate_next_target_date,
     complete_event,
+    delete_event,
     ensure_events_csv,
     get_effective_status,
     get_notification_events,
@@ -4941,6 +4942,10 @@ elif mode == "イベント管理":
     if not events:
         st.info("登録済みイベントはありません。")
 
+    delete_confirmation = st.session_state.get(
+        "event_delete_confirmation"
+    )
+
     for event_index, event in enumerate(events):
         cycle_label = event_cycle_labels.get(event["cycle"], event["cycle"])
         if event["cycle"] == "yearly":
@@ -4956,10 +4961,14 @@ elif mode == "イベント管理":
         )
         if effective_status != event["status"]:
             status_label += "（次周期）"
+        is_delete_target = (
+            isinstance(delete_confirmation, dict)
+            and delete_confirmation.get("index") == event_index
+        )
 
         with st.expander(
             f"{event['title']}　|　{cycle_label} {schedule_label}",
-            expanded=False,
+            expanded=is_delete_target,
         ):
             st.write(
                 f"通知: {event['notify_days']}日前 ／ "
@@ -5077,6 +5086,65 @@ elif mode == "イベント管理":
                         st.rerun()
                     except (OSError, ValueError, IndexError) as e:
                         st.error(str(e))
+
+            st.divider()
+            if is_delete_target:
+                st.warning(
+                    f"「{event['title']}」を削除しますか？"
+                )
+                confirm_col, cancel_col, empty_col = st.columns(
+                    [1, 1, 3]
+                )
+                with confirm_col:
+                    if st.button(
+                        "本当に削除する",
+                        key=f"event_delete_confirm_{event_index}",
+                        type="primary",
+                    ):
+                        try:
+                            removed_event = delete_event(
+                                event_index,
+                                expected_event=delete_confirmation.get(
+                                    "event"
+                                ),
+                            )
+                        except (OSError, ValueError, IndexError) as e:
+                            st.session_state.pop(
+                                "event_delete_confirmation",
+                                None,
+                            )
+                            st.error(str(e))
+                        else:
+                            st.session_state.pop(
+                                "event_delete_confirmation",
+                                None,
+                            )
+                            for state_key in list(st.session_state):
+                                if state_key.startswith("event_edit_"):
+                                    st.session_state.pop(state_key, None)
+                            st.session_state["event_management_message"] = (
+                                f"「{removed_event['title']}」を削除しました。"
+                            )
+                            st.rerun()
+                with cancel_col:
+                    if st.button(
+                        "キャンセル",
+                        key=f"event_delete_cancel_{event_index}",
+                    ):
+                        st.session_state.pop(
+                            "event_delete_confirmation",
+                            None,
+                        )
+                        st.rerun()
+            elif st.button(
+                "削除",
+                key=f"event_delete_{event_index}",
+            ):
+                st.session_state["event_delete_confirmation"] = {
+                    "index": event_index,
+                    "event": dict(event),
+                }
+                st.rerun()
 
     st.divider()
     st.header("新規イベント追加")

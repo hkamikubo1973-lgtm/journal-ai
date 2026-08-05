@@ -370,6 +370,23 @@ def update_event(index, updates, path=EVENTS_PATH):
     return updated
 
 
+def delete_event(index, expected_event=None, path=EVENTS_PATH):
+    """CSVの元行番号でイベントを削除し、削除した内容を返す。"""
+    events = load_events(path)
+    if not 0 <= index < len(events):
+        raise IndexError("削除対象のイベントが見つかりません")
+    if (
+        expected_event is not None
+        and events[index] != _normalize_event(expected_event)
+    ):
+        raise ValueError(
+            "イベント一覧が更新されています。内容を確認してから再度削除してください"
+        )
+    removed_event = events.pop(index)
+    save_events(events, path)
+    return removed_event
+
+
 def _set_status(index, status, today=None, path=EVENTS_PATH):
     today = today or date.today()
     events = load_events(path)
