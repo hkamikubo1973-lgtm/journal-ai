@@ -2948,27 +2948,33 @@ if "csv_export_dir" not in st.session_state:
         ""
     )
 
-st.sidebar.header("🏢 システム設定")
+def render_system_settings_sidebar():
 
-st.sidebar.text_input(
-    "入力会社",
-    key="company_name",
-    on_change=save_system_settings_from_state
-)
+    st.sidebar.header("🏢 システム設定")
 
-st.sidebar.text_input(
-    "CSV保存先フォルダ",
-    placeholder=r"\\NAS\share\journal-ai\csv",
-    key="csv_export_dir",
-    on_change=save_system_settings_from_state
-)
-
-if "system_settings_warning" in st.session_state:
-    st.sidebar.warning(
-        st.session_state.pop("system_settings_warning")
+    st.sidebar.text_input(
+        "入力会社",
+        key="company_name",
+        on_change=save_system_settings_from_state
     )
 
-st.sidebar.divider()
+    st.sidebar.text_input(
+        "CSV保存先フォルダ",
+        placeholder=r"\\NAS\share\journal-ai\csv",
+        key="csv_export_dir",
+        on_change=save_system_settings_from_state
+    )
+
+    if "system_settings_warning" in st.session_state:
+        st.sidebar.warning(
+            st.session_state.pop("system_settings_warning")
+        )
+
+    st.sidebar.divider()
+
+
+if mode != "通常仕訳":
+    render_system_settings_sidebar()
 
 if mode == "通常仕訳":
 
@@ -3070,6 +3076,8 @@ if mode == "通常仕訳":
         if amount_input is not None and amount_input > 0
         else None
     )
+
+    render_system_settings_sidebar()
     
     if st.sidebar.button(
         "科目マスター生成"
