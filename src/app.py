@@ -42,6 +42,20 @@ from receivable_engine import (
     normalize_standard_receivable_csv,
     organize_completed_receivables,
 )
+from events_engine import (
+    add_event,
+    complete_event,
+    ensure_events_csv,
+    get_effective_status,
+    get_notification_events,
+    load_events,
+    resume_event,
+    skip_event,
+    stop_event,
+    update_event,
+)
+
+ensure_events_csv()
 
 DEBUG_SEARCH_DIAGNOSTICS = False
 
@@ -2889,7 +2903,8 @@ mode = st.sidebar.radio(
     "モード",
     [
         "通常仕訳",
-        "未収消込"
+        "未収消込",
+        "イベント管理"
     ]
 )
 
@@ -4809,6 +4824,284 @@ if mode == "通常仕訳":
             else:
                 st.warning(message)
     
+
+elif mode == "イベント管理":
+
+    st.title("イベント管理")
+    st.caption(
+        "支払期限・税金・月次処理などを登録し、通知期間と処理状態を管理します。"
+    )
+
+    event_type_labels = {
+        "tax": "税金",
+        "payment": "支払",
+        "card": "カード",
+        "other": "その他",
+    }
+    event_cycle_labels = {
+        "monthly": "月次",
+        "yearly": "年次",
+    }
+    event_status_labels = {
+        "pending": "未処理",
+        "notified": "通知中",
+        "done": "完了",
+        "skip": "スキップ",
+    }
+
+    if "event_management_message" in st.session_state:
+        st.success(st.session_state.pop("event_management_message"))
+
+    try:
+        events = load_events()
+        notification_events = get_notification_events(events)
+    except (OSError, ValueError) as e:
+        st.error(f"イベント情報を読み込めませんでした: {e}")
+        events = []
+        notification_events = []
+
+    st.header("通知対象イベント")
+
+    if not notification_events:
+        st.info("現在、通知期間に入っているイベントはありません。")
+
+    for event in notification_events:
+        event_index = event["index"]
+        days_remaining = event["days_remaining"]
+        remaining_label = (
+            "本日" if days_remaining == 0 else f"あと{days_remaining}日"
+        )
+
+        with st.expander(
+            f"{event['title']}　{event['next_date']:%Y/%m/%d}（{remaining_label}）",
+            expanded=True,
+        ):
+            detail_col, memo_col = st.columns([1, 2])
+            with detail_col:
+                st.write(
+                    "種別: "
+                    f"{event_type_labels.get(event['type'], event['type'])}"
+                )
+            with memo_col:
+                st.write(f"備考: {event['memo'] or '―'}")
+
+            done_col, skip_col, stop_col, empty_col = st.columns(
+                [1, 1, 1, 4]
+            )
+            with done_col:
+                if st.button("完了", key=f"event_done_{event_index}"):
+                    complete_event(event_index)
+                    st.session_state["event_management_message"] = (
+                        f"「{event['title']}」を完了にしました。"
+                    )
+                    st.rerun()
+            with skip_col:
+                if st.button("スキップ", key=f"event_skip_{event_index}"):
+                    skip_event(event_index)
+                    st.session_state["event_management_message"] = (
+                        f"「{event['title']}」をスキップしました。"
+                    )
+                    st.rerun()
+            with stop_col:
+                if st.button("停止", key=f"event_stop_{event_index}"):
+                    stop_event(event_index)
+                    st.session_state["event_management_message"] = (
+                        f"「{event['title']}」を停止しました。"
+                    )
+                    st.rerun()
+
+    st.divider()
+    st.header("登録済みイベント一覧")
+
+    if not events:
+        st.info("登録済みイベントはありません。")
+
+    for event_index, event in enumerate(events):
+        cycle_label = event_cycle_labels.get(event["cycle"], event["cycle"])
+        if event["cycle"] == "yearly":
+            schedule_label = f"毎年{event['month']}月{event['day']}日"
+        else:
+            schedule_label = f"毎月{event['day']}日"
+        stopped = event["stop"].lower() == "true"
+        effective_status = get_effective_status(event)
+        status_label = event_status_labels.get(
+            effective_status,
+            effective_status,
+        )
+        if effective_status != event["status"]:
+            status_label += "（次周期）"
+
+        with st.expander(
+            f"{event['title']}　|　{cycle_label} {schedule_label}",
+            expanded=False,
+        ):
+            st.write(
+                f"通知: {event['notify_days']}日前 ／ "
+                f"種別: {event_type_labels.get(event['type'], event['type'])} ／ "
+                f"状態: {status_label} ／ "
+                f"停止中: {'はい' if stopped else 'いいえ'}"
+            )
+            st.write(f"備考: {event['memo'] or '―'}")
+            if event["last_executed"]:
+                st.caption(f"最終処理日: {event['last_executed']}")
+
+            if stopped and st.button(
+                "再開",
+                key=f"event_resume_{event_index}",
+            ):
+                resume_event(event_index)
+                st.session_state["event_management_message"] = (
+                    f"「{event['title']}」を再開しました。"
+                )
+                st.rerun()
+
+            with st.form(f"event_edit_form_{event_index}"):
+                st.subheader("簡易編集")
+                edit_title = st.text_input(
+                    "イベント名",
+                    value=event["title"],
+                    key=f"event_edit_title_{event_index}",
+                )
+                edit_cycle = st.selectbox(
+                    "周期",
+                    ["monthly", "yearly"],
+                    index=["monthly", "yearly"].index(event["cycle"]),
+                    format_func=lambda value: event_cycle_labels[value],
+                    key=f"event_edit_cycle_{event_index}",
+                )
+                edit_date_col, edit_notify_col = st.columns(2)
+                with edit_date_col:
+                    edit_month = st.number_input(
+                        "月（年次のみ）",
+                        min_value=1,
+                        max_value=12,
+                        value=int(event["month"] or 1),
+                        disabled=edit_cycle != "yearly",
+                        key=f"event_edit_month_{event_index}",
+                    )
+                    edit_day = st.number_input(
+                        "日",
+                        min_value=1,
+                        max_value=31,
+                        value=int(event["day"]),
+                        key=f"event_edit_day_{event_index}",
+                    )
+                with edit_notify_col:
+                    edit_notify_days = st.number_input(
+                        "通知日前",
+                        min_value=0,
+                        max_value=365,
+                        value=int(event["notify_days"]),
+                        key=f"event_edit_notify_{event_index}",
+                    )
+                    status_options = [
+                        "pending",
+                        "notified",
+                        "done",
+                        "skip",
+                    ]
+                    edit_status = st.selectbox(
+                        "状態",
+                        status_options,
+                        index=status_options.index(event["status"]),
+                        format_func=lambda value: event_status_labels[value],
+                        key=f"event_edit_status_{event_index}",
+                    )
+                edit_type = st.selectbox(
+                    "種別",
+                    ["tax", "payment", "card", "other"],
+                    index=["tax", "payment", "card", "other"].index(
+                        event["type"]
+                    ),
+                    format_func=lambda value: event_type_labels[value],
+                    key=f"event_edit_type_{event_index}",
+                )
+                edit_memo = st.text_area(
+                    "備考",
+                    value=event["memo"],
+                    key=f"event_edit_memo_{event_index}",
+                )
+                if st.form_submit_button("変更を保存"):
+                    try:
+                        update_event(
+                            event_index,
+                            {
+                                "title": edit_title,
+                                "cycle": edit_cycle,
+                                "month": edit_month if edit_cycle == "yearly" else "",
+                                "day": edit_day,
+                                "notify_days": edit_notify_days,
+                                "status": edit_status,
+                                "type": edit_type,
+                                "memo": edit_memo,
+                            },
+                        )
+                        st.session_state["event_management_message"] = (
+                            f"「{edit_title}」を更新しました。"
+                        )
+                        st.rerun()
+                    except (OSError, ValueError, IndexError) as e:
+                        st.error(str(e))
+
+    st.divider()
+    st.header("新規イベント追加")
+
+    with st.form("event_add_form", clear_on_submit=True):
+        new_title = st.text_input("イベント名")
+        new_cycle = st.selectbox(
+            "周期",
+            ["monthly", "yearly"],
+            format_func=lambda value: event_cycle_labels[value],
+        )
+        new_date_col, new_notify_col = st.columns(2)
+        with new_date_col:
+            new_month = st.number_input(
+                "月（年次のみ）",
+                min_value=1,
+                max_value=12,
+                value=1,
+                disabled=new_cycle != "yearly",
+            )
+            new_day = st.number_input(
+                "日",
+                min_value=1,
+                max_value=31,
+                value=1,
+            )
+        with new_notify_col:
+            new_notify_days = st.number_input(
+                "通知日前",
+                min_value=0,
+                max_value=365,
+                value=7,
+            )
+            new_type = st.selectbox(
+                "種別",
+                ["tax", "payment", "card", "other"],
+                format_func=lambda value: event_type_labels[value],
+            )
+        new_memo = st.text_area("備考")
+
+        if st.form_submit_button("追加"):
+            try:
+                add_event(
+                    {
+                        "title": new_title,
+                        "cycle": new_cycle,
+                        "month": new_month if new_cycle == "yearly" else "",
+                        "day": new_day,
+                        "notify_days": new_notify_days,
+                        "type": new_type,
+                        "memo": new_memo,
+                    }
+                )
+                st.session_state["event_management_message"] = (
+                    f"「{new_title.strip()}」を追加しました。"
+                )
+                st.rerun()
+            except (OSError, ValueError) as e:
+                st.error(str(e))
+
 
 elif mode == "未収消込":
 
