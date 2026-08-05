@@ -2908,6 +2908,30 @@ mode = st.sidebar.radio(
     ]
 )
 
+try:
+    sidebar_notification_events = get_notification_events()
+except (OSError, ValueError):
+    sidebar_notification_events = []
+
+if sidebar_notification_events:
+    st.sidebar.warning(
+        f"⚠ 通知対象イベント：{len(sidebar_notification_events)}件"
+    )
+    for event in sidebar_notification_events[:3]:
+        days_remaining = event["days_remaining"]
+        remaining_label = (
+            "本日" if days_remaining == 0 else f"あと{days_remaining}日"
+        )
+        st.sidebar.caption(
+            f"・{event['title']} "
+            f"{event['next_date']:%Y/%m/%d}（{remaining_label}）"
+        )
+    if len(sidebar_notification_events) > 3:
+        st.sidebar.caption(
+            f"ほか{len(sidebar_notification_events) - 3}件"
+        )
+    st.sidebar.divider()
+
 loaded_system_settings = load_system_settings()
 
 if "company_name" not in st.session_state:
