@@ -308,6 +308,27 @@ def get_notification_events(events=None, today=None, path=EVENTS_PATH):
     return sorted(results, key=lambda item: (item["next_date"], item["title"]))
 
 
+def sort_events_for_display(events=None, today=None, path=EVENTS_PATH):
+    """元行番号を保持し、稼働状態と次回日で表示用に並べ替える。"""
+    today = today or date.today()
+    events = load_events(path) if events is None else events
+    results = []
+    for index, event in enumerate(events):
+        item = dict(event)
+        item["index"] = index
+        item["next_date"] = calculate_next_target_date(event, today)
+        results.append(item)
+    return sorted(
+        results,
+        key=lambda item: (
+            _as_bool(item["stop"]),
+            item["next_date"],
+            item["title"],
+            item["index"],
+        ),
+    )
+
+
 def validate_event(event):
     title = str(event.get("title", "") or "").strip()
     if not title:

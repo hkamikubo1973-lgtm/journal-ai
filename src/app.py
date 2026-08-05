@@ -44,7 +44,6 @@ from receivable_engine import (
 )
 from events_engine import (
     add_event,
-    calculate_next_target_date,
     complete_event,
     delete_event,
     ensure_events_csv,
@@ -53,6 +52,7 @@ from events_engine import (
     load_events,
     resume_event,
     skip_event,
+    sort_events_for_display,
     stop_event,
     update_event,
 )
@@ -4881,10 +4881,12 @@ elif mode == "イベント管理":
     try:
         events = load_events()
         notification_events = get_notification_events(events)
+        display_events = sort_events_for_display(events)
     except (OSError, ValueError) as e:
         st.error(f"イベント情報を読み込めませんでした: {e}")
         events = []
         notification_events = []
+        display_events = []
 
     st.header("通知対象イベント")
 
@@ -4946,7 +4948,9 @@ elif mode == "イベント管理":
         "event_delete_confirmation"
     )
 
-    for event_index, event in enumerate(events):
+    for display_event in display_events:
+        event_index = display_event["index"]
+        event = events[event_index]
         cycle_label = event_cycle_labels.get(event["cycle"], event["cycle"])
         if event["cycle"] == "yearly":
             schedule_label = f"毎年{event['month']}月{event['day']}日"
@@ -4954,7 +4958,7 @@ elif mode == "イベント管理":
             schedule_label = f"毎月{event['day']}日"
         stopped = event["stop"].lower() == "true"
         effective_status = get_effective_status(event)
-        next_target_date = calculate_next_target_date(event)
+        next_target_date = display_event["next_date"]
         status_label = event_status_labels.get(
             effective_status,
             effective_status,
