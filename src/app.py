@@ -5046,13 +5046,15 @@ elif mode == "イベント管理":
     st.divider()
     st.header("新規イベント追加")
 
+    new_cycle = st.selectbox(
+        "周期",
+        ["monthly", "yearly"],
+        format_func=lambda value: event_cycle_labels[value],
+        key="new_event_cycle",
+    )
+
     with st.form("event_add_form", clear_on_submit=True):
         new_title = st.text_input("イベント名")
-        new_cycle = st.selectbox(
-            "周期",
-            ["monthly", "yearly"],
-            format_func=lambda value: event_cycle_labels[value],
-        )
         new_date_col, new_notify_col = st.columns(2)
         with new_date_col:
             new_month = st.number_input(
@@ -5061,6 +5063,7 @@ elif mode == "イベント管理":
                 max_value=12,
                 value=1,
                 disabled=new_cycle != "yearly",
+                key="new_event_month",
             )
             new_day = st.number_input(
                 "日",
