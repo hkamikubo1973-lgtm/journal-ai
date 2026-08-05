@@ -44,6 +44,7 @@ from receivable_engine import (
 )
 from events_engine import (
     add_event,
+    calculate_next_target_date,
     complete_event,
     ensure_events_csv,
     get_effective_status,
@@ -4868,7 +4869,7 @@ elif mode == "イベント管理":
     }
     event_status_labels = {
         "pending": "未処理",
-        "notified": "通知中",
+        "notified": "通知済",
         "done": "完了",
         "skip": "スキップ",
     }
@@ -4948,6 +4949,7 @@ elif mode == "イベント管理":
             schedule_label = f"毎月{event['day']}日"
         stopped = event["stop"].lower() == "true"
         effective_status = get_effective_status(event)
+        next_target_date = calculate_next_target_date(event)
         status_label = event_status_labels.get(
             effective_status,
             effective_status,
@@ -4965,9 +4967,18 @@ elif mode == "イベント管理":
                 f"状態: {status_label} ／ "
                 f"停止中: {'はい' if stopped else 'いいえ'}"
             )
+            if event["status"] in {"done", "skip"} and event["last_executed"]:
+                processed_label = (
+                    "完了済み" if event["status"] == "done" else "スキップ済み"
+                )
+                processed_date = event["last_executed"].replace("-", "/")
+                st.write(
+                    f"{processed_label}：{processed_date}分 ／ "
+                    f"次回：{next_target_date:%Y/%m/%d}"
+                )
+            else:
+                st.write(f"次回：{next_target_date:%Y/%m/%d}")
             st.write(f"備考: {event['memo'] or '―'}")
-            if event["last_executed"]:
-                st.caption(f"最終処理日: {event['last_executed']}")
 
             if stopped and st.button(
                 "再開",

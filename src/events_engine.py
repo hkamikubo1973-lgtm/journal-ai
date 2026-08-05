@@ -19,6 +19,57 @@ EVENT_COLUMNS = [
     "last_executed",
 ]
 
+CSV_COLUMNS = [
+    "月",
+    "日",
+    "イベント名",
+    "備考",
+    "通知日前",
+    "周期",
+    "状態",
+    "種別",
+    "停止",
+    "最終処理日",
+]
+
+INTERNAL_TO_CSV_COLUMN = dict(zip(EVENT_COLUMNS, CSV_COLUMNS))
+CSV_TO_INTERNAL_COLUMN = {
+    **{column: column for column in EVENT_COLUMNS},
+    **{csv_column: column for column, csv_column in INTERNAL_TO_CSV_COLUMN.items()},
+    "notify_day": "notify_days",
+}
+
+CYCLE_LABELS = {
+    "monthly": "月次",
+    "yearly": "年次",
+}
+STATUS_LABELS = {
+    "pending": "未処理",
+    "notified": "通知済",
+    "done": "完了",
+    "skip": "スキップ",
+}
+TYPE_LABELS = {
+    "tax": "税金",
+    "payment": "支払",
+    "card": "カード",
+    "other": "その他",
+}
+
+CYCLE_ALIASES = {
+    **{value: value for value in CYCLE_LABELS},
+    **{label: value for value, label in CYCLE_LABELS.items()},
+}
+STATUS_ALIASES = {
+    **{value: value for value in STATUS_LABELS},
+    **{label: value for value, label in STATUS_LABELS.items()},
+    "通知中": "notified",
+}
+TYPE_ALIASES = {
+    **{value: value for value in TYPE_LABELS},
+    **{label: value for value, label in TYPE_LABELS.items()},
+}
+
 EVENT_TYPES = {"tax", "payment", "card", "other"}
 EVENT_CYCLES = {"monthly", "yearly"}
 EVENT_STATUSES = {"pending", "notified", "done", "skip"}
@@ -31,14 +82,20 @@ def ensure_events_csv(path=EVENTS_PATH):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         with path.open("w", encoding="utf-8-sig", newline="") as file:
-            csv.DictWriter(file, fieldnames=EVENT_COLUMNS).writeheader()
+            csv.DictWriter(file, fieldnames=CSV_COLUMNS).writeheader()
     return path
 
 
 def _as_bool(value):
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"true", "1", "yes", "on"}
+    return str(value).strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+        "停止",
+    }
 
 
 def _normalize_event(event):
@@ -46,27 +103,79 @@ def _normalize_event(event):
         column: str(event.get(column, "") or "").strip()
         for column in EVENT_COLUMNS
     }
-    normalized["cycle"] = normalized["cycle"] or "monthly"
-    normalized["status"] = normalized["status"] or "pending"
-    normalized["type"] = normalized["type"] or "other"
+    normalized["cycle"] = CYCLE_ALIASES.get(
+        normalized["cycle"],
+        normalized["cycle"] or "monthly",
+    )
+    normalized["status"] = STATUS_ALIASES.get(
+        normalized["status"],
+        normalized["status"] or "pending",
+    )
+    normalized["type"] = TYPE_ALIASES.get(
+        normalized["type"],
+        normalized["type"] or "other",
+    )
     normalized["stop"] = "True" if _as_bool(event.get("stop")) else "False"
     return normalized
 
 
+def _serialize_event(event):
+    normalized = _normalize_event(event)
+    values = dict(normalized)
+    values["cycle"] = CYCLE_LABELS[normalized["cycle"]]
+    values["status"] = STATUS_LABELS[normalized["status"]]
+    values["type"] = TYPE_LABELS[normalized["type"]]
+    values["stop"] = "TRUE" if _as_bool(normalized["stop"]) else "FALSE"
+    return {
+        INTERNAL_TO_CSV_COLUMN[column]: values[column]
+        for column in EVENT_COLUMNS
+    }
+
+
 def load_events(path=EVENTS_PATH):
-    """保存済みイベントをCSVの並び順で読み込む。"""
+    """英語・日本語どちらのCSVも内部形式へ変換して読み込む。"""
     path = ensure_events_csv(path)
     with path.open("r", encoding="utf-8-sig", newline="") as file:
-        return [_normalize_event(row) for row in csv.DictReader(file)]
+        reader = csv.DictReader(file)
+        fieldnames = reader.fieldnames or []
+        events = []
+        for row in reader:
+            internal_row = {}
+            for column, value in row.items():
+                internal_column = CSV_TO_INTERNAL_COLUMN.get(
+                    str(column or "").strip()
+                )
+                if internal_column:
+                    internal_row[internal_column] = value
+            events.append(_normalize_event(internal_row))
+
+    recognized_columns = {
+        CSV_TO_INTERNAL_COLUMN.get(str(column or "").strip())
+        for column in fieldnames
+    }
+    can_migrate = True
+    try:
+        for event in events:
+            validate_event(event)
+    except ValueError:
+        can_migrate = False
+    if (
+        can_migrate
+        and len(fieldnames) == len(EVENT_COLUMNS)
+        and set(EVENT_COLUMNS).issubset(recognized_columns)
+        and fieldnames != CSV_COLUMNS
+    ):
+        save_events(events, path)
+    return events
 
 
 def save_events(events, path=EVENTS_PATH):
-    """イベント一覧を指定された固定カラムで保存する。"""
+    """イベント一覧を日本語ヘッダー・日本語値で保存する。"""
     path = ensure_events_csv(path)
     with path.open("w", encoding="utf-8-sig", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=EVENT_COLUMNS)
+        writer = csv.DictWriter(file, fieldnames=CSV_COLUMNS)
         writer.writeheader()
-        writer.writerows(_normalize_event(event) for event in events)
+        writer.writerows(_serialize_event(event) for event in events)
 
 
 def _value_as_int(value, field_name, minimum, maximum):
@@ -111,6 +220,23 @@ def calculate_next_run_date(event, today=None):
     raise ValueError("周期はmonthlyまたはyearlyを指定してください")
 
 
+def calculate_following_run_date(event, run_date):
+    """指定した対象日の次周期にあたる実行日を返す。"""
+    day = _value_as_int(event.get("day"), "日", 1, 31)
+    cycle = str(event.get("cycle", "")).strip()
+
+    if cycle == "monthly":
+        next_month = 1 if run_date.month == 12 else run_date.month + 1
+        next_year = run_date.year + 1 if run_date.month == 12 else run_date.year
+        return _event_date(next_year, next_month, day)
+
+    if cycle == "yearly":
+        month = _value_as_int(event.get("month"), "月", 1, 12)
+        return _event_date(run_date.year + 1, month, day)
+
+    raise ValueError("周期はmonthlyまたはyearlyを指定してください")
+
+
 def _parse_date(value):
     if not value:
         return None
@@ -118,6 +244,17 @@ def _parse_date(value):
         return datetime.strptime(str(value), "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def calculate_next_target_date(event, today=None):
+    """処理済み対象日を除外した、次に処理すべき実行日を返す。"""
+    today = today or date.today()
+    next_date = calculate_next_run_date(event, today)
+    last_executed = _parse_date(event.get("last_executed"))
+
+    while last_executed is not None and next_date <= last_executed:
+        next_date = calculate_following_run_date(event, next_date)
+    return next_date
 
 
 def get_effective_status(event, today=None):
@@ -131,10 +268,7 @@ def get_effective_status(event, today=None):
     if last_executed is None:
         return status
 
-    if calculate_next_run_date(event, today) != calculate_next_run_date(
-        event,
-        last_executed,
-    ):
+    if calculate_next_run_date(event, today) > last_executed:
         return "pending"
     return status
 
@@ -153,7 +287,7 @@ def is_notification_target(event, today=None):
         0,
         365,
     )
-    next_date = calculate_next_run_date(event, today)
+    next_date = calculate_next_target_date(event, today)
     return next_date - timedelta(days=notify_days) <= today <= next_date
 
 
@@ -167,7 +301,7 @@ def get_notification_events(events=None, today=None, path=EVENTS_PATH):
             continue
         item = dict(event)
         item["index"] = index
-        item["next_date"] = calculate_next_run_date(event, today)
+        item["next_date"] = calculate_next_target_date(event, today)
         item["days_remaining"] = (item["next_date"] - today).days
         item["effective_status"] = get_effective_status(event, today)
         results.append(item)
@@ -219,16 +353,18 @@ def update_event(index, updates, path=EVENTS_PATH):
     updated = dict(events[index])
     updated.update(updates)
     updated = _normalize_event(updated)
+    if updated["cycle"] == "monthly":
+        updated["month"] = ""
+    validate_event(updated)
     if (
         "status" in updates
         and updated["status"] in {"done", "skip"}
         and updated["status"] != previous_status
         and "last_executed" not in updates
     ):
-        updated["last_executed"] = date.today().isoformat()
-    if updated["cycle"] == "monthly":
-        updated["month"] = ""
-    validate_event(updated)
+        updated["last_executed"] = calculate_next_target_date(
+            updated
+        ).isoformat()
     events[index] = updated
     save_events(events, path)
     return updated
@@ -236,9 +372,13 @@ def update_event(index, updates, path=EVENTS_PATH):
 
 def _set_status(index, status, today=None, path=EVENTS_PATH):
     today = today or date.today()
+    events = load_events(path)
+    if not 0 <= index < len(events):
+        raise IndexError("更新対象のイベントが見つかりません")
+    target_date = calculate_next_target_date(events[index], today)
     return update_event(
         index,
-        {"status": status, "last_executed": today.isoformat()},
+        {"status": status, "last_executed": target_date.isoformat()},
         path,
     )
 
