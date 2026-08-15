@@ -1,0 +1,1 @@
+"""journal-ai FastAPI endpoints."""
