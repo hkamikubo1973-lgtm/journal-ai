@@ -27,3 +27,24 @@ export type JournalSearchResponse = {
   count: number;
   candidates: JournalCandidate[];
 };
+
+export type JournalEditForm = {
+  voucherDate: string;
+  debitAccountCode: string;
+  debitAccountName: string;
+  debitSubCode: string;
+  debitSubName: string;
+  debitDeptCode: string;
+  debitDeptName: string;
+  debitAmount: string;
+  creditAccountCode: string;
+  creditAccountName: string;
+  creditSubCode: string;
+  creditSubName: string;
+  creditDeptCode: string;
+  creditDeptName: string;
+  creditAmount: string;
+  summary: string;
+  voucherSummary: string;
+  voucherNo: string;
+};
