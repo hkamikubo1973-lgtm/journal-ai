@@ -131,3 +131,48 @@ export type RegistrationCartItem = Omit<
   epson_preview_row: EpsonPreviewRow;
   addedAt: string;
 };
+
+export type AccountMasterItem = {
+  code: string;
+  name: string;
+  category: string;
+  label: string;
+  selectable: boolean;
+  unselectable_reason: string | null;
+};
+
+export type SubAccountMasterItem = {
+  code: string;
+  name: string;
+  label: string;
+};
+
+export type DepartmentMasterItem = {
+  code: string;
+  name: string;
+  label: string;
+};
+
+export type JournalMastersDiagnostics = {
+  account_count: number;
+  selectable_account_count: number;
+  unselectable_account_count: number;
+  sub_account_count: number;
+  department_count: number;
+  duplicate_account_names: Array<{
+    name: string;
+    codes: string[];
+  }>;
+  duplicate_sub_codes: Array<{
+    code: string;
+    names: string[];
+  }>;
+  warnings: string[];
+};
+
+export type JournalMastersResponse = {
+  accounts: AccountMasterItem[];
+  sub_accounts: SubAccountMasterItem[];
+  departments: DepartmentMasterItem[];
+  diagnostics: JournalMastersDiagnostics;
+};

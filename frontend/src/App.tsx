@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from "react";
-import { prepareRegistration, searchJournals } from "./api/journal";
+import { useEffect, useState, type FormEvent } from "react";
+import { fetchJournalMasters, prepareRegistration, searchJournals } from "./api/journal";
 import type {
   JournalCandidate,
   JournalEditForm,
+  JournalMastersResponse,
   JournalSearchRequest,
   JournalSearchResponse,
   PrepareRegistrationRequest,
@@ -26,6 +27,11 @@ type EditFormField = {
   label: string;
   wide?: boolean;
   amount?: boolean;
+};
+
+type MasterCheckMessage = {
+  level: "ok" | "warning" | "error";
+  message: string;
 };
 
 const basicFields: EditFormField[] = [
@@ -126,6 +132,96 @@ function getCartAmount(item: RegistrationCartItem): number {
 
 function formatAmountNumber(value: number): string {
   return `${value.toLocaleString("ja-JP")}円`;
+}
+
+function checkEditFormMasters(
+  form: JournalEditForm | null,
+  masters: JournalMastersResponse | null,
+): MasterCheckMessage[] {
+  if (!form || !masters) return [];
+
+  const messages: MasterCheckMessage[] = [];
+  const checkAccount = (side: "借方" | "貸方", code: string, name: string) => {
+    if (!code.trim()) {
+      messages.push({ level: "error", message: `${side}科目コードが未入力です。` });
+      return;
+    }
+    const matches = masters.accounts.filter((account) => account.code === code.trim());
+    if (matches.length === 0) {
+      messages.push({ level: "error", message: `${side}科目コード ${code} はマスターに存在しません。` });
+      return;
+    }
+    const account = matches[0];
+    const hasWarning = account.name !== name.trim() || !account.selectable;
+    if (account.name !== name.trim()) {
+      messages.push({ level: "warning", message: `${side}科目コード ${code} のマスター名称とフォーム名称が一致しません。` });
+    }
+    if (!account.selectable) {
+      messages.push({
+        level: "warning",
+        message: `${side}科目コード ${code} は通常選択不可です: ${account.unselectable_reason ?? "直接選択対象外です。"}`,
+      });
+    }
+    if (!hasWarning) messages.push({ level: "ok", message: `${side}科目 ${code}（${name}）はマスターに存在します。` });
+  };
+
+  const checkSubAccount = (side: "借方" | "貸方", code: string, name: string) => {
+    if (!code.trim()) {
+      messages.push({ level: "ok", message: `${side}補助は未指定です。` });
+      return;
+    }
+    const matches = masters.sub_accounts.filter((subAccount) => subAccount.code === code.trim());
+    if (matches.length === 0) {
+      messages.push({ level: "error", message: `${side}補助コード ${code} はマスターに存在しません。` });
+      return;
+    }
+    const nameMatches = matches.some((subAccount) => subAccount.name === name.trim());
+    if (nameMatches) {
+      messages.push({ level: "ok", message: `${side}補助コード ${code}（${name}）はマスターに存在します。` });
+    } else {
+      messages.push({
+        level: "warning",
+        message: `${side}補助コード ${code} は存在しますが、フォーム名称との対応は確定できません。`,
+      });
+    }
+    if (matches.length > 1) {
+      messages.push({
+        level: "warning",
+        message: `${side}補助コード ${code} には複数の名称があるため、Phase 3-5では存在確認のみです。`,
+      });
+    }
+  };
+
+  const checkDepartment = (side: "借方" | "貸方", code: string, name: string) => {
+    if (!code.trim()) {
+      messages.push({ level: "ok", message: `${side}部門は未指定です。` });
+      return;
+    }
+    const matches = masters.departments.filter((department) => department.code === code.trim());
+    if (matches.length === 0) {
+      messages.push({ level: "error", message: `${side}部門コード ${code} はマスターに存在しません。` });
+      return;
+    }
+    if (!matches.some((department) => department.name === name.trim())) {
+      messages.push({ level: "warning", message: `${side}部門コード ${code} は存在しますが、マスター名称とフォーム名称が一致しません。` });
+      return;
+    }
+    messages.push({ level: "ok", message: `${side}部門 ${code}（${name}）はマスターに存在します。` });
+  };
+
+  checkAccount("借方", form.debitAccountCode, form.debitAccountName);
+  checkAccount("貸方", form.creditAccountCode, form.creditAccountName);
+  checkSubAccount("借方", form.debitSubCode, form.debitSubName);
+  checkSubAccount("貸方", form.creditSubCode, form.creditSubName);
+  if (form.debitSubCode.trim() || form.creditSubCode.trim()) {
+    messages.push({
+      level: "warning",
+      message: "補助マスターには親科目コードがないため、科目との関係は確認できません。",
+    });
+  }
+  checkDepartment("借方", form.debitDeptCode, form.debitDeptName);
+  checkDepartment("貸方", form.creditDeptCode, form.creditDeptName);
+  return messages;
 }
 
 function getCandidateSummary(candidate: JournalCandidate) {
@@ -266,6 +362,29 @@ export default function App() {
   const [prepareStatusMessage, setPrepareStatusMessage] = useState<string | null>(null);
   const [registrationCart, setRegistrationCart] = useState<RegistrationCartItem[]>([]);
   const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
+  const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
+  const [mastersLoading, setMastersLoading] = useState(false);
+  const [mastersError, setMastersError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMastersLoading(true);
+    setMastersError(null);
+    fetchJournalMasters()
+      .then((response) => {
+        if (!cancelled) setMasters(response);
+      })
+      .catch((caughtError) => {
+        if (!cancelled) {
+          setMasters(null);
+          setMastersError(caughtError instanceof Error ? caughtError.message : "マスター取得中に不明なエラーが発生しました。");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMastersLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -321,6 +440,11 @@ export default function App() {
 
   async function handlePrepareRegistration() {
     if (!selectedCandidate || !editForm) return;
+    const currentMasterChecks = checkEditFormMasters(editForm, masters);
+    if (!masters || mastersError || currentMasterChecks.some((message) => message.level === "error")) {
+      setPrepareStatusMessage("マスター照合エラーを解消してから登録準備を実行してください。");
+      return;
+    }
 
     const nullable = (value: string) => value.trim() || null;
     const request: PrepareRegistrationRequest = {
@@ -410,13 +534,20 @@ export default function App() {
   const editFormChanged = isEditFormChanged(editForm, initialEditForm);
   const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
   const cartTotalAmount = registrationCart.reduce((total, item) => total + getCartAmount(item), 0);
+  const masterCheckMessages = checkEditFormMasters(editForm, masters);
+  const masterCheckCounts = {
+    ok: masterCheckMessages.filter((message) => message.level === "ok").length,
+    warning: masterCheckMessages.filter((message) => message.level === "warning").length,
+    error: masterCheckMessages.filter((message) => message.level === "error").length,
+  };
+  const hasMasterErrors = masterCheckCounts.error > 0;
 
   return (
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 3-2 出力待ちプレビュー</h1>
-        <p>通常1行仕訳の出力対象一覧とエプソンCSV予定行を画面上で確認します。保存やDB登録はまだ行いません。</p>
+        <h1>journal-ai 正式UI Phase 3-5 マスター取得・照合</h1>
+        <p>科目・補助・部門マスターを取得し、編集中の通常1行仕訳と画面上で照合します。保存やDB登録はまだ行いません。</p>
       </header>
 
       <div className="split-layout">
@@ -434,6 +565,18 @@ export default function App() {
               </select></label>
               <button type="submit" disabled={loading}>{loading ? "検索中…" : "検索"}</button>
             </form>
+            <div className={`master-status ${mastersError ? "error" : masters ? "ready" : "loading"}`} aria-live="polite">
+              {mastersLoading ? <strong>マスター：読み込み中…</strong> : mastersError ? (
+                <strong>マスター取得エラー：{mastersError}</strong>
+              ) : masters ? <>
+                <strong>マスター：科目 {masters.accounts.length}件 / 補助 {masters.sub_accounts.length}件 / 部門 {masters.departments.length}件</strong>
+                <span>選択可能科目 {masters.diagnostics.selectable_account_count}件 / 選択不可科目 {masters.diagnostics.unselectable_account_count}件</span>
+                <details className="master-diagnostics">
+                  <summary>マスター診断を表示</summary>
+                  <pre>{JSON.stringify(masters.diagnostics, null, 2)}</pre>
+                </details>
+              </> : <strong>マスター：読み込み準備中…</strong>}
+            </div>
             {error && <p className="error-message">{error}</p>}
             {statusMessage && <p className="status-message">{statusMessage}</p>}
           </div>
@@ -486,6 +629,24 @@ export default function App() {
             {sourceAmountsEqual === false && <p className="notice notice-warning">
               元データの借方金額と貸方金額が一致していません。内容を確認してください。
             </p>}
+            {editForm && <section className="master-check-panel" aria-live="polite">
+              <div className="master-check-heading">
+                <h3>マスター照合（確認用）</h3>
+                <div className="master-check-summary">
+                  <span className="ok">OK {masterCheckCounts.ok}</span>
+                  <span className="warning">警告 {masterCheckCounts.warning}</span>
+                  <span className="error">エラー {masterCheckCounts.error}</span>
+                </div>
+              </div>
+              {!masters ? <p className={mastersError ? "master-check-unavailable error" : "master-check-unavailable"}>
+                {mastersError ? "マスターを取得できないため照合できません。" : "マスターを読み込んでいます。"}
+              </p> : <ul className="master-check-list">
+                {masterCheckMessages.map((message, index) => <li className={message.level} key={`${message.level}-${message.message}-${index}`}>
+                  <span aria-hidden="true">{message.level === "ok" ? "✓" : message.level === "warning" ? "!" : "×"}</span>
+                  {message.message}
+                </li>)}
+              </ul>}
+            </section>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
               <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                 gridClassName="basic-info-grid" />
@@ -507,10 +668,15 @@ export default function App() {
                 <p className="amount-note">通常1行仕訳では、この金額を借方金額・貸方金額へ同額反映する想定です。この画面ではまだ登録・CSV出力は行いません。</p>
               </div>
               <div className="edit-form-footer">
-                <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
+                <div className="prepare-guidance">
+                  <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
+                  <small>Phase 3-5のマスター照合は画面上の確認です。API側の厳格な再検証は後続Phaseで実装します。</small>
+                  {hasMasterErrors && <strong>マスター不一致があります。有効なマスター値へ修正してください。</strong>}
+                </div>
                 <div className="edit-actions">
                   <button type="button" className="reset-button" onClick={resetEditForm} disabled={!editFormChanged}>候補選択時の値に戻す</button>
-                  <button type="button" className="prepare-action" onClick={handlePrepareRegistration} disabled={prepareLoading}>
+                  <button type="button" className="prepare-action" onClick={handlePrepareRegistration}
+                    disabled={prepareLoading || mastersLoading || !masters || Boolean(mastersError) || hasMasterErrors}>
                     {prepareLoading ? "登録準備中…" : "登録予定へ追加（確認のみ）"}
                   </button>
                 </div>
