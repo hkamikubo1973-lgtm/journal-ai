@@ -130,6 +130,15 @@ dd { margin: 3px 0 0; font-size: 0.85rem; font-weight: 800; }
 .side-section.debit { border-top-color: #2874a6; }
 .side-section.credit { border-top-color: #a45d35; }
 .side-form-grid { grid-template-columns: 1fr; }
+.account-master-field { display: grid; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid #dbe3e1; }
+.master-select { font-weight: 750; }
+.master-select:disabled { cursor: not-allowed; color: #627078; background: #edf1f0; }
+.master-linked-name { display: grid; gap: 4px; min-height: 58px; padding: 9px 11px; border: 1px solid #d5dfdc; border-radius: 7px; background: #f1f5f3; }
+.master-linked-name span { color: #627078; font-size: 0.68rem; font-weight: 800; }
+.master-linked-name strong { overflow-wrap: anywhere; color: #24343c; font-size: 0.86rem; }
+.master-linked-name.changed-field { border-color: #d4a44f; background: #fffaf0; }
+.master-select-note { margin: 0; color: #52636b; font-size: 0.72rem; line-height: 1.45; }
+.unselectable-account-warning { margin: 0; padding: 8px 10px; border-left: 3px solid #bc7a14; border-radius: 5px; color: #744d0e; background: #fff7e7; font-size: 0.75rem; font-weight: 700; line-height: 1.45; }
 .single-amount-section { border-color: #a8cbbf; border-top: 3px solid #16725f; background: #f7fbfa; }
 .single-amount-section legend { font-size: 0.9rem; }
 .amount-summary-grid { grid-template-columns: minmax(220px, 0.65fr) minmax(280px, 1.35fr); }
