@@ -96,13 +96,30 @@ function getCandidateSummary(candidate: JournalCandidate) {
   };
 }
 
+function isEditFormChanged(
+  current: JournalEditForm | null,
+  initial: JournalEditForm | null,
+): boolean {
+  if (!current || !initial) return false;
+  return JSON.stringify(current) !== JSON.stringify(initial);
+}
+
+function isFieldChanged(
+  field: keyof JournalEditForm,
+  current: JournalEditForm,
+  initial: JournalEditForm | null,
+): boolean {
+  return initial !== null && current[field] !== initial[field];
+}
+
 function CandidateCard({ candidate, selected, onSelect }: {
   candidate: JournalCandidate; selected: boolean; onSelect: (candidate: JournalCandidate) => void;
 }) {
   const journal = getCandidateSummary(candidate);
 
   return (
-    <article className={`candidate-card${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+    <article className={`candidate-card clickable${selected ? " selected" : ""}`}
+      aria-current={selected ? "true" : undefined} onClick={() => onSelect(candidate)}>
       <div className="candidate-card-heading">
         <h3>候補{candidate.rank} <span>/ Score {candidate.score}</span></h3>
         {selected && <span className="selected-badge">選択中</span>}
@@ -125,31 +142,41 @@ function CandidateCard({ candidate, selected, onSelect }: {
           {candidate.search_reason.slice(0, 2).map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}
         </ul></div>
       )}
-      <button className="candidate-select-button" type="button" onClick={() => onSelect(candidate)}>
+      <button className="candidate-select-button" type="button" onClick={(event) => {
+        event.stopPropagation();
+        onSelect(candidate);
+      }}>
         {selected ? "選択中の候補" : "この候補を選択"}
       </button>
     </article>
   );
 }
 
-function FormSection({ title, fields, editForm, onChange, className = "", gridClassName = "" }: {
+function FormSection({ title, fields, editForm, initialEditForm, onChange, className = "", gridClassName = "" }: {
   title: string; fields: EditFormField[]; editForm: JournalEditForm;
+  initialEditForm: JournalEditForm | null;
   onChange: (key: keyof JournalEditForm, value: string) => void;
   className?: string;
   gridClassName?: string;
 }) {
   return (
     <fieldset className={`form-section ${className}`.trim()}><legend>{title}</legend><div className={`form-grid ${gridClassName}`.trim()}>
-      {fields.map((field) => (
-        <label className={field.wide ? "form-field-wide" : undefined} key={field.key}>{field.label}
-          {field.wide ? (
-            <textarea className="summary-textarea" value={editForm[field.key]} onChange={(event) => onChange(field.key, event.target.value)} rows={3} />
-          ) : (
-            <input className={field.amount ? "amount-input" : undefined} inputMode={field.amount ? "numeric" : undefined}
-              value={editForm[field.key]} onChange={(event) => onChange(field.key, event.target.value)} />
-          )}
-        </label>
-      ))}
+      {fields.map((field) => {
+        const changed = isFieldChanged(field.key, editForm, initialEditForm);
+        const fieldClassName = [field.wide ? "form-field-wide" : "", changed ? "field-changed" : ""].filter(Boolean).join(" ");
+        const controlClassName = [field.wide ? "summary-textarea" : "", field.amount ? "amount-input" : "", changed ? "changed-field" : ""].filter(Boolean).join(" ");
+        return (
+          <label className={fieldClassName || undefined} key={field.key}>{field.label}
+            {field.wide ? (
+              <textarea className={controlClassName} value={editForm[field.key]}
+                onChange={(event) => onChange(field.key, event.target.value)} rows={3} />
+            ) : (
+              <input className={controlClassName || undefined} inputMode={field.amount ? "numeric" : undefined}
+                value={editForm[field.key]} onChange={(event) => onChange(field.key, event.target.value)} />
+            )}
+          </label>
+        );
+      })}
     </div></fieldset>
   );
 }
@@ -168,7 +195,7 @@ function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
             </td>)}
           </tr>)}
         </tbody></table></div>
-      ) : <p className="muted">参照用のblock_rowsはありません。</p>}
+      ) : <p className="muted">同一伝票ブロック情報はありません。</p>}
     </section>
   );
 }
@@ -181,15 +208,26 @@ export default function App() {
   const [result, setResult] = useState<JournalSearchResponse | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<JournalCandidate | null>(null);
   const [editForm, setEditForm] = useState<JournalEditForm | null>(null);
+  const [initialEditForm, setInitialEditForm] = useState<JournalEditForm | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setLoading(true); setError(null); setSelectedCandidate(null); setEditForm(null);
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    setStatusMessage(null);
+    setSelectedCandidate(null);
+    setEditForm(null);
+    setInitialEditForm(null);
     const request: JournalSearchRequest = {
       keyword, department: department.trim() || null, amount: amount === "" ? null : Number(amount), limit,
     };
-    try { setResult(await searchJournals(request)); }
+    try {
+      setResult(await searchJournals(request));
+      setStatusMessage("検索結果を更新しました。候補を選択してください。");
+    }
     catch (caughtError) {
       setResult(null);
       setError(caughtError instanceof Error ? caughtError.message : "検索中に不明なエラーが発生しました。");
@@ -198,12 +236,19 @@ export default function App() {
 
   function handleCandidateSelect(candidate: JournalCandidate) {
     setSelectedCandidate(candidate);
+    setStatusMessage(null);
     const firstEditableRow = candidate.editable_rows[0];
-    setEditForm(firstEditableRow ? buildEditFormFromRow(firstEditableRow) : null);
+    const nextEditForm = firstEditableRow ? buildEditFormFromRow(firstEditableRow) : null;
+    setEditForm(nextEditForm ? { ...nextEditForm } : null);
+    setInitialEditForm(nextEditForm ? { ...nextEditForm } : null);
   }
 
   function updateEditForm(key: keyof JournalEditForm, value: string) {
     setEditForm((current) => current ? { ...current, [key]: value } : current);
+  }
+
+  function resetEditForm() {
+    if (initialEditForm) setEditForm({ ...initialEditForm });
   }
 
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
@@ -214,13 +259,15 @@ export default function App() {
   const creditAmount = editForm ? parseAmount(editForm.creditAmount) : null;
   const amountsComparable = debitAmount !== null && creditAmount !== null;
   const amountsMatch = amountsComparable && debitAmount === creditAmount;
+  const editFormChanged = isEditFormChanged(editForm, initialEditForm);
+  const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
 
   return (
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 2-4 実務入力試作</h1>
-        <p>候補DTOを展開した編集フォームの入力性・視認性・誤操作防止を確認します。</p>
+        <h1>journal-ai 正式UI Phase 2-5 編集操作性試作</h1>
+        <p>候補選択から画面上の編集・リセットまで、安全な操作導線を確認します。</p>
       </header>
 
       <div className="split-layout">
@@ -239,6 +286,7 @@ export default function App() {
               <button type="submit" disabled={loading}>{loading ? "検索中…" : "検索"}</button>
             </form>
             {error && <p className="error-message">{error}</p>}
+            {statusMessage && <p className="status-message">{statusMessage}</p>}
           </div>
 
           <div className="candidate-panel" aria-live="polite">
@@ -270,7 +318,16 @@ export default function App() {
                 <span className="unregistered-badge">状態：確認用・未登録</span>
               </div>
               <p>この画面ではまだ登録・CSV出力は行いません。</p>
+              {selectedSummary && <div className="selection-summary">
+                <strong>{selectedSummary.debit} <span aria-hidden="true">→</span> {selectedSummary.credit}</strong>
+                <b>{selectedSummary.amount}</b>
+                <span>{selectedSummary.summary}</span>
+              </div>}
               <small>pattern_key: {selectedCandidate.pattern_key.join(" / ") || "-"}</small>
+            </div>
+            <div className={`edit-status ${editFormChanged ? "changed" : "unchanged"}`}>
+              <strong>{editFormChanged ? "編集状態：画面上で変更あり（未保存）" : "編集状態：未変更"}</strong>
+              <span>変更内容は保存されません。</span>
             </div>
             {selectedCandidate.editable_rows.length === 0 && <p className="notice notice-error">この候補には編集用行がありません。</p>}
             {selectedCandidate.editable_rows.length > 1 && <p className="notice notice-warning">この候補は複数行の編集候補です。今回は先頭行のみ表示しています。</p>}
@@ -278,22 +335,25 @@ export default function App() {
               この候補は資金複合または諸口を含む可能性があります。block_rows を確認し、登録時は実際の相手科目へ修正してください。
             </p>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
-              <FormSection title="基本情報" fields={basicFields} editForm={editForm} onChange={updateEditForm}
+              <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                 gridClassName="basic-info-grid" />
               <div className="debit-credit-grid">
-                <FormSection title="借方" fields={debitFields} editForm={editForm} onChange={updateEditForm}
+                <FormSection title="借方" fields={debitFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section debit" gridClassName="side-form-grid" />
-                <FormSection title="貸方" fields={creditFields} editForm={editForm} onChange={updateEditForm}
+                <FormSection title="貸方" fields={creditFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section credit" gridClassName="side-form-grid" />
               </div>
               <div className={`amount-check ${amountsMatch ? "match" : amountsComparable ? "mismatch" : "incomplete"}`}>
                 <strong>金額確認：借方 {formatAmountWithUnit(editForm.debitAmount)} / 貸方 {formatAmountWithUnit(editForm.creditAmount)}</strong>
                 <span>{amountsMatch ? "借貸金額は一致しています。" : amountsComparable ? "借貸金額が一致していません。" : "借貸金額を入力してください。"}</span>
               </div>
-              <FormSection title="摘要" fields={summaryFields} editForm={editForm} onChange={updateEditForm} />
+              <FormSection title="摘要" fields={summaryFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm} />
               <div className="edit-form-footer">
                 <p>編集内容は画面上の確認用stateにのみ反映されます。まだ保存・登録は行いません。</p>
-                <button type="button" className="disabled-action" disabled>登録APIは未実装です</button>
+                <div className="edit-actions">
+                  <button type="button" className="reset-button" onClick={resetEditForm} disabled={!editFormChanged}>候補選択時の値に戻す</button>
+                  <button type="button" className="disabled-action" disabled>登録APIは未実装です</button>
+                </div>
               </div>
             </form>}
             <BlockRowsTable candidate={selectedCandidate} />
