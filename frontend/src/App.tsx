@@ -1,6 +1,13 @@
 import { useState, type FormEvent } from "react";
-import { searchJournals } from "./api/journal";
-import type { JournalCandidate, JournalEditForm, JournalSearchRequest, JournalSearchResponse } from "./types/journal";
+import { prepareRegistration, searchJournals } from "./api/journal";
+import type {
+  JournalCandidate,
+  JournalEditForm,
+  JournalSearchRequest,
+  JournalSearchResponse,
+  PrepareRegistrationRequest,
+  PrepareRegistrationResponse,
+} from "./types/journal";
 
 const blockRowFields = [
   { key: "date", label: "日付", amount: false },
@@ -228,6 +235,11 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [prepareLoading, setPrepareLoading] = useState(false);
+  const [prepareResponse, setPrepareResponse] = useState<PrepareRegistrationResponse | null>(null);
+  const [prepareError, setPrepareError] = useState<string | null>(null);
+  const [prepareStatusMessage, setPrepareStatusMessage] = useState<string | null>(null);
+  const [registrationCart, setRegistrationCart] = useState<PrepareRegistrationResponse[]>([]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -237,6 +249,9 @@ export default function App() {
     setSelectedCandidate(null);
     setEditForm(null);
     setInitialEditForm(null);
+    setPrepareResponse(null);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
     const request: JournalSearchRequest = {
       keyword, department: department.trim() || null, amount: amount === "" ? null : Number(amount), limit,
     };
@@ -253,6 +268,9 @@ export default function App() {
   function handleCandidateSelect(candidate: JournalCandidate) {
     setSelectedCandidate(candidate);
     setStatusMessage(null);
+    setPrepareResponse(null);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
     const firstEditableRow = candidate.editable_rows[0];
     const nextEditForm = firstEditableRow ? buildEditFormFromRow(firstEditableRow) : null;
     setEditForm(nextEditForm ? { ...nextEditForm } : null);
@@ -261,10 +279,84 @@ export default function App() {
 
   function updateEditForm(key: keyof JournalEditForm, value: string) {
     setEditForm((current) => current ? { ...current, [key]: value } : current);
+    setPrepareResponse(null);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
   }
 
   function resetEditForm() {
-    if (initialEditForm) setEditForm({ ...initialEditForm });
+    if (initialEditForm) {
+      setEditForm({ ...initialEditForm });
+      setPrepareResponse(null);
+      setPrepareError(null);
+      setPrepareStatusMessage(null);
+    }
+  }
+
+  async function handlePrepareRegistration() {
+    if (!selectedCandidate || !editForm) return;
+
+    const nullable = (value: string) => value.trim() || null;
+    const request: PrepareRegistrationRequest = {
+      edit_form: {
+        voucher_date: editForm.voucherDate,
+        voucher_no: nullable(editForm.voucherNo),
+        voucher_summary: nullable(editForm.voucherSummary),
+        debit_account_code: editForm.debitAccountCode,
+        debit_account_name: nullable(editForm.debitAccountName),
+        debit_sub_code: nullable(editForm.debitSubCode),
+        debit_sub_name: nullable(editForm.debitSubName),
+        debit_dept_code: nullable(editForm.debitDeptCode),
+        debit_dept_name: nullable(editForm.debitDeptName),
+        credit_account_code: editForm.creditAccountCode,
+        credit_account_name: nullable(editForm.creditAccountName),
+        credit_sub_code: nullable(editForm.creditSubCode),
+        credit_sub_name: nullable(editForm.creditSubName),
+        credit_dept_code: nullable(editForm.creditDeptCode),
+        credit_dept_name: nullable(editForm.creditDeptName),
+        amount: editForm.amount,
+        summary: nullable(editForm.summary),
+        source_debit_amount: nullable(editForm.debitAmount),
+        source_credit_amount: nullable(editForm.creditAmount),
+      },
+      candidate_meta: {
+        rank: selectedCandidate.rank,
+        score: selectedCandidate.score,
+        pattern_key: selectedCandidate.pattern_key,
+        pattern_rank: selectedCandidate.pattern_rank,
+        editable_row_count: selectedCandidate.editable_rows.length,
+        source_row_count: selectedCandidate.source_rows.length,
+        block_row_count: selectedCandidate.block_rows.length,
+        has_fukugo: selectedCandidate.has_fukugo,
+        has_sundry: selectedCandidate.has_sundry,
+        contains_fukugo_or_sundry: selectedCandidate.contains_fukugo_or_sundry,
+        show_block_rows: selectedCandidate.show_block_rows,
+        is_complex: selectedCandidate.is_complex,
+      },
+    };
+
+    setPrepareLoading(true);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
+    try {
+      const response = await prepareRegistration(request);
+      setPrepareResponse(response);
+      if (response.ok && response.registration_id && response.prepared_journal && response.epson_preview_row) {
+        setRegistrationCart((current) => {
+          if (current.some((item) => item.registration_id === response.registration_id)) {
+            setPrepareStatusMessage("同じ登録予定はすでにカートへ追加されています。");
+            return current;
+          }
+          setPrepareStatusMessage("登録予定へ追加しました（画面上の確認のみ）。");
+          return [...current, response];
+        });
+      }
+    } catch (caughtError) {
+      setPrepareResponse(null);
+      setPrepareError(caughtError instanceof Error ? caughtError.message : "登録準備中に不明なエラーが発生しました。");
+    } finally {
+      setPrepareLoading(false);
+    }
   }
 
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
@@ -279,8 +371,8 @@ export default function App() {
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 2-6 共通金額入力試作</h1>
-        <p>通常1行仕訳向けに、借貸へ同額反映する共通金額の入力導線を確認します。</p>
+        <h1>journal-ai 正式UI Phase 3-1 登録準備</h1>
+        <p>通常1行仕訳を検証・整形し、画面上の登録予定へ追加します。保存やDB登録はまだ行いません。</p>
       </header>
 
       <div className="split-layout">
@@ -371,22 +463,52 @@ export default function App() {
                 <p className="amount-note">通常1行仕訳では、この金額を借方金額・貸方金額へ同額反映する想定です。この画面ではまだ登録・CSV出力は行いません。</p>
               </div>
               <div className="edit-form-footer">
-                <p>編集内容は画面上の確認用stateにのみ反映されます。まだ保存・登録は行いません。</p>
+                <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
                 <div className="edit-actions">
                   <button type="button" className="reset-button" onClick={resetEditForm} disabled={!editFormChanged}>候補選択時の値に戻す</button>
-                  <button type="button" className="disabled-action" disabled>登録APIは未実装です</button>
+                  <button type="button" className="prepare-action" onClick={handlePrepareRegistration} disabled={prepareLoading}>
+                    {prepareLoading ? "登録準備中…" : "登録予定へ追加（確認のみ）"}
+                  </button>
                 </div>
               </div>
+              {prepareError && <p className="prepare-result error-message">{prepareError}</p>}
+              {prepareStatusMessage && <p className="prepare-result status-message">{prepareStatusMessage}</p>}
+              {prepareResponse?.blocked && <div className="prepare-result prepare-blocked" role="alert">
+                <strong>登録準備できませんでした</strong>
+                <ul>{prepareResponse.errors.map((reason, index) => <li key={`${reason}-${index}`}>理由: {reason}</li>)}</ul>
+              </div>}
+              {prepareResponse?.ok && prepareResponse.warnings.length > 0 && <div className="prepare-result prepare-warning">
+                {prepareResponse.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}
+              </div>}
             </form>}
             <BlockRowsTable candidate={selectedCandidate} />
           </>}
         </section>
       </div>
 
+      <section className="registration-panel" aria-live="polite">
+        <div className="pane-heading"><div><p className="step-label">Step 4</p><h2>出力待ちカート（画面上のみ）</h2></div>
+          <span className="result-pill">{registrationCart.length}件</span>
+        </div>
+        <p className="registration-panel-note">画面上の一時保持です。リロードすると消えます。保存・DB登録・CSV出力は行いません。</p>
+        {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
+          {registrationCart.map((item) => item.registration_id && item.prepared_journal && <article className="cart-item" key={item.registration_id}>
+            <div><span>ID {item.registration_id.slice(0, 12)}…</span><strong>
+              {item.prepared_journal.debit_account_name || item.prepared_journal.debit_account_code}
+              <b aria-hidden="true">→</b>
+              {item.prepared_journal.credit_account_name || item.prepared_journal.credit_account_code}
+            </strong></div>
+            <b className="cart-amount">{item.prepared_journal.amount.toLocaleString("ja-JP")}円</b>
+            <p>{item.prepared_journal.summary || "摘要なし"}</p>
+          </article>)}
+        </div>}
+      </section>
+
       <section className="dev-panel">
         <div className="pane-heading"><div><p className="step-label">Development</p><h2>開発確認エリア</h2></div></div>
         <details><summary>APIレスポンスJSONを表示</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
         <details><summary>編集フォームstateを表示</summary><pre>{JSON.stringify(editForm, null, 2)}</pre></details>
+        <details><summary>登録準備APIレスポンスを表示</summary><pre>{JSON.stringify(prepareResponse, null, 2)}</pre></details>
       </section>
     </main>
   );

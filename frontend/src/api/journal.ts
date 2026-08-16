@@ -1,4 +1,6 @@
 import type {
+  PrepareRegistrationRequest,
+  PrepareRegistrationResponse,
   JournalSearchRequest,
   JournalSearchResponse,
 } from "../types/journal";
@@ -20,4 +22,23 @@ export async function searchJournals(
   }
 
   return response.json() as Promise<JournalSearchResponse>;
+}
+
+export async function prepareRegistration(
+  request: PrepareRegistrationRequest,
+): Promise<PrepareRegistrationResponse> {
+  const response = await fetch("/api/journal/prepare-registration", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`登録準備APIエラー: ${response.status} ${text}`);
+  }
+
+  return response.json() as Promise<PrepareRegistrationResponse>;
 }

@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from engine import load_data
+from journal_registration_service import prepare_registration
 from journal_search_service import search_journals
 
 
@@ -46,6 +47,58 @@ class JournalSearchResponse(BaseModel):
     candidates: list[JournalSearchCandidate]
 
 
+class JournalEditFormRequest(BaseModel):
+    voucher_date: str
+    voucher_no: Optional[str] = None
+    voucher_summary: Optional[str] = None
+    debit_account_code: str
+    debit_account_name: Optional[str] = None
+    debit_sub_code: Optional[str] = None
+    debit_sub_name: Optional[str] = None
+    debit_dept_code: Optional[str] = None
+    debit_dept_name: Optional[str] = None
+    credit_account_code: str
+    credit_account_name: Optional[str] = None
+    credit_sub_code: Optional[str] = None
+    credit_sub_name: Optional[str] = None
+    credit_dept_code: Optional[str] = None
+    credit_dept_name: Optional[str] = None
+    amount: str
+    summary: Optional[str] = None
+    source_debit_amount: Optional[str] = None
+    source_credit_amount: Optional[str] = None
+
+
+class JournalCandidateMetaRequest(BaseModel):
+    rank: Optional[int] = None
+    score: Optional[int] = None
+    pattern_key: list[str] = Field(default_factory=list)
+    pattern_rank: Optional[int] = None
+    editable_row_count: int = 1
+    source_row_count: int = 0
+    block_row_count: int = 0
+    has_fukugo: bool = False
+    has_sundry: bool = False
+    contains_fukugo_or_sundry: bool = False
+    show_block_rows: bool = False
+    is_complex: bool = False
+
+
+class PrepareRegistrationRequest(BaseModel):
+    edit_form: JournalEditFormRequest
+    candidate_meta: JournalCandidateMetaRequest
+
+
+class PrepareRegistrationResponse(BaseModel):
+    ok: bool
+    blocked: bool = False
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    registration_id: Optional[str] = None
+    prepared_journal: Optional[dict[str, Any]] = None
+    epson_preview_row: Optional[dict[str, Any]] = None
+
+
 app = FastAPI(title="journal-ai API")
 
 
@@ -78,3 +131,12 @@ def post_journal_search(request: JournalSearchRequest):
             status_code=500,
             detail="仕訳を検索できませんでした",
         ) from error
+
+
+@app.post(
+    "/api/journal/prepare-registration",
+    response_model=PrepareRegistrationResponse,
+)
+def post_prepare_registration(request: PrepareRegistrationRequest):
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    return prepare_registration(payload)
