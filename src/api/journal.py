@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from engine import load_data
+from journal_master_service import load_journal_masters
 from journal_registration_service import prepare_registration
 from journal_search_service import search_journals
 
@@ -99,7 +100,74 @@ class PrepareRegistrationResponse(BaseModel):
     epson_preview_row: Optional[dict[str, Any]] = None
 
 
+class AccountMasterItem(BaseModel):
+    code: str
+    name: str
+    category: str = ""
+    label: str
+    selectable: bool
+    unselectable_reason: Optional[str] = None
+
+
+class SubAccountMasterItem(BaseModel):
+    code: str
+    name: str
+    label: str
+
+
+class DepartmentMasterItem(BaseModel):
+    code: str
+    name: str
+    label: str
+
+
+class DuplicateAccountName(BaseModel):
+    name: str
+    codes: list[str] = Field(default_factory=list)
+
+
+class DuplicateSubCode(BaseModel):
+    code: str
+    names: list[str] = Field(default_factory=list)
+
+
+class JournalMasterDiagnostics(BaseModel):
+    account_count: int
+    selectable_account_count: int
+    unselectable_account_count: int
+    sub_account_count: int
+    department_count: int
+    duplicate_account_names: list[DuplicateAccountName] = Field(
+        default_factory=list
+    )
+    duplicate_sub_codes: list[DuplicateSubCode] = Field(
+        default_factory=list
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+class JournalMastersResponse(BaseModel):
+    accounts: list[AccountMasterItem]
+    sub_accounts: list[SubAccountMasterItem]
+    departments: list[DepartmentMasterItem]
+    diagnostics: JournalMasterDiagnostics
+
+
 app = FastAPI(title="journal-ai API")
+
+
+@app.get(
+    "/api/journal/masters",
+    response_model=JournalMastersResponse,
+)
+def get_journal_masters():
+    try:
+        return load_journal_masters()
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="マスターデータを読み込めませんでした",
+        ) from error
 
 
 @app.post(
