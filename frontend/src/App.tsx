@@ -28,15 +28,16 @@ const debitFields: EditFormField[] = [
   { key: "debitAccountCode", label: "借方科目コード" }, { key: "debitAccountName", label: "借方科目名" },
   { key: "debitSubCode", label: "借方補助コード" }, { key: "debitSubName", label: "借方補助名" },
   { key: "debitDeptCode", label: "借方部門コード" }, { key: "debitDeptName", label: "借方部門名" },
-  { key: "debitAmount", label: "借方金額", amount: true },
 ];
 const creditFields: EditFormField[] = [
   { key: "creditAccountCode", label: "貸方科目コード" }, { key: "creditAccountName", label: "貸方科目名" },
   { key: "creditSubCode", label: "貸方補助コード" }, { key: "creditSubName", label: "貸方補助名" },
   { key: "creditDeptCode", label: "貸方部門コード" }, { key: "creditDeptName", label: "貸方部門名" },
-  { key: "creditAmount", label: "貸方金額", amount: true },
 ];
-const summaryFields: EditFormField[] = [{ key: "summary", label: "摘要", wide: true }];
+const amountSummaryFields: EditFormField[] = [
+  { key: "amount", label: "金額", amount: true },
+  { key: "summary", label: "摘要", wide: true },
+];
 
 function getString(row: Record<string, unknown>, key: string): string {
   const value = row[key];
@@ -45,17 +46,24 @@ function getString(row: Record<string, unknown>, key: string): string {
 }
 
 function buildEditFormFromRow(row: Record<string, unknown>): JournalEditForm {
+  const debitAmount = getString(row, "借方金額");
+  const creditAmount = getString(row, "貸方金額");
   return {
     voucherDate: getString(row, "伝票日付"), voucherNo: getString(row, "証番号"),
     voucherSummary: getString(row, "伝票摘要"), debitAccountCode: getString(row, "借方科目"),
     debitAccountName: getString(row, "借方科目名"), debitSubCode: getString(row, "借方補助"),
     debitSubName: getString(row, "借方補助科目名"), debitDeptCode: getString(row, "借方部門"),
-    debitDeptName: getString(row, "借方部門名"), debitAmount: getString(row, "借方金額"),
+    debitDeptName: getString(row, "借方部門名"), amount: chooseCommonAmount(debitAmount, creditAmount),
+    debitAmount,
     creditAccountCode: getString(row, "貸方科目"), creditAccountName: getString(row, "貸方科目名"),
     creditSubCode: getString(row, "貸方補助"), creditSubName: getString(row, "貸方補助科目名"),
     creditDeptCode: getString(row, "貸方部門"), creditDeptName: getString(row, "貸方部門名"),
-    creditAmount: getString(row, "貸方金額"), summary: getString(row, "摘要"),
+    creditAmount, summary: getString(row, "摘要"),
   };
+}
+
+function chooseCommonAmount(debitAmount: string, creditAmount: string): string {
+  return debitAmount || creditAmount || "";
 }
 
 function displayValue(value: unknown): string {
@@ -68,6 +76,14 @@ function parseAmount(value: string): number | null {
   if (normalized === "") return null;
   const amount = Number(normalized);
   return Number.isFinite(amount) ? amount : null;
+}
+
+function areSourceAmountsEqual(form: JournalEditForm | null): boolean | null {
+  if (!form || !form.debitAmount || !form.creditAmount) return null;
+  const debitAmount = parseAmount(form.debitAmount);
+  const creditAmount = parseAmount(form.creditAmount);
+  if (debitAmount === null || creditAmount === null) return null;
+  return debitAmount === creditAmount;
 }
 
 function formatAmount(value: string): string {
@@ -255,10 +271,7 @@ export default function App() {
     selectedCandidate.has_fukugo || selectedCandidate.has_sundry || selectedCandidate.contains_fukugo_or_sundry ||
     selectedCandidate.show_block_rows || selectedCandidate.is_complex
   ));
-  const debitAmount = editForm ? parseAmount(editForm.debitAmount) : null;
-  const creditAmount = editForm ? parseAmount(editForm.creditAmount) : null;
-  const amountsComparable = debitAmount !== null && creditAmount !== null;
-  const amountsMatch = amountsComparable && debitAmount === creditAmount;
+  const sourceAmountsEqual = areSourceAmountsEqual(editForm);
   const editFormChanged = isEditFormChanged(editForm, initialEditForm);
   const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
 
@@ -266,8 +279,8 @@ export default function App() {
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 2-5 編集操作性試作</h1>
-        <p>候補選択から画面上の編集・リセットまで、安全な操作導線を確認します。</p>
+        <h1>journal-ai 正式UI Phase 2-6 共通金額入力試作</h1>
+        <p>通常1行仕訳向けに、借貸へ同額反映する共通金額の入力導線を確認します。</p>
       </header>
 
       <div className="split-layout">
@@ -330,9 +343,12 @@ export default function App() {
               <span>変更内容は保存されません。</span>
             </div>
             {selectedCandidate.editable_rows.length === 0 && <p className="notice notice-error">この候補には編集用行がありません。</p>}
-            {selectedCandidate.editable_rows.length > 1 && <p className="notice notice-warning">この候補は複数行の編集候補です。今回は先頭行のみ表示しています。</p>}
+            {selectedCandidate.editable_rows.length > 1 && <p className="notice notice-warning">この候補は複数行の編集候補です。今回は通常1行仕訳向けの確認として先頭行のみ表示しています。</p>}
             {selectedCandidateIsComplex && <p className="notice notice-warning">
               この候補は資金複合または諸口を含む可能性があります。block_rows を確認し、登録時は実際の相手科目へ修正してください。
+            </p>}
+            {sourceAmountsEqual === false && <p className="notice notice-warning">
+              元データの借方金額と貸方金額が一致していません。内容を確認してください。
             </p>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
               <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
@@ -343,11 +359,17 @@ export default function App() {
                 <FormSection title="貸方" fields={creditFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section credit" gridClassName="side-form-grid" />
               </div>
-              <div className={`amount-check ${amountsMatch ? "match" : amountsComparable ? "mismatch" : "incomplete"}`}>
-                <strong>金額確認：借方 {formatAmountWithUnit(editForm.debitAmount)} / 貸方 {formatAmountWithUnit(editForm.creditAmount)}</strong>
-                <span>{amountsMatch ? "借貸金額は一致しています。" : amountsComparable ? "借貸金額が一致していません。" : "借貸金額を入力してください。"}</span>
+              <FormSection title="金額・摘要" fields={amountSummaryFields} editForm={editForm} initialEditForm={initialEditForm}
+                onChange={updateEditForm} className="single-amount-section" gridClassName="amount-summary-grid" />
+              <div className="amount-summary-panel">
+                <strong>{editForm.amount ? `入力金額：${formatAmountWithUnit(editForm.amount)}` : "入力金額：未入力"}</strong>
+                <span>出力想定：借方金額・貸方金額へ同額反映</span>
+                <small>元データ：借方 {formatAmountWithUnit(editForm.debitAmount)} / 貸方 {formatAmountWithUnit(editForm.creditAmount)}</small>
+                <p className={`source-amount-check ${sourceAmountsEqual === true ? "match" : sourceAmountsEqual === false ? "mismatch" : "incomplete"}`}>
+                  {sourceAmountsEqual === true ? "元データの借貸金額は一致しています。" : sourceAmountsEqual === false ? "元データの借貸金額が一致していません。" : "元データの借貸金額は片側のみ、または未入力です。"}
+                </p>
+                <p className="amount-note">通常1行仕訳では、この金額を借方金額・貸方金額へ同額反映する想定です。この画面ではまだ登録・CSV出力は行いません。</p>
               </div>
-              <FormSection title="摘要" fields={summaryFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm} />
               <div className="edit-form-footer">
                 <p>編集内容は画面上の確認用stateにのみ反映されます。まだ保存・登録は行いません。</p>
                 <div className="edit-actions">

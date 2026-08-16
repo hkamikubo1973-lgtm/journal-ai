@@ -36,6 +36,7 @@ export type JournalEditForm = {
   debitSubName: string;
   debitDeptCode: string;
   debitDeptName: string;
+  amount: string;
   debitAmount: string;
   creditAccountCode: string;
   creditAccountName: string;
