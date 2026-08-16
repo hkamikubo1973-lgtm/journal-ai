@@ -7,6 +7,7 @@ import type {
   JournalSearchResponse,
   PrepareRegistrationRequest,
   PrepareRegistrationResponse,
+  RegistrationCartItem,
 } from "./types/journal";
 
 const blockRowFields = [
@@ -45,6 +46,11 @@ const amountSummaryFields: EditFormField[] = [
   { key: "amount", label: "金額", amount: true },
   { key: "summary", label: "摘要", wide: true },
 ];
+
+const epsonPreviewFields = [
+  "伝票日付", "証番号", "借方科目", "借方科目名", "借方補助", "借方補助科目名", "借方金額",
+  "貸方科目", "貸方科目名", "貸方補助", "貸方補助科目名", "貸方金額", "摘要", "伝票摘要",
+] as const;
 
 function getString(row: Record<string, unknown>, key: string): string {
   const value = row[key];
@@ -101,6 +107,25 @@ function formatAmount(value: string): string {
 function formatAmountWithUnit(value: string): string {
   const formatted = formatAmount(value);
   return formatted === "-" ? formatted : `${formatted}円`;
+}
+
+function shortId(id: string): string {
+  return `${id.slice(0, 10)}…`;
+}
+
+function getPreviewValue(row: Record<string, unknown> | null | undefined, key: string): string {
+  if (!row) return "-";
+  return displayValue(row[key]);
+}
+
+function getCartAmount(item: RegistrationCartItem): number {
+  if (Number.isFinite(item.prepared_journal.amount)) return item.prepared_journal.amount;
+  const previewAmount = parseAmount(getPreviewValue(item.epson_preview_row, "借方金額"));
+  return previewAmount ?? 0;
+}
+
+function formatAmountNumber(value: number): string {
+  return `${value.toLocaleString("ja-JP")}円`;
 }
 
 function getCandidateSummary(candidate: JournalCandidate) {
@@ -239,7 +264,8 @@ export default function App() {
   const [prepareResponse, setPrepareResponse] = useState<PrepareRegistrationResponse | null>(null);
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [prepareStatusMessage, setPrepareStatusMessage] = useState<string | null>(null);
-  const [registrationCart, setRegistrationCart] = useState<PrepareRegistrationResponse[]>([]);
+  const [registrationCart, setRegistrationCart] = useState<RegistrationCartItem[]>([]);
+  const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -342,14 +368,21 @@ export default function App() {
       const response = await prepareRegistration(request);
       setPrepareResponse(response);
       if (response.ok && response.registration_id && response.prepared_journal && response.epson_preview_row) {
-        setRegistrationCart((current) => {
-          if (current.some((item) => item.registration_id === response.registration_id)) {
-            setPrepareStatusMessage("同じ登録予定はすでにカートへ追加されています。");
-            return current;
-          }
+        const cartItem: RegistrationCartItem = {
+          ...response,
+          registration_id: response.registration_id,
+          prepared_journal: response.prepared_journal,
+          epson_preview_row: response.epson_preview_row,
+          addedAt: new Date().toISOString(),
+        };
+        if (registrationCart.some((item) => item.registration_id === response.registration_id)) {
+          setPrepareStatusMessage("同じ内容の登録予定仕訳が既にカートにあります。");
+        } else {
           setPrepareStatusMessage("登録予定へ追加しました（画面上の確認のみ）。");
-          return [...current, response];
-        });
+          setCartStatusMessage("登録予定仕訳をカートへ追加しました。");
+          setRegistrationCart((current) => current.some((item) => item.registration_id === response.registration_id)
+            ? current : [...current, cartItem]);
+        }
       }
     } catch (caughtError) {
       setPrepareResponse(null);
@@ -359,6 +392,16 @@ export default function App() {
     }
   }
 
+  function removeCartItem(registrationId: string) {
+    setRegistrationCart((current) => current.filter((item) => item.registration_id !== registrationId));
+    setCartStatusMessage("登録予定仕訳をカートから削除しました。");
+  }
+
+  function clearRegistrationCart() {
+    setRegistrationCart([]);
+    setCartStatusMessage("画面上の出力待ちカートを空にしました。");
+  }
+
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
     selectedCandidate.has_fukugo || selectedCandidate.has_sundry || selectedCandidate.contains_fukugo_or_sundry ||
     selectedCandidate.show_block_rows || selectedCandidate.is_complex
@@ -366,13 +409,14 @@ export default function App() {
   const sourceAmountsEqual = areSourceAmountsEqual(editForm);
   const editFormChanged = isEditFormChanged(editForm, initialEditForm);
   const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
+  const cartTotalAmount = registrationCart.reduce((total, item) => total + getCartAmount(item), 0);
 
   return (
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 3-1 登録準備</h1>
-        <p>通常1行仕訳を検証・整形し、画面上の登録予定へ追加します。保存やDB登録はまだ行いません。</p>
+        <h1>journal-ai 正式UI Phase 3-2 出力待ちプレビュー</h1>
+        <p>通常1行仕訳の出力対象一覧とエプソンCSV予定行を画面上で確認します。保存やDB登録はまだ行いません。</p>
       </header>
 
       <div className="split-layout">
@@ -487,21 +531,41 @@ export default function App() {
       </div>
 
       <section className="registration-panel" aria-live="polite">
-        <div className="pane-heading"><div><p className="step-label">Step 4</p><h2>出力待ちカート（画面上のみ）</h2></div>
-          <span className="result-pill">{registrationCart.length}件</span>
+        <div className="cart-panel-heading"><div><p className="step-label">Step 4</p><h2>出力待ちカート（画面上のみ）</h2></div>
+          <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
         </div>
-        <p className="registration-panel-note">画面上の一時保持です。リロードすると消えます。保存・DB登録・CSV出力は行いません。</p>
+        <p className="registration-panel-note">このカートはReact画面上の一時保持です。リロードすると消えます。<br />
+          まだCSV保存・DB登録・Excel出力は行いません。</p>
+        <div className="cart-summary">
+          <div><span>件数</span><strong>{registrationCart.length}件</strong></div>
+          <div><span>合計金額</span><strong>{formatAmountNumber(cartTotalAmount)}</strong></div>
+          <small>合計金額は画面表示用の単純合計であり、会計ロジックではありません。</small>
+        </div>
+        {cartStatusMessage && <p className="cart-status-message">{cartStatusMessage}</p>}
         {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
-          {registrationCart.map((item) => item.registration_id && item.prepared_journal && <article className="cart-item" key={item.registration_id}>
-            <div><span>ID {item.registration_id.slice(0, 12)}…</span><strong>
-              {item.prepared_journal.debit_account_name || item.prepared_journal.debit_account_code}
-              <b aria-hidden="true">→</b>
-              {item.prepared_journal.credit_account_name || item.prepared_journal.credit_account_code}
-            </strong></div>
-            <b className="cart-amount">{item.prepared_journal.amount.toLocaleString("ja-JP")}円</b>
-            <p>{item.prepared_journal.summary || "摘要なし"}</p>
+          {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>
+            <div className="cart-item-header">
+              <div><span className="cart-number">No. {index + 1}</span><span className="cart-id" title={item.registration_id}>ID {shortId(item.registration_id)}</span></div>
+              <button type="button" className="remove-cart-button" onClick={() => removeCartItem(item.registration_id)}>カートから削除</button>
+            </div>
+            <div className="cart-item-main">
+              <div><span>伝票日付</span><strong>{item.prepared_journal.voucher_date || "-"}</strong></div>
+              <div className="cart-journal"><span>仕訳</span><strong>
+                {item.prepared_journal.debit_account_name || item.prepared_journal.debit_account_code || "-"}
+                <b aria-hidden="true">→</b>
+                {item.prepared_journal.credit_account_name || item.prepared_journal.credit_account_code || "-"}
+              </strong></div>
+              <div className="cart-item-amount"><span>金額</span><strong>{formatAmountNumber(getCartAmount(item))}</strong></div>
+              <div className="cart-item-summary"><span>摘要</span><p>{item.prepared_journal.summary || "-"}</p></div>
+            </div>
+            <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
+              <div className="preview-table-wrap"><table className="preview-table"><tbody>
+                {epsonPreviewFields.map((field) => <tr key={field}><th>{field}</th><td>{getPreviewValue(item.epson_preview_row, field)}</td></tr>)}
+              </tbody></table></div>
+            </details>
           </article>)}
         </div>}
+        <p className="clear-cart-note">画面上のカートだけを空にします。保存済みデータはありません。</p>
       </section>
 
       <section className="dev-panel">
@@ -509,6 +573,7 @@ export default function App() {
         <details><summary>APIレスポンスJSONを表示</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
         <details><summary>編集フォームstateを表示</summary><pre>{JSON.stringify(editForm, null, 2)}</pre></details>
         <details><summary>登録準備APIレスポンスを表示</summary><pre>{JSON.stringify(prepareResponse, null, 2)}</pre></details>
+        <details><summary>出力待ちカートJSONを表示</summary><pre>{JSON.stringify(registrationCart, null, 2)}</pre></details>
       </section>
     </main>
   );

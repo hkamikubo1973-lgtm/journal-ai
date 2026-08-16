@@ -110,7 +110,7 @@ export type PreparedJournal = {
   source_credit_amount: string;
 };
 
-export type EpsonPreviewRow = Record<string, string>;
+export type EpsonPreviewRow = Record<string, unknown>;
 
 export type PrepareRegistrationResponse = {
   ok: boolean;
@@ -120,4 +120,14 @@ export type PrepareRegistrationResponse = {
   registration_id: string | null;
   prepared_journal: PreparedJournal | null;
   epson_preview_row: EpsonPreviewRow | null;
+};
+
+export type RegistrationCartItem = Omit<
+  PrepareRegistrationResponse,
+  "registration_id" | "prepared_journal" | "epson_preview_row"
+> & {
+  registration_id: string;
+  prepared_journal: PreparedJournal;
+  epson_preview_row: EpsonPreviewRow;
+  addedAt: string;
 };
