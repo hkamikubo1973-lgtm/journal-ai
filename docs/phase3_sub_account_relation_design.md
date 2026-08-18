@@ -178,7 +178,7 @@ B-2の `sub_name` はキーではなく、正式UIから新しく登録する仕
 ### 初回ブートストラップ手順
 
 1. `transactions.csv` を `utf-8-sig`、全列文字列として読み取る。
-2. 借方と貸方を別レコードへ展開し、`account_code`, `account_name`, `sub_code`, `sub_name` をtrimする。
+2. 借方と貸方を別レコードへ展開し、`account_code`, `account_name`, `sub_code`, `sub_name` を文字列のまま取得する。名称のtrim、表記統一、全半角変換、略称変更、正規化、補正は行わない。
 3. 補助コード・名称が両方空なら除外し、片側だけなら候補にせずエラー一覧へ出す。
 4. `(account_code, sub_code, sub_name)` を重複排除する。
 5. `(account_code, sub_code)` ごとの名称が1種類であることを検査する。
