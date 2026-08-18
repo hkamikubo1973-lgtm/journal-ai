@@ -406,6 +406,7 @@ export default function App() {
   const [prepareResponse, setPrepareResponse] = useState<PrepareRegistrationResponse | null>(null);
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [prepareStatusMessage, setPrepareStatusMessage] = useState<string | null>(null);
+  const [subClearWarning, setSubClearWarning] = useState<string | null>(null);
   const [registrationCart, setRegistrationCart] = useState<RegistrationCartItem[]>([]);
   const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
   const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
@@ -443,6 +444,7 @@ export default function App() {
     setPrepareResponse(null);
     setPrepareError(null);
     setPrepareStatusMessage(null);
+    setSubClearWarning(null);
     const request: JournalSearchRequest = {
       keyword, department: department.trim() || null, amount: amount === "" ? null : Number(amount), limit,
     };
@@ -462,6 +464,7 @@ export default function App() {
     setPrepareResponse(null);
     setPrepareError(null);
     setPrepareStatusMessage(null);
+    setSubClearWarning(null);
     const firstEditableRow = candidate.editable_rows[0];
     const nextEditForm = firstEditableRow ? buildEditFormFromRow(firstEditableRow) : null;
     setEditForm(nextEditForm ? { ...nextEditForm } : null);
@@ -470,6 +473,9 @@ export default function App() {
 
   function updateEditForm(key: keyof JournalEditForm, value: string) {
     setEditForm((current) => current ? { ...current, [key]: value } : current);
+    if (["debitSubCode", "debitSubName", "creditSubCode", "creditSubName"].includes(key)) {
+      setSubClearWarning(null);
+    }
     setPrepareResponse(null);
     setPrepareError(null);
     setPrepareStatusMessage(null);
@@ -477,13 +483,30 @@ export default function App() {
 
   function updateAccountSelection(side: "debit" | "credit", code: string) {
     const account = findAccountByCode(masters, code);
-    if (!account?.selectable) return;
-    setEditForm((current) => {
-      if (!current) return current;
-      return side === "debit"
-        ? { ...current, debitAccountCode: account.code, debitAccountName: account.name }
-        : { ...current, creditAccountCode: account.code, creditAccountName: account.name };
-    });
+    if (!account?.selectable || !editForm) return;
+
+    const currentAccountCode = side === "debit" ? editForm.debitAccountCode : editForm.creditAccountCode;
+    if (currentAccountCode === account.code) return;
+
+    const hadSubAccount = side === "debit"
+      ? Boolean(editForm.debitSubCode.trim() || editForm.debitSubName.trim())
+      : Boolean(editForm.creditSubCode.trim() || editForm.creditSubName.trim());
+    setEditForm(side === "debit"
+      ? {
+        ...editForm,
+        debitAccountCode: account.code,
+        debitAccountName: account.name,
+        debitSubCode: "",
+        debitSubName: "",
+      }
+      : {
+        ...editForm,
+        creditAccountCode: account.code,
+        creditAccountName: account.name,
+        creditSubCode: "",
+        creditSubName: "",
+      });
+    setSubClearWarning(hadSubAccount ? `${side === "debit" ? "借方" : "貸方"}科目を変更したため、${side === "debit" ? "借方" : "貸方"}補助をクリアしました。` : null);
     setPrepareResponse(null);
     setPrepareError(null);
     setPrepareStatusMessage(null);
@@ -495,6 +518,7 @@ export default function App() {
       setPrepareResponse(null);
       setPrepareError(null);
       setPrepareStatusMessage(null);
+      setSubClearWarning(null);
     }
   }
 
@@ -681,6 +705,7 @@ export default function App() {
               <strong>{editFormChanged ? "編集状態：画面上で変更あり（未保存）" : "編集状態：未変更"}</strong>
               <span>変更内容は保存されません。</span>
             </div>
+            {subClearWarning && <p className="notice notice-warning" role="status">{subClearWarning}</p>}
             {selectedCandidate.editable_rows.length === 0 && <p className="notice notice-error">この候補には編集用行がありません。</p>}
             {selectedCandidate.editable_rows.length > 1 && <p className="notice notice-warning">この候補は複数行の編集候補です。今回は通常1行仕訳向けの確認として先頭行のみ表示しています。</p>}
             {selectedCandidateIsComplex && <p className="notice notice-warning">
