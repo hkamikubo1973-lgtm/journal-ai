@@ -40,11 +40,9 @@ const basicFields: EditFormField[] = [
 ];
 const debitFields: EditFormField[] = [
   { key: "debitSubCode", label: "借方補助コード" }, { key: "debitSubName", label: "借方補助名" },
-  { key: "debitDeptCode", label: "借方部門コード" }, { key: "debitDeptName", label: "借方部門名" },
 ];
 const creditFields: EditFormField[] = [
   { key: "creditSubCode", label: "貸方補助コード" }, { key: "creditSubName", label: "貸方補助名" },
-  { key: "creditDeptCode", label: "貸方部門コード" }, { key: "creditDeptName", label: "貸方部門名" },
 ];
 const amountSummaryFields: EditFormField[] = [
   { key: "amount", label: "金額", amount: true },
@@ -281,6 +279,28 @@ function findAccountByCode(masters: JournalMastersResponse | null, code: string)
   return masters?.accounts.find((account) => account.code === code.trim());
 }
 
+function findDepartmentByCode(masters: JournalMastersResponse | null, code: string) {
+  return masters?.departments.find((department) => department.code === code.trim());
+}
+
+function changeDepartmentSelection(
+  form: JournalEditForm,
+  side: "debit" | "credit",
+  department: { code: string; name: string } | undefined,
+): JournalEditForm {
+  return side === "debit"
+    ? {
+      ...form,
+      debitDeptCode: department?.code ?? "",
+      debitDeptName: department?.name ?? "",
+    }
+    : {
+      ...form,
+      creditDeptCode: department?.code ?? "",
+      creditDeptName: department?.name ?? "",
+    };
+}
+
 function getCandidateSummary(candidate: JournalCandidate) {
   const editableRow = candidate.editable_rows[0] ?? {};
   const blockRow = candidate.block_rows[0] ?? {};
@@ -462,6 +482,49 @@ function AccountMasterField({ side, code, name, masters, mastersLoading, masters
   </div>;
 }
 
+function DepartmentMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
+  side: "借方" | "貸方";
+  code: string;
+  name: string;
+  masters: JournalMastersResponse | null;
+  mastersLoading: boolean;
+  mastersError: string | null;
+  changed: boolean;
+  onChange: (code: string) => void;
+}) {
+  const currentDepartment = findDepartmentByCode(masters, code);
+  const hasCurrentValue = Boolean(code.trim() || name.trim());
+  const currentValueMatches = Boolean(currentDepartment && currentDepartment.name === name.trim());
+  const selectValue = !hasCurrentValue ? "" : currentValueMatches ? currentDepartment?.code ?? "" : "__current_invalid__";
+  const note = mastersError
+    ? "マスター取得エラーのため、部門選択を利用できません。"
+    : !masters || mastersLoading
+      ? "マスター未取得のため部門選択は利用できません。"
+      : "部門はマスターから選択します。コードと部門名は連動します。";
+
+  return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
+    <label>{side}部門
+      <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+        onChange={(event) => onChange(event.target.value)} disabled={!masters || mastersLoading || Boolean(mastersError)}>
+        <option value="">部門なし</option>
+        {hasCurrentValue && !currentValueMatches && <option value="__current_invalid__" disabled>
+          現在値：{code || "コードなし"}　{name || "名称なし"}（マスター不一致）
+        </option>}
+        {masters?.departments.map((department) => <option value={department.code} key={department.code}>
+          {department.label}
+        </option>)}
+      </select>
+    </label>
+    <div className={`master-linked-name${changed ? " changed-field" : ""}`}>
+      <span>部門名</span><strong>{name || "部門なし"}</strong>
+    </div>
+    <p className="master-select-note">{note}</p>
+    {masters && hasCurrentValue && !currentValueMatches && <p className="unselectable-account-warning">
+      現在の{side}部門 {code || "（コードなし）"} {name || "（名称なし）"} は部門マスターと一致しません。有効な部門を選び直してください。
+    </p>}
+  </div>;
+}
+
 function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
   return (
     <section className="block-panel">
@@ -603,6 +666,17 @@ export default function App() {
     setPrepareStatusMessage(null);
   }
 
+  function updateDepartmentSelection(side: "debit" | "credit", code: string) {
+    if (!editForm) return;
+    const department = code ? findDepartmentByCode(masters, code) : undefined;
+    if (code && !department) return;
+
+    setEditForm(changeDepartmentSelection(editForm, side, department));
+    setPrepareResponse(null);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
+  }
+
   function resetEditForm() {
     if (initialEditForm) {
       setEditForm({ ...initialEditForm });
@@ -721,8 +795,8 @@ export default function App() {
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 3-10 伝票日付入力</h1>
-        <p>伝票日付は年月・日・カレンダーで効率よく編集できます。保存やDB登録はまだ行いません。</p>
+        <h1>journal-ai 正式UI Phase 3-11 部門選択</h1>
+        <p>借方・貸方部門をマスターから選択し、コードと名称を連動更新します。保存やDB登録はまだ行いません。</p>
       </header>
 
       <div className="split-layout">
@@ -837,6 +911,10 @@ export default function App() {
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitAccountCode", editForm, initialEditForm) || isFieldChanged("debitAccountName", editForm, initialEditForm)}
                     onChange={(code) => updateAccountSelection("debit", code)} />
+                  <DepartmentMasterField side="借方" code={editForm.debitDeptCode} name={editForm.debitDeptName}
+                    masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
+                    changed={isFieldChanged("debitDeptCode", editForm, initialEditForm) || isFieldChanged("debitDeptName", editForm, initialEditForm)}
+                    onChange={(code) => updateDepartmentSelection("debit", code)} />
                 </FormSection>
                 <FormSection title="貸方" fields={creditFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section credit" gridClassName="side-form-grid">
@@ -844,6 +922,10 @@ export default function App() {
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditAccountCode", editForm, initialEditForm) || isFieldChanged("creditAccountName", editForm, initialEditForm)}
                     onChange={(code) => updateAccountSelection("credit", code)} />
+                  <DepartmentMasterField side="貸方" code={editForm.creditDeptCode} name={editForm.creditDeptName}
+                    masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
+                    changed={isFieldChanged("creditDeptCode", editForm, initialEditForm) || isFieldChanged("creditDeptName", editForm, initialEditForm)}
+                    onChange={(code) => updateDepartmentSelection("credit", code)} />
                 </FormSection>
               </div>
               <FormSection title="金額・摘要" fields={amountSummaryFields} editForm={editForm} initialEditForm={initialEditForm}
@@ -860,7 +942,7 @@ export default function App() {
               <div className="edit-form-footer">
                 <div className="prepare-guidance">
                   <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
-                  <small>Phase 3-10では伝票日付をYYYY-MM-DD形式で登録準備APIへ送信します。</small>
+                  <small>Phase 3-11では借方・貸方部門をマスターから選択し、既存形式で登録準備APIへ送信します。</small>
                   {hasMasterErrors && <strong>マスター不一致があります。有効なマスター値へ修正してください。</strong>}
                 </div>
                 <div className="edit-actions">
