@@ -121,6 +121,12 @@ class DepartmentMasterItem(BaseModel):
     label: str
 
 
+class SubAccountRelationItem(BaseModel):
+    account_code: str
+    sub_code: str
+    sub_name: str
+
+
 class DuplicateAccountName(BaseModel):
     name: str
     codes: list[str] = Field(default_factory=list)
@@ -131,18 +137,36 @@ class DuplicateSubCode(BaseModel):
     names: list[str] = Field(default_factory=list)
 
 
+class DuplicateSubAccountRelationKey(BaseModel):
+    account_code: str
+    sub_code: str
+    row_numbers: list[int] = Field(default_factory=list)
+
+
+class InvalidSubAccountRelationRow(BaseModel):
+    row_number: int
+    reason: str
+
+
 class JournalMasterDiagnostics(BaseModel):
     account_count: int
     selectable_account_count: int
     unselectable_account_count: int
     sub_account_count: int
     department_count: int
+    sub_account_relation_count: int = 0
     duplicate_account_names: list[DuplicateAccountName] = Field(
         default_factory=list
     )
     duplicate_sub_codes: list[DuplicateSubCode] = Field(
         default_factory=list
     )
+    duplicate_sub_account_relation_keys: list[
+        DuplicateSubAccountRelationKey
+    ] = Field(default_factory=list)
+    invalid_sub_account_relation_rows: list[
+        InvalidSubAccountRelationRow
+    ] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -150,6 +174,9 @@ class JournalMastersResponse(BaseModel):
     accounts: list[AccountMasterItem]
     sub_accounts: list[SubAccountMasterItem]
     departments: list[DepartmentMasterItem]
+    sub_account_relations: list[SubAccountRelationItem] = Field(
+        default_factory=list
+    )
     diagnostics: JournalMasterDiagnostics
 
 
