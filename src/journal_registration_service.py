@@ -9,8 +9,15 @@ import re
 import unicodedata
 from typing import Any
 
+from journal_master_service import load_journal_masters
+
 
 NO_SAVE_WARNING = "この画面ではまだ保存・DB登録は行っていません。"
+SUB_ACCOUNT_RELATION_WARNING = (
+    "補助マスターには親科目コードがないため、"
+    "補助と科目の親子関係は未検証です。"
+)
+MASTER_LOAD_ERROR = "マスターデータを読み込めないため、登録準備できません。"
 COMPLEX_JOURNAL_ERROR = (
     "この候補は資金複合または諸口を含むため、"
     "Phase 3-1の通常1行仕訳登録準備では未対応です。"
@@ -80,16 +87,158 @@ def _normalize_amount(value: Any) -> tuple[int | None, str | None]:
     return amount, None
 
 
-def _blocked_response(errors: list[str]) -> dict[str, Any]:
+def _blocked_response(
+    errors: list[str],
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "ok": False,
         "blocked": True,
         "errors": errors,
-        "warnings": [],
+        "warnings": warnings or [],
         "registration_id": None,
         "prepared_journal": None,
         "epson_preview_row": None,
     }
+
+
+def _items_by_code(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        code = _text(item.get("code"))
+        if code:
+            result.setdefault(code, []).append(item)
+    return result
+
+
+def _validate_account(
+    side: str,
+    code: str,
+    name: str,
+    accounts_by_code: dict[str, list[dict[str, Any]]],
+    errors: list[str],
+) -> None:
+    if not code:
+        errors.append(f"{side}科目コードを入力してください。")
+        return
+
+    matches = accounts_by_code.get(code, [])
+    if not matches:
+        errors.append(f"{side}科目コード {code} は科目マスターに存在しません。")
+        return
+
+    matching_name = next(
+        (item for item in matches if _text(item.get("name")) == name),
+        None,
+    )
+    if matching_name is None:
+        master_names = "、".join(
+            f"「{master_name}」"
+            for master_name in sorted({_text(item.get("name")) for item in matches})
+        )
+        errors.append(
+            f"{side}科目コード {code} のマスター名称{master_names}と"
+            f"フォーム名称「{name}」が一致しません。"
+        )
+        return
+
+    if not bool(matching_name.get("selectable", False)):
+        errors.append(f"{side}科目コード {code} は通常仕訳で直接選択できません。")
+
+
+def _validate_optional_master_pair(
+    *,
+    side: str,
+    item_label: str,
+    code: str,
+    name: str,
+    items_by_code: dict[str, list[dict[str, Any]]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    if not code and not name:
+        return []
+    if code and not name:
+        errors.append(f"{side}{item_label}コードが入力されていますが、{item_label}名が空です。")
+        return []
+    if name and not code:
+        errors.append(f"{side}{item_label}名が入力されていますが、{item_label}コードが空です。")
+        return []
+
+    matches = items_by_code.get(code, [])
+    if not matches:
+        errors.append(f"{side}{item_label}コード {code} は{item_label}マスターに存在しません。")
+        return []
+
+    names = sorted({_text(item.get("name")) for item in matches})
+    if name not in names:
+        errors.append(
+            f"{side}{item_label}コード {code} の{item_label}マスター名称候補に"
+            f"「{name}」が存在しません。"
+        )
+    return matches
+
+
+def _validate_masters(
+    edit_form: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    try:
+        masters = load_journal_masters()
+    except Exception:
+        return [MASTER_LOAD_ERROR], []
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    accounts_by_code = _items_by_code(masters.get("accounts", []))
+    sub_accounts_by_code = _items_by_code(masters.get("sub_accounts", []))
+    departments_by_code = _items_by_code(masters.get("departments", []))
+
+    for side, prefix in (("借方", "debit"), ("貸方", "credit")):
+        _validate_account(
+            side,
+            _text(edit_form.get(f"{prefix}_account_code")),
+            _text(edit_form.get(f"{prefix}_account_name")),
+            accounts_by_code,
+            errors,
+        )
+
+        sub_code = _text(edit_form.get(f"{prefix}_sub_code"))
+        sub_name = _text(edit_form.get(f"{prefix}_sub_name"))
+        sub_matches = _validate_optional_master_pair(
+            side=side,
+            item_label="補助",
+            code=sub_code,
+            name=sub_name,
+            items_by_code=sub_accounts_by_code,
+            errors=errors,
+        )
+        sub_names = {_text(item.get("name")) for item in sub_matches}
+        if len(sub_names) > 1:
+            warnings.append(
+                f"{side}補助コード {sub_code} は補助マスターで"
+                "複数の名称に使用されています。"
+            )
+
+        _validate_optional_master_pair(
+            side=side,
+            item_label="部門",
+            code=_text(edit_form.get(f"{prefix}_dept_code")),
+            name=_text(edit_form.get(f"{prefix}_dept_name")),
+            items_by_code=departments_by_code,
+            errors=errors,
+        )
+
+    if any(
+        _text(edit_form.get(field))
+        for field in (
+            "debit_sub_code",
+            "debit_sub_name",
+            "credit_sub_code",
+            "credit_sub_name",
+        )
+    ):
+        warnings.append(SUB_ACCOUNT_RELATION_WARNING)
+
+    return errors, warnings
 
 
 def prepare_registration(payload: dict) -> dict:
@@ -103,6 +252,7 @@ def prepare_registration(payload: dict) -> dict:
         return _blocked_response(["候補メタ情報がありません。"])
 
     errors: list[str] = []
+    warnings: list[str] = []
     editable_row_count = candidate_meta.get("editable_row_count", 1)
     if editable_row_count != 1:
         if editable_row_count == 0:
@@ -123,13 +273,12 @@ def prepare_registration(payload: dict) -> dict:
 
     debit_account_code = _text(edit_form.get("debit_account_code"))
     credit_account_code = _text(edit_form.get("credit_account_code"))
-    if not debit_account_code:
-        errors.append("借方科目コードを入力してください。")
-    if not credit_account_code:
-        errors.append("貸方科目コードを入力してください。")
+    master_errors, master_warnings = _validate_masters(edit_form)
+    errors.extend(master_errors)
+    warnings.extend(master_warnings)
 
     if errors:
-        return _blocked_response(errors)
+        return _blocked_response(errors, warnings)
 
     normalized = {field: _text(edit_form.get(field)) for field in EDIT_FORM_FIELDS}
     normalized["voucher_date"] = voucher_date
@@ -185,7 +334,7 @@ def prepare_registration(payload: dict) -> dict:
         "ok": True,
         "blocked": False,
         "errors": [],
-        "warnings": [NO_SAVE_WARNING],
+        "warnings": [NO_SAVE_WARNING, *warnings],
         "registration_id": registration_id,
         "prepared_journal": prepared_journal,
         "epson_preview_row": epson_preview_row,

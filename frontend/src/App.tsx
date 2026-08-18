@@ -740,7 +740,7 @@ export default function App() {
               <div className="edit-form-footer">
                 <div className="prepare-guidance">
                   <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
-                  <small>Phase 3-6では借貸科目をマスター選択化しました。API側の厳格な再検証は後続Phaseで実装します。</small>
+                  <small>Phase 3-8では登録準備APIでも科目・補助・部門のマスター整合性を再検証します。</small>
                   {hasMasterErrors && <strong>マスター不一致があります。有効なマスター値へ修正してください。</strong>}
                 </div>
                 <div className="edit-actions">
@@ -754,8 +754,9 @@ export default function App() {
               {prepareError && <p className="prepare-result error-message">{prepareError}</p>}
               {prepareStatusMessage && <p className="prepare-result status-message">{prepareStatusMessage}</p>}
               {prepareResponse?.blocked && <div className="prepare-result prepare-blocked" role="alert">
-                <strong>登録準備できませんでした</strong>
+                <strong>登録準備APIの検証でブロックされました</strong>
                 <ul>{prepareResponse.errors.map((reason, index) => <li key={`${reason}-${index}`}>理由: {reason}</li>)}</ul>
+                {prepareResponse.warnings.map((warning, index) => <p key={`${warning}-${index}`}>注意: {warning}</p>)}
               </div>}
               {prepareResponse?.ok && prepareResponse.warnings.length > 0 && <div className="prepare-result prepare-warning">
                 {prepareResponse.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}
