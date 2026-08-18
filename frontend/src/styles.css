@@ -124,7 +124,11 @@ dd { margin: 3px 0 0; font-size: 0.85rem; font-weight: 800; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
 .form-field-wide { grid-column: 1 / -1; }
 .basic-info-grid { grid-template-columns: minmax(130px, 0.55fr) minmax(130px, 0.55fr) minmax(240px, 1.9fr); }
-.basic-info-grid .form-field-wide { grid-column: auto; }
+.basic-info-grid .form-field-wide { grid-column: span 2; }
+.voucher-date-field { display: grid; grid-column: 1 / -1; gap: 6px; }
+.voucher-date-title { color: #43545c; font-size: 0.8rem; font-weight: 700; }
+.voucher-date-controls { display: grid; grid-template-columns: minmax(150px, 0.9fr) minmax(88px, 0.45fr) minmax(170px, 1fr); gap: 10px; }
+.voucher-date-controls select { font-variant-numeric: tabular-nums; }
 .debit-credit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .side-section { border-top-width: 3px; }
 .side-section.debit { border-top-color: #2874a6; }
@@ -233,6 +237,8 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   .candidate-list { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr 1fr; }
   .basic-info-grid { grid-template-columns: 1fr 1fr; }
+  .voucher-date-controls { grid-template-columns: 1fr 0.65fr; }
+  .voucher-date-controls label:last-child { grid-column: 1 / -1; }
   .amount-summary-grid { grid-template-columns: 1fr; }
   .basic-info-grid .form-field-wide { grid-column: 1 / -1; }
   .side-form-grid { grid-template-columns: 1fr; }

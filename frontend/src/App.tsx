@@ -35,7 +35,7 @@ type MasterCheckMessage = {
 };
 
 const basicFields: EditFormField[] = [
-  { key: "voucherDate", label: "伝票日付" }, { key: "voucherNo", label: "証番号" },
+  { key: "voucherNo", label: "証番号" },
   { key: "voucherSummary", label: "伝票摘要", wide: true },
 ];
 const debitFields: EditFormField[] = [
@@ -62,11 +62,66 @@ function getString(row: Record<string, unknown>, key: string): string {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+type VoucherDateParts = {
+  year: number;
+  month: number;
+  day: number;
+};
+
+function getDaysInMonth(year: number, month: number): number {
+  const monthDays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month !== 2) return monthDays[month - 1] ?? 0;
+  const isLeapYear = year % 400 === 0 || (year % 4 === 0 && year % 100 !== 0);
+  return isLeapYear ? 29 : 28;
+}
+
+function parseVoucherDate(value: string): VoucherDateParts | null {
+  const trimmed = value.trim();
+  const compact = /^\d{8}$/.test(trimmed)
+    ? trimmed
+    : /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed)?.slice(1).join("");
+  if (!compact) return null;
+
+  const year = Number(compact.slice(0, 4));
+  const month = Number(compact.slice(4, 6));
+  const day = Number(compact.slice(6, 8));
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > getDaysInMonth(year, month)) return null;
+  return { year, month, day };
+}
+
+function formatVoucherDate({ year, month, day }: VoucherDateParts): string {
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function normalizeVoucherDate(value: string): string {
+  const parts = parseVoucherDate(value);
+  return parts ? formatVoucherDate(parts) : "";
+}
+
+function changeVoucherMonth(value: string, yearMonth: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(yearMonth);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (year < 1 || month < 1 || month > 12) return "";
+
+  const current = parseVoucherDate(value);
+  const day = Math.min(current?.day ?? 1, getDaysInMonth(year, month));
+  return formatVoucherDate({ year, month, day });
+}
+
+function changeVoucherDay(value: string, dayValue: string): string {
+  const current = parseVoucherDate(value);
+  const day = Number(dayValue);
+  if (!current || !Number.isInteger(day) || day < 1 || day > getDaysInMonth(current.year, current.month)) return value;
+  return formatVoucherDate({ ...current, day });
+}
+
 function buildEditFormFromRow(row: Record<string, unknown>): JournalEditForm {
   const debitAmount = getString(row, "借方金額");
   const creditAmount = getString(row, "貸方金額");
   return {
-    voucherDate: getString(row, "伝票日付"), voucherNo: getString(row, "証番号"),
+    voucherDate: normalizeVoucherDate(getString(row, "伝票日付")), voucherNo: getString(row, "証番号"),
     voucherSummary: getString(row, "伝票摘要"), debitAccountCode: getString(row, "借方科目"),
     debitAccountName: getString(row, "借方科目名"), debitSubCode: getString(row, "借方補助"),
     debitSubName: getString(row, "借方補助科目名"), debitDeptCode: getString(row, "借方部門"),
@@ -327,6 +382,42 @@ function FormSection({ title, fields, editForm, initialEditForm, onChange, child
       })}
     </div></fieldset>
   );
+}
+
+function VoucherDateField({ value, changed, onChange }: {
+  value: string;
+  changed: boolean;
+  onChange: (value: string) => void;
+}) {
+  const parts = parseVoucherDate(value);
+  const yearMonth = parts
+    ? `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}`
+    : "";
+  const availableDays = parts ? getDaysInMonth(parts.year, parts.month) : 0;
+  const controlClassName = changed ? "changed-field" : undefined;
+
+  return <div className={`voucher-date-field${changed ? " field-changed" : ""}`}>
+    <span className="voucher-date-title">伝票日付</span>
+    <div className="voucher-date-controls">
+      <label>年月
+        <input type="month" className={controlClassName} value={yearMonth}
+          onChange={(event) => onChange(changeVoucherMonth(value, event.target.value))} />
+      </label>
+      <label>日
+        <select className={controlClassName} value={parts ? String(parts.day) : ""}
+          onChange={(event) => onChange(changeVoucherDay(value, event.target.value))} disabled={!parts}>
+          {!parts && <option value="">-</option>}
+          {Array.from({ length: availableDays }, (_, index) => index + 1).map((day) => (
+            <option value={day} key={day}>{day}日</option>
+          ))}
+        </select>
+      </label>
+      <label>カレンダー
+        <input type="date" className={controlClassName} value={parts ? formatVoucherDate(parts) : ""}
+          onChange={(event) => onChange(normalizeVoucherDate(event.target.value))} />
+      </label>
+    </div>
+  </div>;
 }
 
 function AccountMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
@@ -630,8 +721,8 @@ export default function App() {
     <main className="app-shell">
       <header className="page-header">
         <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 3-6 借貸科目選択</h1>
-        <p>借方・貸方科目をマスターから選択し、コードと名称を連動更新します。補助・部門は従来どおりで、保存やDB登録はまだ行いません。</p>
+        <h1>journal-ai 正式UI Phase 3-10 伝票日付入力</h1>
+        <p>伝票日付は年月・日・カレンダーで効率よく編集できます。保存やDB登録はまだ行いません。</p>
       </header>
 
       <div className="split-layout">
@@ -734,7 +825,11 @@ export default function App() {
             </section>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
               <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
-                gridClassName="basic-info-grid" />
+                gridClassName="basic-info-grid">
+                <VoucherDateField value={editForm.voucherDate}
+                  changed={isFieldChanged("voucherDate", editForm, initialEditForm)}
+                  onChange={(value) => updateEditForm("voucherDate", value)} />
+              </FormSection>
               <div className="debit-credit-grid">
                 <FormSection title="借方" fields={debitFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section debit" gridClassName="side-form-grid">
@@ -765,7 +860,7 @@ export default function App() {
               <div className="edit-form-footer">
                 <div className="prepare-guidance">
                   <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
-                  <small>Phase 3-8では登録準備APIでも科目・補助・部門のマスター整合性を再検証します。</small>
+                  <small>Phase 3-10では伝票日付をYYYY-MM-DD形式で登録準備APIへ送信します。</small>
                   {hasMasterErrors && <strong>マスター不一致があります。有効なマスター値へ修正してください。</strong>}
                 </div>
                 <div className="edit-actions">
