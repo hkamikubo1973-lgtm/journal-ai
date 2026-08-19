@@ -382,10 +382,17 @@ function CandidateCard({ candidate, selected, onSelect }: {
     <article className={`candidate-card clickable${selected ? " selected" : ""}`}
       aria-current={selected ? "true" : undefined} onClick={() => onSelect(candidate)}>
       <div className="candidate-card-heading">
-        <h3>候補{candidate.rank} <span>/ Score {candidate.score}</span></h3>
+        <div className="candidate-title-group">
+          <h3>候補{candidate.rank} <span>Score {candidate.score}</span></h3>
+          <div className="candidate-alert-badges">
+            {candidate.has_fukugo && <span>資金複合</span>}
+            {candidate.has_sundry && <span>諸口</span>}
+            {candidate.contains_fukugo_or_sundry && !candidate.has_fukugo && !candidate.has_sundry && <span>資金複合・諸口を含む</span>}
+            {candidate.is_complex && <span>複合仕訳</span>}
+          </div>
+        </div>
         {selected && <span className="selected-badge">選択中</span>}
       </div>
-      <p className="pattern-key"><span>pattern_key:</span> {candidate.pattern_key.join(" / ") || "-"}</p>
       <p className="candidate-journal-line">
         <strong>{journal.debit}</strong>
         <span aria-hidden="true">→</span>
@@ -393,22 +400,49 @@ function CandidateCard({ candidate, selected, onSelect }: {
         <b>{journal.amount}</b>
       </p>
       <p className="candidate-summary-line" title={journal.summary}>{journal.summary}</p>
-      <dl className="candidate-facts">
-        <div><dt>source / edit / block</dt><dd>{candidate.source_rows.length} / {candidate.editable_rows.length} / {candidate.block_rows.length}</dd></div>
-        <div><dt>資金複合</dt><dd>{candidate.has_fukugo ? "あり" : "なし"}</dd></div>
-        <div><dt>諸口</dt><dd>{candidate.has_sundry ? "あり" : "なし"}</dd></div>
-      </dl>
-      {candidate.search_reason.length > 0 && (
-        <div className="search-reasons"><span>検索理由</span><ul>
-          {candidate.search_reason.slice(0, 2).map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}
-        </ul></div>
-      )}
-      <button className="candidate-select-button" type="button" onClick={(event) => {
-        event.stopPropagation();
-        onSelect(candidate);
-      }}>
-        {selected ? "選択中の候補" : "この候補を選択"}
-      </button>
+      <div className="candidate-card-actions">
+        <div className="candidate-primary-reasons">
+          <span>主な検索理由</span>
+          <p title={candidate.search_reason.join(" / ")}>{candidate.search_reason.slice(0, 2).join("・") || "-"}</p>
+        </div>
+        <button className="candidate-select-button" type="button" onClick={(event) => {
+          event.stopPropagation();
+          onSelect(candidate);
+        }}>
+          {selected ? "選択中の候補" : "この候補を選択"}
+        </button>
+      </div>
+      <details className="candidate-details" onClick={(event) => event.stopPropagation()}>
+        <summary>詳細を表示</summary>
+        <p className="pattern-key"><span>pattern_key:</span> {candidate.pattern_key.join(" / ") || "-"}</p>
+        <dl className="candidate-facts">
+          <div><dt>pattern_rank</dt><dd>{candidate.pattern_rank ?? "-"}</dd></div>
+          <div><dt>source / edit / block</dt><dd>{candidate.source_rows.length} / {candidate.editable_rows.length} / {candidate.block_rows.length}</dd></div>
+          <div><dt>matched_amount_row</dt><dd>{candidate.matched_amount_row ? "あり" : "なし"}</dd></div>
+          <div><dt>has_fukugo</dt><dd>{candidate.has_fukugo ? "true" : "false"}</dd></div>
+          <div><dt>has_sundry</dt><dd>{candidate.has_sundry ? "true" : "false"}</dd></div>
+          <div><dt>contains_fukugo_or_sundry</dt><dd>{candidate.contains_fukugo_or_sundry ? "true" : "false"}</dd></div>
+          <div><dt>show_block_rows</dt><dd>{candidate.show_block_rows ? "true" : "false"}</dd></div>
+          <div><dt>is_complex</dt><dd>{candidate.is_complex ? "true" : "false"}</dd></div>
+        </dl>
+        <div className="search-reasons"><span>検索理由（全件）</span>
+          {candidate.search_reason.length > 0 ? <ul>
+            {candidate.search_reason.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}
+          </ul> : <p>-</p>}
+        </div>
+        <details className="candidate-json-details"><summary>matched_amount_row</summary>
+          <pre>{JSON.stringify(candidate.matched_amount_row, null, 2)}</pre>
+        </details>
+        <details className="candidate-json-details"><summary>source_rows ({candidate.source_rows.length})</summary>
+          <pre>{JSON.stringify(candidate.source_rows, null, 2)}</pre>
+        </details>
+        <details className="candidate-json-details"><summary>editable_rows ({candidate.editable_rows.length})</summary>
+          <pre>{JSON.stringify(candidate.editable_rows, null, 2)}</pre>
+        </details>
+        <details className="candidate-json-details"><summary>block_rows ({candidate.block_rows.length})</summary>
+          <pre>{JSON.stringify(candidate.block_rows, null, 2)}</pre>
+        </details>
+      </details>
     </article>
   );
 }
