@@ -13,11 +13,11 @@ from journal_master_service import load_journal_masters
 
 
 NO_SAVE_WARNING = "この画面ではまだ保存・DB登録は行っていません。"
-SUB_ACCOUNT_RELATION_WARNING = (
-    "補助マスターには親科目コードがないため、"
-    "補助と科目の親子関係は未検証です。"
-)
 MASTER_LOAD_ERROR = "マスターデータを読み込めないため、登録準備できません。"
+SUB_ACCOUNT_RELATION_LOAD_ERROR = (
+    "補助科目親子関係マスターを確認できないため、"
+    "補助付き仕訳を登録準備できません。"
+)
 COMPLEX_JOURNAL_ERROR = (
     "この候補は資金複合または諸口を含むため、"
     "Phase 3-1の通常1行仕訳登録準備では未対応です。"
@@ -178,19 +178,92 @@ def _validate_optional_master_pair(
     return matches
 
 
+def _sub_account_relations_by_key(
+    masters: dict[str, Any],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], bool]:
+    relations = masters.get("sub_account_relations")
+    diagnostics = masters.get("diagnostics")
+    if not isinstance(relations, list) or not isinstance(diagnostics, dict):
+        return {}, False
+    if (
+        diagnostics.get("duplicate_sub_account_relation_keys")
+        or diagnostics.get("invalid_sub_account_relation_rows")
+    ):
+        return {}, False
+
+    relations_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for relation in relations:
+        if not isinstance(relation, dict):
+            return {}, False
+        account_code = _text(relation.get("account_code"))
+        sub_code = _text(relation.get("sub_code"))
+        sub_name = relation.get("sub_name")
+        if not account_code or not sub_code or not _text(sub_name):
+            return {}, False
+        key = (account_code, sub_code)
+        if key in relations_by_key:
+            return {}, False
+        relations_by_key[key] = relation
+
+    return relations_by_key, bool(relations_by_key)
+
+
+def _validate_sub_account(
+    *,
+    side: str,
+    account_code: str,
+    sub_code: str,
+    sub_name: str,
+    relations_by_key: dict[tuple[str, str], dict[str, Any]],
+    relations_usable: bool,
+    errors: list[str],
+    warnings: list[str],
+    normalized_sub_names: dict[str, str],
+    prefix: str,
+) -> None:
+    if not sub_code and not sub_name:
+        return
+    if sub_code and not sub_name:
+        errors.append(f"{side}補助コードが入力されていますが、補助名が空です。")
+        return
+    if sub_name and not sub_code:
+        errors.append(f"{side}補助名が入力されていますが、補助コードが空です。")
+        return
+    if not relations_usable:
+        if SUB_ACCOUNT_RELATION_LOAD_ERROR not in errors:
+            errors.append(SUB_ACCOUNT_RELATION_LOAD_ERROR)
+        return
+
+    relation = relations_by_key.get((account_code, sub_code))
+    if relation is None:
+        errors.append(
+            f"{side}科目 {account_code} では補助コード {sub_code} は使用できません。"
+        )
+        return
+
+    current_name = str(relation["sub_name"])
+    normalized_sub_names[f"{prefix}_sub_name"] = current_name
+    if _text(current_name) != sub_name:
+        warnings.append(
+            f"{side}補助名称を現在のマスターに合わせて"
+            f"「{sub_name}」から「{current_name}」へ更新しました。"
+        )
+
+
 def _validate_masters(
     edit_form: dict[str, Any],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], dict[str, str]]:
     try:
         masters = load_journal_masters()
     except Exception:
-        return [MASTER_LOAD_ERROR], []
+        return [MASTER_LOAD_ERROR], [], {}
 
     errors: list[str] = []
     warnings: list[str] = []
+    normalized_sub_names: dict[str, str] = {}
     accounts_by_code = _items_by_code(masters.get("accounts", []))
-    sub_accounts_by_code = _items_by_code(masters.get("sub_accounts", []))
     departments_by_code = _items_by_code(masters.get("departments", []))
+    relations_by_key, relations_usable = _sub_account_relations_by_key(masters)
 
     for side, prefix in (("借方", "debit"), ("貸方", "credit")):
         _validate_account(
@@ -203,20 +276,18 @@ def _validate_masters(
 
         sub_code = _text(edit_form.get(f"{prefix}_sub_code"))
         sub_name = _text(edit_form.get(f"{prefix}_sub_name"))
-        sub_matches = _validate_optional_master_pair(
+        _validate_sub_account(
             side=side,
-            item_label="補助",
-            code=sub_code,
-            name=sub_name,
-            items_by_code=sub_accounts_by_code,
+            account_code=_text(edit_form.get(f"{prefix}_account_code")),
+            sub_code=sub_code,
+            sub_name=sub_name,
+            relations_by_key=relations_by_key,
+            relations_usable=relations_usable,
             errors=errors,
+            warnings=warnings,
+            normalized_sub_names=normalized_sub_names,
+            prefix=prefix,
         )
-        sub_names = {_text(item.get("name")) for item in sub_matches}
-        if len(sub_names) > 1:
-            warnings.append(
-                f"{side}補助コード {sub_code} は補助マスターで"
-                "複数の名称に使用されています。"
-            )
 
         _validate_optional_master_pair(
             side=side,
@@ -227,18 +298,7 @@ def _validate_masters(
             errors=errors,
         )
 
-    if any(
-        _text(edit_form.get(field))
-        for field in (
-            "debit_sub_code",
-            "debit_sub_name",
-            "credit_sub_code",
-            "credit_sub_name",
-        )
-    ):
-        warnings.append(SUB_ACCOUNT_RELATION_WARNING)
-
-    return errors, warnings
+    return errors, warnings, normalized_sub_names
 
 
 def prepare_registration(payload: dict) -> dict:
@@ -273,7 +333,9 @@ def prepare_registration(payload: dict) -> dict:
 
     debit_account_code = _text(edit_form.get("debit_account_code"))
     credit_account_code = _text(edit_form.get("credit_account_code"))
-    master_errors, master_warnings = _validate_masters(edit_form)
+    master_errors, master_warnings, normalized_sub_names = _validate_masters(
+        edit_form
+    )
     errors.extend(master_errors)
     warnings.extend(master_warnings)
 
@@ -281,6 +343,7 @@ def prepare_registration(payload: dict) -> dict:
         return _blocked_response(errors, warnings)
 
     normalized = {field: _text(edit_form.get(field)) for field in EDIT_FORM_FIELDS}
+    normalized.update(normalized_sub_names)
     normalized["voucher_date"] = voucher_date
     normalized["debit_account_code"] = debit_account_code
     normalized["credit_account_code"] = credit_account_code

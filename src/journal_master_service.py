@@ -226,12 +226,23 @@ def load_journal_masters() -> dict:
     accounts = _build_accounts(account_rows)
     sub_accounts = _build_simple_items(sub_account_rows)
     departments = _build_simple_items(department_rows)
-    (
-        sub_account_relations,
-        duplicate_sub_account_relation_keys,
-        invalid_sub_account_relation_rows,
-        sub_account_relation_warnings,
-    ) = _read_sub_account_relations(SUB_ACCOUNT_RELATION_MASTER_PATH)
+    try:
+        (
+            sub_account_relations,
+            duplicate_sub_account_relation_keys,
+            invalid_sub_account_relation_rows,
+            sub_account_relation_warnings,
+        ) = _read_sub_account_relations(SUB_ACCOUNT_RELATION_MASTER_PATH)
+    except (OSError, UnicodeError, csv.Error) as error:
+        sub_account_relations = []
+        duplicate_sub_account_relation_keys = []
+        invalid_sub_account_relation_rows = [{
+            "row_number": 0,
+            "reason": f"読み込めません: {error}",
+        }]
+        sub_account_relation_warnings = [
+            f"{SUB_ACCOUNT_RELATION_MASTER_PATH.name} を読み込めません。"
+        ]
     warnings = [SUB_ACCOUNT_RELATION_WARNING]
     warnings.extend(sub_account_relation_warnings)
 
