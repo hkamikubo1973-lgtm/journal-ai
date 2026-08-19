@@ -153,6 +153,12 @@ export type DepartmentMasterItem = {
   label: string;
 };
 
+export type SubAccountRelation = {
+  account_code: string;
+  sub_code: string;
+  sub_name: string;
+};
+
 export type JournalMastersDiagnostics = {
   account_count: number;
   selectable_account_count: number;
@@ -174,5 +180,6 @@ export type JournalMastersResponse = {
   accounts: AccountMasterItem[];
   sub_accounts: SubAccountMasterItem[];
   departments: DepartmentMasterItem[];
+  sub_account_relations: SubAccountRelation[];
   diagnostics: JournalMastersDiagnostics;
 };

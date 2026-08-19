@@ -9,6 +9,7 @@ import type {
   PrepareRegistrationRequest,
   PrepareRegistrationResponse,
   RegistrationCartItem,
+  SubAccountRelation,
 } from "./types/journal";
 
 const blockRowFields = [
@@ -38,12 +39,8 @@ const basicFields: EditFormField[] = [
   { key: "voucherNo", label: "証番号" },
   { key: "voucherSummary", label: "伝票摘要", wide: true },
 ];
-const debitFields: EditFormField[] = [
-  { key: "debitSubCode", label: "借方補助コード" }, { key: "debitSubName", label: "借方補助名" },
-];
-const creditFields: EditFormField[] = [
-  { key: "creditSubCode", label: "貸方補助コード" }, { key: "creditSubName", label: "貸方補助名" },
-];
+const debitFields: EditFormField[] = [];
+const creditFields: EditFormField[] = [];
 const amountSummaryFields: EditFormField[] = [
   { key: "amount", label: "金額", amount: true },
   { key: "summary", label: "摘要", wide: true },
@@ -216,31 +213,43 @@ function checkEditFormMasters(
     if (!hasWarning) messages.push({ level: "ok", message: `${side}科目 ${code}（${name}）はマスターに存在します。` });
   };
 
-  const checkSubAccount = (side: "借方" | "貸方", code: string, name: string) => {
-    if (!code.trim()) {
+  const checkSubAccount = (
+    side: "借方" | "貸方",
+    accountCode: string,
+    code: string,
+    name: string,
+  ) => {
+    const normalizedCode = code.trim();
+    const normalizedName = name.trim();
+    if (!normalizedCode && !normalizedName) {
       messages.push({ level: "ok", message: `${side}補助は未指定です。` });
       return;
     }
-    const matches = masters.sub_accounts.filter((subAccount) => subAccount.code === code.trim());
-    if (matches.length === 0) {
-      messages.push({ level: "error", message: `${side}補助コード ${code} はマスターに存在しません。` });
+    if (!normalizedCode || !normalizedName) {
+      messages.push({ level: "error", message: `${side}補助はコードと名称を一組で指定してください。` });
       return;
     }
-    const nameMatches = matches.some((subAccount) => subAccount.name === name.trim());
-    if (nameMatches) {
-      messages.push({ level: "ok", message: `${side}補助コード ${code}（${name}）はマスターに存在します。` });
-    } else {
+    const relation = masters.sub_account_relations.find((item) =>
+      item.account_code === accountCode.trim() && item.sub_code === normalizedCode
+    );
+    if (!relation) {
       messages.push({
         level: "warning",
-        message: `${side}補助コード ${code} は存在しますが、フォーム名称との対応は確定できません。`,
+        message: `${side}補助 ${normalizedCode}（${normalizedName}）は現在の補助親子関係マスターに存在しません。補助を選び直してください。`,
       });
+      return;
     }
-    if (matches.length > 1) {
+    if (relation.sub_name !== normalizedName) {
       messages.push({
         level: "warning",
-        message: `${side}補助コード ${code} には複数の名称があるため、Phase 3-5では存在確認のみです。`,
+        message: `${side}補助 ${normalizedCode} は現在「${relation.sub_name}」です。登録準備時に現在名称へ更新されます。`,
       });
+      return;
     }
+    messages.push({
+      level: "ok",
+      message: `${side}科目 ${accountCode.trim()} で補助 ${normalizedCode}（${relation.sub_name}）を使用できます。`,
+    });
   };
 
   const checkDepartment = (side: "借方" | "貸方", code: string, name: string) => {
@@ -262,14 +271,8 @@ function checkEditFormMasters(
 
   checkAccount("借方", form.debitAccountCode, form.debitAccountName);
   checkAccount("貸方", form.creditAccountCode, form.creditAccountName);
-  checkSubAccount("借方", form.debitSubCode, form.debitSubName);
-  checkSubAccount("貸方", form.creditSubCode, form.creditSubName);
-  if (form.debitSubCode.trim() || form.creditSubCode.trim()) {
-    messages.push({
-      level: "warning",
-      message: "補助マスターには親科目コードがないため、科目との関係は確認できません。",
-    });
-  }
+  checkSubAccount("借方", form.debitAccountCode, form.debitSubCode, form.debitSubName);
+  checkSubAccount("貸方", form.creditAccountCode, form.creditSubCode, form.creditSubName);
   checkDepartment("借方", form.debitDeptCode, form.debitDeptName);
   checkDepartment("貸方", form.creditDeptCode, form.creditDeptName);
   return messages;
@@ -281,6 +284,43 @@ function findAccountByCode(masters: JournalMastersResponse | null, code: string)
 
 function findDepartmentByCode(masters: JournalMastersResponse | null, code: string) {
   return masters?.departments.find((department) => department.code === code.trim());
+}
+
+function findSubAccountRelation(
+  masters: JournalMastersResponse | null,
+  accountCode: string,
+  subCode: string,
+) {
+  return masters?.sub_account_relations.find((relation) =>
+    relation.account_code === accountCode.trim() && relation.sub_code === subCode.trim()
+  );
+}
+
+function getSubAccountRelations(
+  masters: JournalMastersResponse | null,
+  accountCode: string,
+) {
+  return masters?.sub_account_relations.filter((relation) =>
+    relation.account_code === accountCode.trim()
+  ) ?? [];
+}
+
+function changeSubAccountSelection(
+  form: JournalEditForm,
+  side: "debit" | "credit",
+  relation: SubAccountRelation | undefined,
+): JournalEditForm {
+  return side === "debit"
+    ? {
+      ...form,
+      debitSubCode: relation?.sub_code ?? "",
+      debitSubName: relation?.sub_name ?? "",
+    }
+    : {
+      ...form,
+      creditSubCode: relation?.sub_code ?? "",
+      creditSubName: relation?.sub_name ?? "",
+    };
 }
 
 function changeDepartmentSelection(
@@ -525,6 +565,58 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
   </div>;
 }
 
+function SubAccountMasterField({ side, accountCode, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
+  side: "借方" | "貸方";
+  accountCode: string;
+  code: string;
+  name: string;
+  masters: JournalMastersResponse | null;
+  mastersLoading: boolean;
+  mastersError: string | null;
+  changed: boolean;
+  onChange: (code: string) => void;
+}) {
+  const relations = getSubAccountRelations(masters, accountCode);
+  const currentRelation = findSubAccountRelation(masters, accountCode, code);
+  const hasCurrentValue = Boolean(code.trim() || name.trim());
+  const currentNameMatches = Boolean(currentRelation && currentRelation.sub_name === name.trim());
+  const selectValue = !hasCurrentValue
+    ? ""
+    : currentRelation
+      ? currentRelation.sub_code
+      : "__current_invalid__";
+  const disabled = !masters || mastersLoading || Boolean(mastersError);
+
+  return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
+    <label>{side}補助
+      <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+        onChange={(event) => onChange(event.target.value)} disabled={disabled}>
+        <option value="">補助なし</option>
+        {hasCurrentValue && !currentRelation && <option value="__current_invalid__" disabled>
+          現在値：{code || "コードなし"}　{name || "名称なし"}（親子関係マスター不一致）
+        </option>}
+        {relations.map((relation) => <option value={relation.sub_code}
+          key={`${relation.account_code}-${relation.sub_code}`}>
+          {relation.sub_code}　{relation.sub_name}
+        </option>)}
+      </select>
+    </label>
+    <p className="master-select-note">
+      {mastersError
+        ? "マスター取得エラーのため補助選択を利用できません。"
+        : !masters || mastersLoading
+          ? "マスター読み込み中は現在値を保持します。"
+          : "選択中の科目で使用できる補助だけを表示します。"}
+    </p>
+    {masters && hasCurrentValue && !currentRelation && <p className="unselectable-account-warning">
+      現在の{side}補助 {code || "（コードなし）"} {name || "（名称なし）"} は現在の補助親子関係マスターに存在しません。補助を選び直してください。
+    </p>}
+    {masters && currentRelation && !currentNameMatches && <p className="unselectable-account-warning">
+      現在の{side}補助名称「{name}」は旧名称です。選択肢では現在名称「{currentRelation.sub_name}」を表示し、登録準備時に更新します。
+    </p>}
+  </div>;
+}
+
 function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
   return (
     <section className="block-panel">
@@ -672,6 +764,19 @@ export default function App() {
     if (code && !department) return;
 
     setEditForm(changeDepartmentSelection(editForm, side, department));
+    setPrepareResponse(null);
+    setPrepareError(null);
+    setPrepareStatusMessage(null);
+  }
+
+  function updateSubAccountSelection(side: "debit" | "credit", code: string) {
+    if (!editForm) return;
+    const accountCode = side === "debit" ? editForm.debitAccountCode : editForm.creditAccountCode;
+    const relation = code ? findSubAccountRelation(masters, accountCode, code) : undefined;
+    if (code && !relation) return;
+
+    setEditForm(changeSubAccountSelection(editForm, side, relation));
+    setSubClearWarning(null);
     setPrepareResponse(null);
     setPrepareError(null);
     setPrepareStatusMessage(null);
@@ -911,6 +1016,11 @@ export default function App() {
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitAccountCode", editForm, initialEditForm) || isFieldChanged("debitAccountName", editForm, initialEditForm)}
                     onChange={(code) => updateAccountSelection("debit", code)} />
+                  <SubAccountMasterField side="借方" accountCode={editForm.debitAccountCode}
+                    code={editForm.debitSubCode} name={editForm.debitSubName}
+                    masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
+                    changed={isFieldChanged("debitSubCode", editForm, initialEditForm) || isFieldChanged("debitSubName", editForm, initialEditForm)}
+                    onChange={(code) => updateSubAccountSelection("debit", code)} />
                   <DepartmentMasterField side="借方" code={editForm.debitDeptCode} name={editForm.debitDeptName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitDeptCode", editForm, initialEditForm) || isFieldChanged("debitDeptName", editForm, initialEditForm)}
@@ -922,6 +1032,11 @@ export default function App() {
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditAccountCode", editForm, initialEditForm) || isFieldChanged("creditAccountName", editForm, initialEditForm)}
                     onChange={(code) => updateAccountSelection("credit", code)} />
+                  <SubAccountMasterField side="貸方" accountCode={editForm.creditAccountCode}
+                    code={editForm.creditSubCode} name={editForm.creditSubName}
+                    masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
+                    changed={isFieldChanged("creditSubCode", editForm, initialEditForm) || isFieldChanged("creditSubName", editForm, initialEditForm)}
+                    onChange={(code) => updateSubAccountSelection("credit", code)} />
                   <DepartmentMasterField side="貸方" code={editForm.creditDeptCode} name={editForm.creditDeptName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditDeptCode", editForm, initialEditForm) || isFieldChanged("creditDeptName", editForm, initialEditForm)}
