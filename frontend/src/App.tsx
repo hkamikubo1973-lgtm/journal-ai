@@ -432,7 +432,7 @@ function FormSection({ title, fields, editForm, initialEditForm, onChange, child
           <label className={fieldClassName || undefined} key={field.key}>{field.label}
             {field.wide ? (
               <textarea className={controlClassName} value={editForm[field.key]}
-                onChange={(event) => onChange(field.key, event.target.value)} rows={3} />
+                onChange={(event) => onChange(field.key, event.target.value)} rows={1} />
             ) : (
               <input className={controlClassName || undefined} inputMode={field.amount ? "numeric" : undefined}
                 value={editForm[field.key]} onChange={(event) => onChange(field.key, event.target.value)} />
@@ -491,28 +491,30 @@ function AccountMasterField({ side, code, name, masters, mastersLoading, masters
   onChange: (code: string) => void;
 }) {
   const currentAccount = findAccountByCode(masters, code);
-  const selectValue = currentAccount?.selectable ? currentAccount.code : "";
+  const hasCurrentValue = Boolean(code.trim() || name.trim());
+  const selectValue = !hasCurrentValue ? "" : currentAccount?.selectable ? currentAccount.code : "__current_invalid__";
   const selectableAccounts = masters?.accounts.filter((account) => account.selectable) ?? [];
   const note = mastersError
     ? "マスター取得エラーのため、科目選択を利用できません。"
     : !masters || mastersLoading
       ? "マスター未取得のため科目選択は利用できません。"
-      : "科目はマスターから選択します。コードと科目名は連動します。";
+      : null;
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
-    <label>{side}科目
+    <label>科目
       <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+        title="科目コードと科目名は連動します"
         onChange={(event) => onChange(event.target.value)} disabled={!masters || mastersLoading || Boolean(mastersError)}>
         <option value="" disabled>{mastersLoading ? "マスター読み込み中…" : "科目を選択してください"}</option>
+        {hasCurrentValue && (!currentAccount || !currentAccount.selectable) && <option value="__current_invalid__" disabled>
+          現在値：{code || "コードなし"}　{name || "名称なし"}（通常選択対象外）
+        </option>}
         {selectableAccounts.map((account) => <option value={account.code} key={account.code}>
           {account.code}　{account.name}
         </option>)}
       </select>
     </label>
-    <div className={`master-linked-name${changed ? " changed-field" : ""}`}>
-      <span>科目名</span><strong>{name || "未選択"}</strong>
-    </div>
-    <p className="master-select-note">{note}</p>
+    {note && <p className="master-select-note">{note}</p>}
     {masters && code.trim() && !currentAccount && <p className="unselectable-account-warning">
       現在の{side}科目 {code} {name} はマスターに存在しません。有効な科目を選び直してください。
     </p>}
@@ -540,11 +542,12 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
     ? "マスター取得エラーのため、部門選択を利用できません。"
     : !masters || mastersLoading
       ? "マスター未取得のため部門選択は利用できません。"
-      : "部門はマスターから選択します。コードと部門名は連動します。";
+      : null;
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
-    <label>{side}部門
+    <label>部門
       <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+        title="部門コードと部門名は連動します"
         onChange={(event) => onChange(event.target.value)} disabled={!masters || mastersLoading || Boolean(mastersError)}>
         <option value="">部門なし</option>
         {hasCurrentValue && !currentValueMatches && <option value="__current_invalid__" disabled>
@@ -555,10 +558,7 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
         </option>)}
       </select>
     </label>
-    <div className={`master-linked-name${changed ? " changed-field" : ""}`}>
-      <span>部門名</span><strong>{name || "部門なし"}</strong>
-    </div>
-    <p className="master-select-note">{note}</p>
+    {note && <p className="master-select-note">{note}</p>}
     {masters && hasCurrentValue && !currentValueMatches && <p className="unselectable-account-warning">
       現在の{side}部門 {code || "（コードなし）"} {name || "（名称なし）"} は部門マスターと一致しません。有効な部門を選び直してください。
     </p>}
@@ -588,8 +588,9 @@ function SubAccountMasterField({ side, accountCode, code, name, masters, masters
   const disabled = !masters || mastersLoading || Boolean(mastersError);
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
-    <label>{side}補助
+    <label>補助
       <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+        title="選択中の科目で使用できる補助を表示します"
         onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         <option value="">補助なし</option>
         {hasCurrentValue && !currentRelation && <option value="__current_invalid__" disabled>
@@ -601,13 +602,9 @@ function SubAccountMasterField({ side, accountCode, code, name, masters, masters
         </option>)}
       </select>
     </label>
-    <p className="master-select-note">
-      {mastersError
-        ? "マスター取得エラーのため補助選択を利用できません。"
-        : !masters || mastersLoading
-          ? "マスター読み込み中は現在値を保持します。"
-          : "選択中の科目で使用できる補助だけを表示します。"}
-    </p>
+    {mastersError
+      ? <p className="master-select-note">マスター取得エラーのため補助選択を利用できません。</p>
+      : (!masters || mastersLoading) && <p className="master-select-note">マスター読み込み中は現在値を保持します。</p>}
     {masters && hasCurrentValue && !currentRelation && <p className="unselectable-account-warning">
       現在の{side}補助 {code || "（コードなし）"} {name || "（名称なし）"} は現在の補助親子関係マスターに存在しません。補助を選び直してください。
     </p>}
@@ -963,7 +960,6 @@ export default function App() {
                 <strong>選択中：候補{selectedCandidate.rank} / Score {selectedCandidate.score}</strong>
                 <span className="unregistered-badge">状態：確認用・未登録</span>
               </div>
-              <p>この画面ではまだ登録・CSV出力は行いません。</p>
               {selectedSummary && <div className="selection-summary">
                 <strong>{selectedSummary.debit} <span aria-hidden="true">→</span> {selectedSummary.credit}</strong>
                 <b>{selectedSummary.amount}</b>
@@ -972,8 +968,7 @@ export default function App() {
               <small>pattern_key: {selectedCandidate.pattern_key.join(" / ") || "-"}</small>
             </div>
             <div className={`edit-status ${editFormChanged ? "changed" : "unchanged"}`}>
-              <strong>{editFormChanged ? "編集状態：画面上で変更あり（未保存）" : "編集状態：未変更"}</strong>
-              <span>変更内容は保存されません。</span>
+              <strong title="変更内容は保存されません。">{editFormChanged ? "編集状態：変更あり（未保存）" : "編集状態：未変更"}</strong>
             </div>
             {subClearWarning && <p className="notice notice-warning" role="status">{subClearWarning}</p>}
             {selectedCandidate.editable_rows.length === 0 && <p className="notice notice-error">この候補には編集用行がありません。</p>}
@@ -984,15 +979,16 @@ export default function App() {
             {sourceAmountsEqual === false && <p className="notice notice-warning">
               元データの借方金額と貸方金額が一致していません。内容を確認してください。
             </p>}
-            {editForm && <section className="master-check-panel" aria-live="polite">
-              <div className="master-check-heading">
+            {editForm && <details className="master-check-panel" aria-live="polite"
+              open={!masters || masterCheckCounts.warning > 0 || masterCheckCounts.error > 0}>
+              <summary className="master-check-heading">
                 <h3>マスター照合（確認用）</h3>
                 <div className="master-check-summary">
                   <span className="ok">OK {masterCheckCounts.ok}</span>
                   <span className="warning">警告 {masterCheckCounts.warning}</span>
                   <span className="error">エラー {masterCheckCounts.error}</span>
                 </div>
-              </div>
+              </summary>
               {!masters ? <p className={mastersError ? "master-check-unavailable error" : "master-check-unavailable"}>
                 {mastersError ? "マスターを取得できないため照合できません。" : "マスターを読み込んでいます。"}
               </p> : <ul className="master-check-list">
@@ -1001,14 +997,10 @@ export default function App() {
                   {message.message}
                 </li>)}
               </ul>}
-            </section>}
+            </details>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
               <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
-                gridClassName="basic-info-grid">
-                <VoucherDateField value={editForm.voucherDate}
-                  changed={isFieldChanged("voucherDate", editForm, initialEditForm)}
-                  onChange={(value) => updateEditForm("voucherDate", value)} />
-              </FormSection>
+                gridClassName="basic-info-grid" />
               <div className="debit-credit-grid">
                 <FormSection title="借方" fields={debitFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section debit" gridClassName="side-form-grid">
@@ -1043,8 +1035,12 @@ export default function App() {
                     onChange={(code) => updateDepartmentSelection("credit", code)} />
                 </FormSection>
               </div>
-              <FormSection title="金額・摘要" fields={amountSummaryFields} editForm={editForm} initialEditForm={initialEditForm}
-                onChange={updateEditForm} className="single-amount-section" gridClassName="amount-summary-grid" />
+              <FormSection title="伝票日付・金額・摘要" fields={amountSummaryFields} editForm={editForm} initialEditForm={initialEditForm}
+                onChange={updateEditForm} className="single-amount-section" gridClassName="amount-summary-grid">
+                <VoucherDateField value={editForm.voucherDate}
+                  changed={isFieldChanged("voucherDate", editForm, initialEditForm)}
+                  onChange={(value) => updateEditForm("voucherDate", value)} />
+              </FormSection>
               <div className="amount-summary-panel">
                 <strong>{editForm.amount ? `入力金額：${formatAmountWithUnit(editForm.amount)}` : "入力金額：未入力"}</strong>
                 <span>出力想定：借方金額・貸方金額へ同額反映</span>
@@ -1052,12 +1048,10 @@ export default function App() {
                 <p className={`source-amount-check ${sourceAmountsEqual === true ? "match" : sourceAmountsEqual === false ? "mismatch" : "incomplete"}`}>
                   {sourceAmountsEqual === true ? "元データの借貸金額は一致しています。" : sourceAmountsEqual === false ? "元データの借貸金額が一致していません。" : "元データの借貸金額は片側のみ、または未入力です。"}
                 </p>
-                <p className="amount-note">通常1行仕訳では、この金額を借方金額・貸方金額へ同額反映する想定です。この画面ではまだ登録・CSV出力は行いません。</p>
               </div>
               <div className="edit-form-footer">
                 <div className="prepare-guidance">
-                  <p>このボタンは登録予定データをAPIで整形するだけです。まだ保存・DB登録・CSV出力は行いません。</p>
-                  <small>Phase 3-11では借方・貸方部門をマスターから選択し、既存形式で登録準備APIへ送信します。</small>
+                  <p title="登録予定データをAPIで整形するだけで、保存・DB登録・CSV出力は行いません。">登録準備のみ（保存・出力なし）</p>
                   {hasMasterErrors && <strong>マスター不一致があります。有効なマスター値へ修正してください。</strong>}
                 </div>
                 <div className="edit-actions">
