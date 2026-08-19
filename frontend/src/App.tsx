@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { fetchJournalMasters, prepareRegistration, searchJournals } from "./api/journal";
 import type {
   JournalCandidate,
@@ -26,6 +26,7 @@ const blockRowFields = [
 type EditFormField = {
   key: keyof JournalEditForm;
   label: string;
+  tabOrder: number;
   wide?: boolean;
   amount?: boolean;
 };
@@ -36,10 +37,10 @@ type MasterCheckMessage = {
 };
 
 const commonFields: EditFormField[] = [
-  { key: "voucherNo", label: "伝票番号" },
-  { key: "voucherSummary", label: "伝票摘要", wide: true },
-  { key: "amount", label: "金額", amount: true },
-  { key: "summary", label: "摘要", wide: true },
+  { key: "voucherNo", label: "伝票番号", tabOrder: 3 },
+  { key: "voucherSummary", label: "伝票摘要", tabOrder: 4, wide: true },
+  { key: "amount", label: "金額", tabOrder: 5, amount: true },
+  { key: "summary", label: "摘要", tabOrder: 6, wide: true },
 ];
 const debitFields: EditFormField[] = [];
 const creditFields: EditFormField[] = [];
@@ -48,6 +49,41 @@ const epsonPreviewFields = [
   "伝票日付", "証番号", "借方科目", "借方科目名", "借方補助", "借方補助科目名", "借方金額",
   "貸方科目", "貸方科目名", "貸方補助", "貸方補助科目名", "貸方金額", "摘要", "伝票摘要",
 ] as const;
+
+type AppTabAttribute = "data-search-tab" | "data-candidate-tab" | "data-journal-tab" | "data-cart-tab";
+
+const appTabGroups: AppTabAttribute[] = [
+  "data-search-tab",
+  "data-candidate-tab",
+  "data-journal-tab",
+  "data-cart-tab",
+];
+
+function handleAppTabKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
+  if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return;
+
+  const controls = appTabGroups.flatMap((attribute) => {
+    const groupControls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(`[${attribute}]`))
+      .filter((element) => {
+        if (element.matches(":disabled") || element.getClientRects().length === 0) return false;
+        return window.getComputedStyle(element).visibility !== "hidden";
+      });
+
+    if (attribute === "data-search-tab" || attribute === "data-journal-tab") {
+      groupControls.sort((left, right) => Number(left.getAttribute(attribute)) - Number(right.getAttribute(attribute)));
+    }
+    return groupControls;
+  });
+
+  if (controls.length === 0) return;
+
+  event.preventDefault();
+  const currentIndex = event.target instanceof HTMLElement ? controls.indexOf(event.target) : -1;
+  const nextIndex = currentIndex < 0
+    ? event.shiftKey ? controls.length - 1 : 0
+    : (currentIndex + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+  controls[nextIndex].focus();
+}
 
 function getString(row: Record<string, unknown>, key: string): string {
   const value = row[key];
@@ -403,7 +439,7 @@ function CandidateCard({ candidate, selected, onSelect }: {
           <span>主な検索理由</span>
           <p title={candidate.search_reason.join(" / ")}>{candidate.search_reason.slice(0, 2).join("・") || "-"}</p>
         </div>
-        <button className="candidate-select-button" type="button" onClick={(event) => {
+        <button className="candidate-select-button" type="button" data-candidate-tab="" onClick={(event) => {
           event.stopPropagation();
           onSelect(candidate);
         }}>
@@ -463,10 +499,12 @@ function FormSection({ title, fields, editForm, initialEditForm, onChange, child
         return (
           <label className={fieldClassName || undefined} key={field.key}>{field.label}
             {field.wide ? (
-              <textarea className={controlClassName} value={editForm[field.key]}
+              <textarea className={controlClassName} data-journal-tab={field.tabOrder} value={editForm[field.key]}
                 onChange={(event) => onChange(field.key, event.target.value)} rows={1} />
             ) : (
-              <input className={controlClassName || undefined} inputMode={field.amount ? "numeric" : undefined}
+              <input className={controlClassName || undefined} data-journal-tab={field.tabOrder}
+                inputMode={field.amount ? "numeric" : undefined}
+                onFocus={field.amount ? (event) => event.currentTarget.select() : undefined}
                 value={editForm[field.key]} onChange={(event) => onChange(field.key, event.target.value)} />
             )}
           </label>
@@ -492,11 +530,11 @@ function VoucherDateField({ value, changed, onChange }: {
     <span className="voucher-date-title">伝票日付</span>
     <div className="voucher-date-controls">
       <label>年月
-        <input type="month" className={controlClassName} value={yearMonth}
+        <input type="month" className={controlClassName} data-journal-tab={1} value={yearMonth}
           onChange={(event) => onChange(changeVoucherMonth(value, event.target.value))} />
       </label>
       <label>日
-        <select className={controlClassName} value={parts ? String(parts.day) : ""}
+        <select className={controlClassName} data-journal-tab={2} value={parts ? String(parts.day) : ""}
           onChange={(event) => onChange(changeVoucherDay(value, event.target.value))} disabled={!parts}>
           {!parts && <option value="">-</option>}
           {Array.from({ length: availableDays }, (_, index) => index + 1).map((day) => (
@@ -508,7 +546,7 @@ function VoucherDateField({ value, changed, onChange }: {
   </div>;
 }
 
-function AccountMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
+function AccountMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, tabOrder, onChange }: {
   side: "借方" | "貸方";
   code: string;
   name: string;
@@ -516,6 +554,7 @@ function AccountMasterField({ side, code, name, masters, mastersLoading, masters
   mastersLoading: boolean;
   mastersError: string | null;
   changed: boolean;
+  tabOrder: number;
   onChange: (code: string) => void;
 }) {
   const currentAccount = findAccountByCode(masters, code);
@@ -530,7 +569,7 @@ function AccountMasterField({ side, code, name, masters, mastersLoading, masters
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
     <label>科目
-      <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+      <select className={`master-select${changed ? " changed-field" : ""}`} data-journal-tab={tabOrder} value={selectValue}
         title="科目コードと科目名は連動します"
         onChange={(event) => onChange(event.target.value)} disabled={!masters || mastersLoading || Boolean(mastersError)}>
         <option value="" disabled>{mastersLoading ? "マスター読み込み中…" : "科目を選択してください"}</option>
@@ -552,7 +591,7 @@ function AccountMasterField({ side, code, name, masters, mastersLoading, masters
   </div>;
 }
 
-function DepartmentMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
+function DepartmentMasterField({ side, code, name, masters, mastersLoading, mastersError, changed, tabOrder, onChange }: {
   side: "借方" | "貸方";
   code: string;
   name: string;
@@ -560,6 +599,7 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
   mastersLoading: boolean;
   mastersError: string | null;
   changed: boolean;
+  tabOrder: number;
   onChange: (code: string) => void;
 }) {
   const currentDepartment = findDepartmentByCode(masters, code);
@@ -574,7 +614,7 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
     <label>部門
-      <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+      <select className={`master-select${changed ? " changed-field" : ""}`} data-journal-tab={tabOrder} value={selectValue}
         title="部門コードと部門名は連動します"
         onChange={(event) => onChange(event.target.value)} disabled={!masters || mastersLoading || Boolean(mastersError)}>
         <option value="">部門なし</option>
@@ -593,7 +633,7 @@ function DepartmentMasterField({ side, code, name, masters, mastersLoading, mast
   </div>;
 }
 
-function SubAccountMasterField({ side, accountCode, code, name, masters, mastersLoading, mastersError, changed, onChange }: {
+function SubAccountMasterField({ side, accountCode, code, name, masters, mastersLoading, mastersError, changed, tabOrder, onChange }: {
   side: "借方" | "貸方";
   accountCode: string;
   code: string;
@@ -602,6 +642,7 @@ function SubAccountMasterField({ side, accountCode, code, name, masters, masters
   mastersLoading: boolean;
   mastersError: string | null;
   changed: boolean;
+  tabOrder: number;
   onChange: (code: string) => void;
 }) {
   const relations = getSubAccountRelations(masters, accountCode);
@@ -617,7 +658,7 @@ function SubAccountMasterField({ side, accountCode, code, name, masters, masters
 
   return <div className={`account-master-field${changed ? " field-changed" : ""}`}>
     <label>補助
-      <select className={`master-select${changed ? " changed-field" : ""}`} value={selectValue}
+      <select className={`master-select${changed ? " changed-field" : ""}`} data-journal-tab={tabOrder} value={selectValue}
         title="選択中の科目で使用できる補助を表示します"
         onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         <option value="">補助なし</option>
@@ -922,7 +963,7 @@ export default function App() {
   const hasMasterErrors = masterCheckCounts.error > 0;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" onKeyDown={handleAppTabKeyDown}>
       <header className="page-header">
         <div className="page-title"><h1>journal-ai</h1><span>通常仕訳</span></div>
         <span className="workspace-status">確認用・未登録</span>
@@ -935,13 +976,17 @@ export default function App() {
               {result && <span className="result-pill">{result.count}件</span>}
             </div>
             <form className="search-form" onSubmit={handleSubmit}>
-              <label className="search-keyword">キーワード<input value={keyword} onChange={(event) => setKeyword(event.target.value)} required /></label>
-              <label className="search-department">部門<input value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="空欄可" /></label>
-              <label className="search-amount">金額<input type="number" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="空欄可" /></label>
-              <label className="search-limit">表示件数<select value={limit} onChange={(event) => setLimit(Number(event.target.value) as 5 | 10 | 20)}>
+              <label className="search-keyword">キーワード<input data-search-tab={1} value={keyword}
+                onChange={(event) => setKeyword(event.target.value)} required /></label>
+              <label className="search-department">部門<input data-search-tab={2} value={department}
+                onChange={(event) => setDepartment(event.target.value)} placeholder="空欄可" /></label>
+              <label className="search-amount">金額<input type="number" data-search-tab={3} value={amount}
+                onChange={(event) => setAmount(event.target.value)} placeholder="空欄可" /></label>
+              <label className="search-limit">表示件数<select data-search-tab={4} value={limit}
+                onChange={(event) => setLimit(Number(event.target.value) as 5 | 10 | 20)}>
                 <option value={5}>5</option><option value={10}>10</option><option value={20}>20</option>
               </select></label>
-              <button type="submit" disabled={loading}>{loading ? "検索中…" : "検索"}</button>
+              <button type="submit" data-search-tab={5} disabled={loading}>{loading ? "検索中…" : "検索"}</button>
             </form>
             <details className={`master-status ${mastersError ? "error" : masters ? "ready" : "loading"}`}
               aria-live="polite" open={Boolean(mastersError)}>
@@ -1047,15 +1092,18 @@ export default function App() {
                   <AccountMasterField side="借方" code={editForm.debitAccountCode} name={editForm.debitAccountName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitAccountCode", editForm, initialEditForm) || isFieldChanged("debitAccountName", editForm, initialEditForm)}
+                    tabOrder={7}
                     onChange={(code) => updateAccountSelection("debit", code)} />
                   <SubAccountMasterField side="借方" accountCode={editForm.debitAccountCode}
                     code={editForm.debitSubCode} name={editForm.debitSubName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitSubCode", editForm, initialEditForm) || isFieldChanged("debitSubName", editForm, initialEditForm)}
+                    tabOrder={8}
                     onChange={(code) => updateSubAccountSelection("debit", code)} />
                   <DepartmentMasterField side="借方" code={editForm.debitDeptCode} name={editForm.debitDeptName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("debitDeptCode", editForm, initialEditForm) || isFieldChanged("debitDeptName", editForm, initialEditForm)}
+                    tabOrder={9}
                     onChange={(code) => updateDepartmentSelection("debit", code)} />
                 </FormSection>
                 <FormSection title="貸方" fields={creditFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
@@ -1063,15 +1111,18 @@ export default function App() {
                   <AccountMasterField side="貸方" code={editForm.creditAccountCode} name={editForm.creditAccountName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditAccountCode", editForm, initialEditForm) || isFieldChanged("creditAccountName", editForm, initialEditForm)}
+                    tabOrder={10}
                     onChange={(code) => updateAccountSelection("credit", code)} />
                   <SubAccountMasterField side="貸方" accountCode={editForm.creditAccountCode}
                     code={editForm.creditSubCode} name={editForm.creditSubName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditSubCode", editForm, initialEditForm) || isFieldChanged("creditSubName", editForm, initialEditForm)}
+                    tabOrder={11}
                     onChange={(code) => updateSubAccountSelection("credit", code)} />
                   <DepartmentMasterField side="貸方" code={editForm.creditDeptCode} name={editForm.creditDeptName}
                     masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
                     changed={isFieldChanged("creditDeptCode", editForm, initialEditForm) || isFieldChanged("creditDeptName", editForm, initialEditForm)}
+                    tabOrder={12}
                     onChange={(code) => updateDepartmentSelection("credit", code)} />
                 </FormSection>
               </div>
@@ -1094,7 +1145,7 @@ export default function App() {
                 </div>
                 <div className="edit-actions">
                   <button type="button" className="reset-button" onClick={resetEditForm} disabled={!editFormChanged}>候補選択時の値に戻す</button>
-                  <button type="button" className="prepare-action" onClick={handlePrepareRegistration}
+                  <button type="button" className="prepare-action" data-journal-tab={13} onClick={handlePrepareRegistration}
                     disabled={prepareLoading || mastersLoading || !masters || Boolean(mastersError) || hasMasterErrors}>
                     {prepareLoading ? "登録準備中…" : "登録予定へ追加（確認のみ）"}
                   </button>
@@ -1117,7 +1168,7 @@ export default function App() {
       </div>
 
       <details className="registration-panel" aria-live="polite">
-        <summary className="cart-bar">
+        <summary className="cart-bar" data-cart-tab="">
           <strong>出力待ち</strong>
           <span>{registrationCart.length}件</span>
           <b>{formatAmountNumber(cartTotalAmount)}</b>
