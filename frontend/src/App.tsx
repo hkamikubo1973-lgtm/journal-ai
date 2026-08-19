@@ -35,16 +35,14 @@ type MasterCheckMessage = {
   message: string;
 };
 
-const basicFields: EditFormField[] = [
-  { key: "voucherNo", label: "証番号" },
+const commonFields: EditFormField[] = [
+  { key: "voucherNo", label: "伝票番号" },
   { key: "voucherSummary", label: "伝票摘要", wide: true },
-];
-const debitFields: EditFormField[] = [];
-const creditFields: EditFormField[] = [];
-const amountSummaryFields: EditFormField[] = [
   { key: "amount", label: "金額", amount: true },
   { key: "summary", label: "摘要", wide: true },
 ];
+const debitFields: EditFormField[] = [];
+const creditFields: EditFormField[] = [];
 
 const epsonPreviewFields = [
   "伝票日付", "証番号", "借方科目", "借方科目名", "借方補助", "借方補助科目名", "借方金額",
@@ -414,32 +412,32 @@ function CandidateCard({ candidate, selected, onSelect }: {
       </div>
       <details className="candidate-details" onClick={(event) => event.stopPropagation()}>
         <summary>詳細を表示</summary>
-        <p className="pattern-key"><span>pattern_key:</span> {candidate.pattern_key.join(" / ") || "-"}</p>
+        <p className="pattern-key"><span>パターンキー:</span> {candidate.pattern_key.join(" / ") || "-"}</p>
         <dl className="candidate-facts">
-          <div><dt>pattern_rank</dt><dd>{candidate.pattern_rank ?? "-"}</dd></div>
-          <div><dt>source / edit / block</dt><dd>{candidate.source_rows.length} / {candidate.editable_rows.length} / {candidate.block_rows.length}</dd></div>
-          <div><dt>matched_amount_row</dt><dd>{candidate.matched_amount_row ? "あり" : "なし"}</dd></div>
-          <div><dt>has_fukugo</dt><dd>{candidate.has_fukugo ? "true" : "false"}</dd></div>
-          <div><dt>has_sundry</dt><dd>{candidate.has_sundry ? "true" : "false"}</dd></div>
-          <div><dt>contains_fukugo_or_sundry</dt><dd>{candidate.contains_fukugo_or_sundry ? "true" : "false"}</dd></div>
-          <div><dt>show_block_rows</dt><dd>{candidate.show_block_rows ? "true" : "false"}</dd></div>
-          <div><dt>is_complex</dt><dd>{candidate.is_complex ? "true" : "false"}</dd></div>
+          <div><dt>パターン順位</dt><dd>{candidate.pattern_rank ?? "-"}</dd></div>
+          <div><dt>元データ / 編集対象 / 同一伝票ブロック</dt><dd>{candidate.source_rows.length} / {candidate.editable_rows.length} / {candidate.block_rows.length}</dd></div>
+          <div><dt>金額一致行</dt><dd>{candidate.matched_amount_row ? "あり" : "なし"}</dd></div>
+          <div><dt>資金複合あり</dt><dd>{candidate.has_fukugo ? "あり" : "なし"}</dd></div>
+          <div><dt>諸口あり</dt><dd>{candidate.has_sundry ? "あり" : "なし"}</dd></div>
+          <div><dt>資金複合・諸口を含む</dt><dd>{candidate.contains_fukugo_or_sundry ? "あり" : "なし"}</dd></div>
+          <div><dt>ブロック行表示対象</dt><dd>{candidate.show_block_rows ? "はい" : "いいえ"}</dd></div>
+          <div><dt>複合仕訳</dt><dd>{candidate.is_complex ? "はい" : "いいえ"}</dd></div>
         </dl>
         <div className="search-reasons"><span>検索理由（全件）</span>
           {candidate.search_reason.length > 0 ? <ul>
             {candidate.search_reason.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}
           </ul> : <p>-</p>}
         </div>
-        <details className="candidate-json-details"><summary>matched_amount_row</summary>
+        <details className="candidate-json-details"><summary>金額一致行</summary>
           <pre>{JSON.stringify(candidate.matched_amount_row, null, 2)}</pre>
         </details>
-        <details className="candidate-json-details"><summary>source_rows ({candidate.source_rows.length})</summary>
+        <details className="candidate-json-details"><summary>元データ行（{candidate.source_rows.length}件）</summary>
           <pre>{JSON.stringify(candidate.source_rows, null, 2)}</pre>
         </details>
-        <details className="candidate-json-details"><summary>editable_rows ({candidate.editable_rows.length})</summary>
+        <details className="candidate-json-details"><summary>編集対象行（{candidate.editable_rows.length}件）</summary>
           <pre>{JSON.stringify(candidate.editable_rows, null, 2)}</pre>
         </details>
-        <details className="candidate-json-details"><summary>block_rows ({candidate.block_rows.length})</summary>
+        <details className="candidate-json-details"><summary>同一伝票ブロック行（{candidate.block_rows.length}件）</summary>
           <pre>{JSON.stringify(candidate.block_rows, null, 2)}</pre>
         </details>
       </details>
@@ -505,10 +503,6 @@ function VoucherDateField({ value, changed, onChange }: {
             <option value={day} key={day}>{day}日</option>
           ))}
         </select>
-      </label>
-      <label>カレンダー
-        <input type="date" className={controlClassName} value={parts ? formatVoucherDate(parts) : ""}
-          onChange={(event) => onChange(normalizeVoucherDate(event.target.value))} />
       </label>
     </div>
   </div>;
@@ -650,8 +644,8 @@ function SubAccountMasterField({ side, accountCode, code, name, masters, masters
 
 function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
   return (
-    <section className="block-panel">
-      <div className="section-heading-row"><h3>同一伝票ブロック（参照用）</h3><span>block_rows: {candidate.block_rows.length}件</span></div>
+    <details className="block-panel">
+      <summary>同一伝票ブロックを表示（{candidate.block_rows.length}件）</summary>
       {candidate.block_rows.length > 0 ? (
         <div className="table-scroll"><table><thead><tr>
           {blockRowFields.map((field) => <th key={field.key}>{field.label}</th>)}
@@ -663,7 +657,7 @@ function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
           </tr>)}
         </tbody></table></div>
       ) : <p className="muted">同一伝票ブロック情報はありません。</p>}
-    </section>
+    </details>
   );
 }
 
@@ -930,44 +924,46 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="page-header">
-        <p className="eyebrow">Journal workflow prototype</p>
-        <h1>journal-ai 正式UI Phase 3-11 部門選択</h1>
-        <p>借方・貸方部門をマスターから選択し、コードと名称を連動更新します。保存やDB登録はまだ行いません。</p>
+        <div className="page-title"><h1>journal-ai</h1><span>通常仕訳</span></div>
+        <span className="workspace-status">確認用・未登録</span>
       </header>
 
       <div className="split-layout">
         <section className="pane left-pane" aria-label="検索と候補一覧">
           <div className="search-panel">
-            <div className="pane-heading"><div><p className="step-label">Step 1</p><h2>検索条件</h2></div>
+            <div className="pane-heading"><h2>検索条件</h2>
               {result && <span className="result-pill">{result.count}件</span>}
             </div>
             <form className="search-form" onSubmit={handleSubmit}>
               <label className="search-keyword">キーワード<input value={keyword} onChange={(event) => setKeyword(event.target.value)} required /></label>
-              <label>部門<input value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="空欄可" /></label>
-              <label>金額<input type="number" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="空欄可" /></label>
-              <label>表示件数<select value={limit} onChange={(event) => setLimit(Number(event.target.value) as 5 | 10 | 20)}>
+              <label className="search-department">部門<input value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="空欄可" /></label>
+              <label className="search-amount">金額<input type="number" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="空欄可" /></label>
+              <label className="search-limit">表示件数<select value={limit} onChange={(event) => setLimit(Number(event.target.value) as 5 | 10 | 20)}>
                 <option value={5}>5</option><option value={10}>10</option><option value={20}>20</option>
               </select></label>
               <button type="submit" disabled={loading}>{loading ? "検索中…" : "検索"}</button>
             </form>
-            <div className={`master-status ${mastersError ? "error" : masters ? "ready" : "loading"}`} aria-live="polite">
-              {mastersLoading ? <strong>マスター：読み込み中…</strong> : mastersError ? (
+            <details className={`master-status ${mastersError ? "error" : masters ? "ready" : "loading"}`}
+              aria-live="polite" open={Boolean(mastersError)}>
+              <summary>{mastersLoading ? <strong>マスター：読み込み中…</strong> : mastersError ? (
                 <strong>マスター取得エラー：{mastersError}</strong>
-              ) : masters ? <>
+              ) : masters ? (
                 <strong>マスター：科目 {masters.accounts.length}件 / 補助 {masters.sub_accounts.length}件 / 部門 {masters.departments.length}件</strong>
+              ) : <strong>マスター：読み込み準備中…</strong>}</summary>
+              {masters && <div className="master-status-details">
                 <span>選択可能科目 {masters.diagnostics.selectable_account_count}件 / 選択不可科目 {masters.diagnostics.unselectable_account_count}件</span>
                 <details className="master-diagnostics">
                   <summary>マスター診断を表示</summary>
                   <pre>{JSON.stringify(masters.diagnostics, null, 2)}</pre>
                 </details>
-              </> : <strong>マスター：読み込み準備中…</strong>}
-            </div>
+              </div>}
+            </details>
             {error && <p className="error-message">{error}</p>}
             {statusMessage && <p className="status-message">{statusMessage}</p>}
           </div>
 
           <div className="candidate-panel" aria-live="polite">
-            <div className="pane-heading candidate-list-heading"><div><p className="step-label">Step 2</p><h2>候補一覧</h2></div>
+            <div className="pane-heading candidate-list-heading"><h2>候補一覧</h2>
               {result && <span className="muted">検索結果: {result.count}件</span>}
             </div>
             {result ? <div className="candidate-list">
@@ -980,7 +976,7 @@ export default function App() {
         </section>
 
         <section className="pane right-pane" aria-live="polite">
-          <div className="edit-panel-heading"><div><p className="step-label">Step 3</p><h2>選択中の仕訳編集フォーム</h2></div>
+          <div className="edit-panel-heading"><h2>仕訳編集</h2>
             <span className="status-badge">確認用・未登録</span>
           </div>
           {!selectedCandidate && <div className="empty-edit-state">
@@ -989,20 +985,45 @@ export default function App() {
               この画面ではまだ登録・CSV出力は行いません。</p>
           </div>}
           {selectedCandidate && <>
-            <div className="status-strip">
-              <div className="status-strip-main">
-                <strong>選択中：候補{selectedCandidate.rank} / Score {selectedCandidate.score}</strong>
-                <span className="unregistered-badge">状態：確認用・未登録</span>
+            <div className="edit-overview">
+              <div className="status-strip">
+                <div className="status-strip-main">
+                  <strong>候補{selectedCandidate.rank} / Score {selectedCandidate.score}</strong>
+                  {selectedSummary && <>
+                    <span className="overview-journal">{selectedSummary.debit} <b aria-hidden="true">→</b> {selectedSummary.credit}</span>
+                    <b className="overview-amount">{selectedSummary.amount}</b>
+                  </>}
+                  <span className="unregistered-badge">確認用・未登録</span>
+                </div>
+                <div className="status-strip-secondary">
+                  {selectedSummary && <span title={selectedSummary.summary}>{selectedSummary.summary}</span>}
+                  <details className="selection-technical-details"><summary>技術情報</summary>
+                    <small>パターンキー: {selectedCandidate.pattern_key.join(" / ") || "-"}</small>
+                  </details>
+                </div>
               </div>
-              {selectedSummary && <div className="selection-summary">
-                <strong>{selectedSummary.debit} <span aria-hidden="true">→</span> {selectedSummary.credit}</strong>
-                <b>{selectedSummary.amount}</b>
-                <span>{selectedSummary.summary}</span>
-              </div>}
-              <small>pattern_key: {selectedCandidate.pattern_key.join(" / ") || "-"}</small>
-            </div>
-            <div className={`edit-status ${editFormChanged ? "changed" : "unchanged"}`}>
-              <strong title="変更内容は保存されません。">{editFormChanged ? "編集状態：変更あり（未保存）" : "編集状態：未変更"}</strong>
+              <div className={`edit-status ${editFormChanged ? "changed" : "unchanged"}`}>
+                <strong title="変更内容は保存されません。">{editFormChanged ? "変更あり（未保存）" : "未変更"}</strong>
+              </div>
+              {editForm && <details className="master-check-panel" aria-live="polite"
+                open={!masters || masterCheckCounts.warning > 0 || masterCheckCounts.error > 0}>
+                <summary className="master-check-heading">
+                  <h3>マスター</h3>
+                  <div className="master-check-summary">
+                    <span className="ok">OK {masterCheckCounts.ok}</span>
+                    <span className="warning">警告 {masterCheckCounts.warning}</span>
+                    <span className="error">エラー {masterCheckCounts.error}</span>
+                  </div>
+                </summary>
+                {!masters ? <p className={mastersError ? "master-check-unavailable error" : "master-check-unavailable"}>
+                  {mastersError ? "マスターを取得できないため照合できません。" : "マスターを読み込んでいます。"}
+                </p> : <ul className="master-check-list">
+                  {masterCheckMessages.map((message, index) => <li className={message.level} key={`${message.level}-${message.message}-${index}`}>
+                    <span aria-hidden="true">{message.level === "ok" ? "✓" : message.level === "warning" ? "!" : "×"}</span>
+                    {message.message}
+                  </li>)}
+                </ul>}
+              </details>}
             </div>
             {subClearWarning && <p className="notice notice-warning" role="status">{subClearWarning}</p>}
             {selectedCandidate.editable_rows.length === 0 && <p className="notice notice-error">この候補には編集用行がありません。</p>}
@@ -1013,29 +1034,14 @@ export default function App() {
             {sourceAmountsEqual === false && <p className="notice notice-warning">
               元データの借方金額と貸方金額が一致していません。内容を確認してください。
             </p>}
-            {editForm && <details className="master-check-panel" aria-live="polite"
-              open={!masters || masterCheckCounts.warning > 0 || masterCheckCounts.error > 0}>
-              <summary className="master-check-heading">
-                <h3>マスター照合（確認用）</h3>
-                <div className="master-check-summary">
-                  <span className="ok">OK {masterCheckCounts.ok}</span>
-                  <span className="warning">警告 {masterCheckCounts.warning}</span>
-                  <span className="error">エラー {masterCheckCounts.error}</span>
-                </div>
-              </summary>
-              {!masters ? <p className={mastersError ? "master-check-unavailable error" : "master-check-unavailable"}>
-                {mastersError ? "マスターを取得できないため照合できません。" : "マスターを読み込んでいます。"}
-              </p> : <ul className="master-check-list">
-                {masterCheckMessages.map((message, index) => <li className={message.level} key={`${message.level}-${message.message}-${index}`}>
-                  <span aria-hidden="true">{message.level === "ok" ? "✓" : message.level === "warning" ? "!" : "×"}</span>
-                  {message.message}
-                </li>)}
-              </ul>}
-            </details>}
             {editForm && <form className="edit-form" onSubmit={(event) => event.preventDefault()}>
-              <FormSection title="基本情報" fields={basicFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
-                gridClassName="basic-info-grid" />
-              <div className="debit-credit-grid">
+              <div className="journal-entry-grid">
+                <FormSection title="共通情報" fields={commonFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
+                  className="common-section" gridClassName="common-info-grid">
+                  <VoucherDateField value={editForm.voucherDate}
+                    changed={isFieldChanged("voucherDate", editForm, initialEditForm)}
+                    onChange={(value) => updateEditForm("voucherDate", value)} />
+                </FormSection>
                 <FormSection title="借方" fields={debitFields} editForm={editForm} initialEditForm={initialEditForm} onChange={updateEditForm}
                   className="side-section debit" gridClassName="side-form-grid">
                   <AccountMasterField side="借方" code={editForm.debitAccountCode} name={editForm.debitAccountName}
@@ -1069,20 +1075,18 @@ export default function App() {
                     onChange={(code) => updateDepartmentSelection("credit", code)} />
                 </FormSection>
               </div>
-              <FormSection title="伝票日付・金額・摘要" fields={amountSummaryFields} editForm={editForm} initialEditForm={initialEditForm}
-                onChange={updateEditForm} className="single-amount-section" gridClassName="amount-summary-grid">
-                <VoucherDateField value={editForm.voucherDate}
-                  changed={isFieldChanged("voucherDate", editForm, initialEditForm)}
-                  onChange={(value) => updateEditForm("voucherDate", value)} />
-              </FormSection>
-              <div className="amount-summary-panel">
-                <strong>{editForm.amount ? `入力金額：${formatAmountWithUnit(editForm.amount)}` : "入力金額：未入力"}</strong>
-                <span>出力想定：借方金額・貸方金額へ同額反映</span>
-                <small>元データ：借方 {formatAmountWithUnit(editForm.debitAmount)} / 貸方 {formatAmountWithUnit(editForm.creditAmount)}</small>
-                <p className={`source-amount-check ${sourceAmountsEqual === true ? "match" : sourceAmountsEqual === false ? "mismatch" : "incomplete"}`}>
-                  {sourceAmountsEqual === true ? "元データの借貸金額は一致しています。" : sourceAmountsEqual === false ? "元データの借貸金額が一致していません。" : "元データの借貸金額は片側のみ、または未入力です。"}
-                </p>
-              </div>
+              <details className="amount-summary-panel" open={sourceAmountsEqual === false}>
+                <summary>
+                  <strong>{editForm.amount ? `金額 ${formatAmountWithUnit(editForm.amount)}` : "金額 未入力"}</strong>
+                  <span className={`source-amount-check ${sourceAmountsEqual === true ? "match" : sourceAmountsEqual === false ? "mismatch" : "incomplete"}`}>
+                    {sourceAmountsEqual === true ? "✓ 借貸同額" : sourceAmountsEqual === false ? "! 借貸不一致" : "借貸金額を確認"}
+                  </span>
+                </summary>
+                <div className="amount-source-details">
+                  <span>出力想定：借方金額・貸方金額へ同額反映</span>
+                  <small>元データ：借方 {formatAmountWithUnit(editForm.debitAmount)} / 貸方 {formatAmountWithUnit(editForm.creditAmount)}</small>
+                </div>
+              </details>
               <div className="edit-form-footer">
                 <div className="prepare-guidance">
                   <p title="登録予定データをAPIで整形するだけで、保存・DB登録・CSV出力は行いません。">登録準備のみ（保存・出力なし）</p>
@@ -1112,51 +1116,56 @@ export default function App() {
         </section>
       </div>
 
-      <section className="registration-panel" aria-live="polite">
-        <div className="cart-panel-heading"><div><p className="step-label">Step 4</p><h2>出力待ちカート（画面上のみ）</h2></div>
-          <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
+      <details className="registration-panel" aria-live="polite">
+        <summary className="cart-bar">
+          <strong>出力待ち</strong>
+          <span>{registrationCart.length}件</span>
+          <b>{formatAmountNumber(cartTotalAmount)}</b>
+          {cartStatusMessage && <small>{cartStatusMessage}</small>}
+          <em aria-hidden="true" />
+        </summary>
+        <div className="cart-details">
+          <div className="cart-panel-heading">
+            <p className="registration-panel-note">画面上の一時保持です。リロードすると消え、まだ保存・CSV・Excel出力は行いません。</p>
+            <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
+          </div>
+          <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
+          {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
+            {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>
+              <div className="cart-item-header">
+                <div><span className="cart-number">No. {index + 1}</span><span className="cart-id" title={item.registration_id}>ID {shortId(item.registration_id)}</span></div>
+                <button type="button" className="remove-cart-button" onClick={() => removeCartItem(item.registration_id)}>カートから削除</button>
+              </div>
+              <div className="cart-item-main">
+                <div><span>伝票日付</span><strong>{item.prepared_journal.voucher_date || "-"}</strong></div>
+                <div className="cart-journal"><span>仕訳</span><strong>
+                  {item.prepared_journal.debit_account_name || item.prepared_journal.debit_account_code || "-"}
+                  <b aria-hidden="true">→</b>
+                  {item.prepared_journal.credit_account_name || item.prepared_journal.credit_account_code || "-"}
+                </strong></div>
+                <div className="cart-item-amount"><span>金額</span><strong>{formatAmountNumber(getCartAmount(item))}</strong></div>
+                <div className="cart-item-summary"><span>摘要</span><p>{item.prepared_journal.summary || "-"}</p></div>
+              </div>
+              <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
+                <div className="preview-table-wrap"><table className="preview-table"><tbody>
+                  {epsonPreviewFields.map((field) => <tr key={field}><th>{field}</th><td>{getPreviewValue(item.epson_preview_row, field)}</td></tr>)}
+                </tbody></table></div>
+              </details>
+            </article>)}
+          </div>}
+          <p className="clear-cart-note">画面上のカートだけを空にします。保存済みデータはありません。</p>
         </div>
-        <p className="registration-panel-note">このカートはReact画面上の一時保持です。リロードすると消えます。<br />
-          まだCSV保存・DB登録・Excel出力は行いません。</p>
-        <div className="cart-summary">
-          <div><span>件数</span><strong>{registrationCart.length}件</strong></div>
-          <div><span>合計金額</span><strong>{formatAmountNumber(cartTotalAmount)}</strong></div>
-          <small>合計金額は画面表示用の単純合計であり、会計ロジックではありません。</small>
-        </div>
-        {cartStatusMessage && <p className="cart-status-message">{cartStatusMessage}</p>}
-        {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
-          {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>
-            <div className="cart-item-header">
-              <div><span className="cart-number">No. {index + 1}</span><span className="cart-id" title={item.registration_id}>ID {shortId(item.registration_id)}</span></div>
-              <button type="button" className="remove-cart-button" onClick={() => removeCartItem(item.registration_id)}>カートから削除</button>
-            </div>
-            <div className="cart-item-main">
-              <div><span>伝票日付</span><strong>{item.prepared_journal.voucher_date || "-"}</strong></div>
-              <div className="cart-journal"><span>仕訳</span><strong>
-                {item.prepared_journal.debit_account_name || item.prepared_journal.debit_account_code || "-"}
-                <b aria-hidden="true">→</b>
-                {item.prepared_journal.credit_account_name || item.prepared_journal.credit_account_code || "-"}
-              </strong></div>
-              <div className="cart-item-amount"><span>金額</span><strong>{formatAmountNumber(getCartAmount(item))}</strong></div>
-              <div className="cart-item-summary"><span>摘要</span><p>{item.prepared_journal.summary || "-"}</p></div>
-            </div>
-            <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
-              <div className="preview-table-wrap"><table className="preview-table"><tbody>
-                {epsonPreviewFields.map((field) => <tr key={field}><th>{field}</th><td>{getPreviewValue(item.epson_preview_row, field)}</td></tr>)}
-              </tbody></table></div>
-            </details>
-          </article>)}
-        </div>}
-        <p className="clear-cart-note">画面上のカートだけを空にします。保存済みデータはありません。</p>
-      </section>
+      </details>
 
-      <section className="dev-panel">
-        <div className="pane-heading"><div><p className="step-label">Development</p><h2>開発確認エリア</h2></div></div>
-        <details><summary>APIレスポンスJSONを表示</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
-        <details><summary>編集フォームstateを表示</summary><pre>{JSON.stringify(editForm, null, 2)}</pre></details>
-        <details><summary>登録準備APIレスポンスを表示</summary><pre>{JSON.stringify(prepareResponse, null, 2)}</pre></details>
-        <details><summary>出力待ちカートJSONを表示</summary><pre>{JSON.stringify(registrationCart, null, 2)}</pre></details>
-      </section>
+      <details className="dev-panel">
+        <summary className="dev-panel-heading">開発情報</summary>
+        <div className="dev-panel-content">
+          <details><summary>APIレスポンスJSONを表示</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
+          <details><summary>編集フォームstateを表示</summary><pre>{JSON.stringify(editForm, null, 2)}</pre></details>
+          <details><summary>登録準備APIレスポンスを表示</summary><pre>{JSON.stringify(prepareResponse, null, 2)}</pre></details>
+          <details><summary>出力待ちカートJSONを表示</summary><pre>{JSON.stringify(registrationCart, null, 2)}</pre></details>
+        </div>
+      </details>
     </main>
   );
 }
