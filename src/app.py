@@ -460,6 +460,7 @@ from columns import (
     COL_CREDIT_AMOUNT,
     COL_SUMMARY,
 )
+from epson_export_service import build_epson_rows
 
 
 # =========================================
@@ -1740,88 +1741,6 @@ def build_ai_search_candidates(results, visible_count=0):
             })
 
     return candidates, score_details
-
-# =========================================
-# エプソンCSV変換
-# =========================================
-def build_epson_rows(rows, company_name):
-
-    result = []
-
-    machine_name = platform.node()
-    user_name = getpass.getuser()
-
-    app_name = "仕訳検索システム"
-
-    input_date = datetime.now().strftime("%Y%m%d")
-
-    for r in rows:
-
-        row = {
-            c: r.get(c, "")
-            for c in EPSON_COLUMNS
-        }
-
-        summary = r.get(COL_SUMMARY, "")
-        debit_sub_name = r.get(COL_DEBIT_SUB, "")
-        credit_sub_name = r.get(COL_CREDIT_SUB, "")
-
-        # =====================================
-        # 画面で編集した項目だけ上書き
-        # =====================================
-        row["伝票日付"] = r.get(COL_DATE, "")
-        row["摘要"] = summary
-
-        # 伝票摘要はDB雛形の値を保持する。
-        # 摘要から伝票摘要への自動コピーは禁止。
-
-        # =====================================
-        # 借方
-        # =====================================
-        row["借方科目"] = get_account_code(
-            r.get(COL_DEBIT, "")
-        ) or r.get("借方科目", "")
-        row["借方科目名"] = r.get(COL_DEBIT, "")
-
-        row["借方補助"] = (
-            SUB_MASTER.get(debit_sub_name, r.get("借方補助", ""))
-            if debit_sub_name
-            else ""
-        )
-        row["借方補助科目名"] = debit_sub_name
-
-        row["借方金額"] = r.get(COL_DEBIT_AMOUNT, "")
-
-        # =====================================
-        # 貸方
-        # =====================================
-        row["貸方科目"] = get_account_code(
-            r.get(COL_CREDIT, "")
-        ) or r.get("貸方科目", "")
-        row["貸方科目名"] = r.get(COL_CREDIT, "")
-
-        row["貸方補助"] = (
-            SUB_MASTER.get(credit_sub_name, r.get("貸方補助", ""))
-            if credit_sub_name
-            else ""
-        )
-        row["貸方補助科目名"] = credit_sub_name
-
-        row["貸方金額"] = r.get(COL_CREDIT_AMOUNT, "")
-
-        # =====================================
-        # AO～AS
-        # =====================================
-        row["入力マシン"] = machine_name
-        row["入力ユーザ"] = user_name
-        row["入力アプリ"] = app_name
-        row["入力会社"] = company_name
-        row["入力日付"] = input_date
-
-        result.append(row)
-
-    return result
-
 
 TRANSACTIONS_PATH = "data/transactions.csv"
 
@@ -4709,7 +4628,10 @@ if mode == "通常仕訳":
 
         epson_rows = build_epson_rows(
             all_rows,
-            epson_company_name
+            epson_company_name,
+            ACCOUNT_MASTER,
+            SUB_MASTER,
+            name_to_code
         )
     
         epson_df = pd.DataFrame(
