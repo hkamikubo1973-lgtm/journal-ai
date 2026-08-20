@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -9,6 +10,7 @@ import re
 import unicodedata
 from typing import Any
 
+from columns import EPSON_COLUMNS
 from journal_master_service import load_journal_masters
 
 
@@ -99,7 +101,61 @@ def _blocked_response(
         "registration_id": None,
         "prepared_journal": None,
         "epson_preview_row": None,
+        "epson_base_row": None,
     }
+
+
+def _extract_epson_source_row(
+    source_row: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """EPSON_COLUMNS順の45列だけを元行から非破壊で抽出する。"""
+
+    if not isinstance(source_row, Mapping):
+        return None, "正式EPSON生成元行がありません。"
+
+    missing_columns = [
+        column for column in EPSON_COLUMNS if column not in source_row
+    ]
+    if missing_columns:
+        return None, (
+            "正式EPSON生成元行に必要な45列が不足しています: "
+            + "、".join(missing_columns)
+        )
+
+    return {
+        column: source_row[column]
+        for column in EPSON_COLUMNS
+    }, None
+
+
+def _build_registration_id(
+    prepared_journal: dict[str, Any],
+    epson_base_row: dict[str, Any],
+) -> str:
+    """検証済み仕訳とEPSON_COLUMNS順の45列から決定的なIDを作る。"""
+
+    id_material = [
+        [
+            "prepared_journal",
+            [
+                [field, prepared_journal[field]]
+                for field in EDIT_FORM_FIELDS
+            ],
+        ],
+        [
+            "epson_base_row",
+            [
+                [column, epson_base_row[column]]
+                for column in EPSON_COLUMNS
+            ],
+        ],
+    ]
+    serialized = json.dumps(
+        id_material,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _items_by_code(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -306,6 +362,7 @@ def prepare_registration(payload: dict) -> dict:
 
     edit_form = payload.get("edit_form")
     candidate_meta = payload.get("candidate_meta")
+    source_row = payload.get("source_row")
     if not isinstance(edit_form, dict):
         return _blocked_response(["編集フォーム情報がありません。"])
     if not isinstance(candidate_meta, dict):
@@ -313,6 +370,10 @@ def prepare_registration(payload: dict) -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
+    epson_base_row, source_row_error = _extract_epson_source_row(source_row)
+    if source_row_error:
+        errors.append(source_row_error)
+
     editable_row_count = candidate_meta.get("editable_row_count", 1)
     if editable_row_count != 1:
         if editable_row_count == 0:
@@ -350,7 +411,7 @@ def prepare_registration(payload: dict) -> dict:
     normalized["amount"] = amount
     prepared_journal = normalized
 
-    epson_preview_row = {
+    epson_edit_values = {
         "伝票日付": voucher_date,
         "伝票摘要": normalized["voucher_summary"],
         "借方部門": normalized["debit_dept_code"],
@@ -370,28 +431,19 @@ def prepare_registration(payload: dict) -> dict:
         "摘要": normalized["summary"],
         "証番号": normalized["voucher_no"],
     }
+    epson_preview_row = dict(epson_edit_values)
 
-    id_material = {
-        key: prepared_journal[key]
-        for key in (
-            "voucher_date",
-            "debit_account_code",
-            "debit_sub_code",
-            "debit_dept_code",
-            "credit_account_code",
-            "credit_sub_code",
-            "credit_dept_code",
-            "amount",
-            "summary",
+    if epson_base_row is None:
+        return _blocked_response(
+            ["正式EPSON生成元行を準備できませんでした。"],
+            warnings,
         )
-    }
-    serialized = json.dumps(
-        id_material,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+
+    epson_base_row.update(epson_edit_values)
+    registration_id = _build_registration_id(
+        prepared_journal,
+        epson_base_row,
     )
-    registration_id = sha256(serialized.encode("utf-8")).hexdigest()
 
     return {
         "ok": True,
@@ -401,4 +453,5 @@ def prepare_registration(payload: dict) -> dict:
         "registration_id": registration_id,
         "prepared_journal": prepared_journal,
         "epson_preview_row": epson_preview_row,
+        "epson_base_row": epson_base_row,
     }

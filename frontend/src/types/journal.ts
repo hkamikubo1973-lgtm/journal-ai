@@ -86,6 +86,7 @@ export type PrepareRegistrationRequest = {
     show_block_rows: boolean;
     is_complex: boolean;
   };
+  source_row: Record<string, unknown>;
 };
 
 export type PreparedJournal = {
@@ -111,6 +112,7 @@ export type PreparedJournal = {
 };
 
 export type EpsonPreviewRow = Record<string, unknown>;
+export type EpsonBaseRow = Record<string, unknown>;
 
 export type PrepareRegistrationResponse = {
   ok: boolean;
@@ -120,15 +122,17 @@ export type PrepareRegistrationResponse = {
   registration_id: string | null;
   prepared_journal: PreparedJournal | null;
   epson_preview_row: EpsonPreviewRow | null;
+  epson_base_row: EpsonBaseRow | null;
 };
 
 export type RegistrationCartItem = Omit<
   PrepareRegistrationResponse,
-  "registration_id" | "prepared_journal" | "epson_preview_row"
+  "registration_id" | "prepared_journal" | "epson_preview_row" | "epson_base_row"
 > & {
   registration_id: string;
   prepared_journal: PreparedJournal;
   epson_preview_row: EpsonPreviewRow;
+  epson_base_row: EpsonBaseRow;
   addedAt: string;
 };
 

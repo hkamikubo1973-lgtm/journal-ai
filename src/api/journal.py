@@ -88,6 +88,7 @@ class JournalCandidateMetaRequest(BaseModel):
 class PrepareRegistrationRequest(BaseModel):
     edit_form: JournalEditFormRequest
     candidate_meta: JournalCandidateMetaRequest
+    source_row: dict[str, Any]
 
 
 class PrepareRegistrationResponse(BaseModel):
@@ -98,6 +99,7 @@ class PrepareRegistrationResponse(BaseModel):
     registration_id: Optional[str] = None
     prepared_journal: Optional[dict[str, Any]] = None
     epson_preview_row: Optional[dict[str, Any]] = None
+    epson_base_row: Optional[dict[str, Any]] = None
 
 
 class AccountMasterItem(BaseModel):

@@ -860,6 +860,11 @@ export default function App() {
 
   async function handlePrepareRegistration() {
     if (!selectedCandidate || !editForm) return;
+    const sourceRow = selectedCandidate.editable_rows[0];
+    if (selectedCandidate.editable_rows.length !== 1 || !sourceRow) {
+      setPrepareStatusMessage("編集対象が通常1行仕訳ではないため登録準備できません。");
+      return;
+    }
     const currentMasterChecks = checkEditFormMasters(editForm, masters);
     if (!masters || mastersError || currentMasterChecks.some((message) => message.level === "error")) {
       setPrepareStatusMessage("マスター照合エラーを解消してから登録準備を実行してください。");
@@ -903,6 +908,7 @@ export default function App() {
         show_block_rows: selectedCandidate.show_block_rows,
         is_complex: selectedCandidate.is_complex,
       },
+      source_row: sourceRow,
     };
 
     setPrepareLoading(true);
@@ -911,12 +917,13 @@ export default function App() {
     try {
       const response = await prepareRegistration(request);
       setPrepareResponse(response);
-      if (response.ok && response.registration_id && response.prepared_journal && response.epson_preview_row) {
+      if (response.ok && response.registration_id && response.prepared_journal && response.epson_preview_row && response.epson_base_row) {
         const cartItem: RegistrationCartItem = {
           ...response,
           registration_id: response.registration_id,
           prepared_journal: response.prepared_journal,
           epson_preview_row: response.epson_preview_row,
+          epson_base_row: response.epson_base_row,
           addedAt: new Date().toISOString(),
         };
         if (registrationCart.some((item) => item.registration_id === response.registration_id)) {
