@@ -460,7 +460,7 @@ from columns import (
     COL_CREDIT_AMOUNT,
     COL_SUMMARY,
 )
-from epson_export_service import build_epson_rows
+from epson_export_service import build_epson_csv_bytes, build_epson_rows
 
 
 # =========================================
@@ -4634,14 +4634,7 @@ if mode == "通常仕訳":
             name_to_code
         )
     
-        epson_df = pd.DataFrame(
-            epson_rows,
-            columns=EPSON_COLUMNS
-        ).fillna("")
-    
-        epson_csv = epson_df.to_csv(
-            index=False
-        ).encode("cp932")
+        epson_csv = build_epson_csv_bytes(epson_rows)
         epson_filename = (
             "epson_output_"
             f"{datetime.now().strftime('%Y%m%d_%H%M')}.csv"

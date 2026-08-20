@@ -240,6 +240,9 @@ th { background: #f1f5f3; }
 .registration-panel[open] .cart-bar, .dev-panel[open] > .dev-panel-heading { border-bottom: 1px solid #e1e7e5; }
 .cart-details { max-height: min(45vh, 480px); padding: 12px 14px; overflow-y: auto; }
 .cart-panel-heading { display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+.cart-actions { display: flex; flex: 0 0 auto; gap: 8px; align-items: center; }
+.epson-download-button { min-height: 34px; padding: 6px 12px; color: #fff; border-color: #16725f; background: #16725f; font-size: 0.76rem; }
+.epson-download-button:not(:disabled):hover { background: #105d4d; }
 .clear-cart-button, .remove-cart-button { min-height: 34px; padding: 6px 12px; color: #8d2424; border: 1px solid #d8a5a5; background: #fff; font-size: 0.76rem; }
 .clear-cart-button:not(:disabled):hover, .remove-cart-button:hover { background: #fff0f0; }
 .registration-panel-note { margin: 0; color: #52636b; font-size: 0.76rem; }
@@ -332,6 +335,7 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   .candidate-select-button { width: 100%; }
   .edit-panel-heading { align-items: flex-start; flex-direction: column; }
   .cart-panel-heading, .cart-item-header { align-items: flex-start; flex-direction: column; }
+  .cart-actions { flex-wrap: wrap; }
   .cart-item-main { grid-template-columns: 1fr; }
   .cart-item-summary { grid-column: auto; }
 }

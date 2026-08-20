@@ -105,7 +105,7 @@ def _blocked_response(
     }
 
 
-def _extract_epson_source_row(
+def extract_epson_source_row(
     source_row: Any,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """EPSON_COLUMNS順の45列だけを元行から非破壊で抽出する。"""
@@ -128,7 +128,7 @@ def _extract_epson_source_row(
     }, None
 
 
-def _build_registration_id(
+def build_registration_id(
     prepared_journal: dict[str, Any],
     epson_base_row: dict[str, Any],
 ) -> str:
@@ -370,7 +370,7 @@ def prepare_registration(payload: dict) -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
-    epson_base_row, source_row_error = _extract_epson_source_row(source_row)
+    epson_base_row, source_row_error = extract_epson_source_row(source_row)
     if source_row_error:
         errors.append(source_row_error)
 
@@ -440,7 +440,7 @@ def prepare_registration(payload: dict) -> dict:
         )
 
     epson_base_row.update(epson_edit_values)
-    registration_id = _build_registration_id(
+    registration_id = build_registration_id(
         prepared_journal,
         epson_base_row,
     )

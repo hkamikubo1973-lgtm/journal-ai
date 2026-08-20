@@ -8,6 +8,8 @@ import platform
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import pandas as pd
+
 from columns import (
     COL_CREDIT,
     COL_CREDIT_AMOUNT,
@@ -119,3 +121,15 @@ def build_epson_rows(
         result.append(row)
 
     return result
+
+
+def build_epson_csv_bytes(
+    rows: Sequence[Mapping[str, Any]],
+) -> bytes:
+    """現行Streamlit仕様どおり、45列・header付き・CP932でCSV化する。"""
+
+    epson_df = pd.DataFrame(
+        rows,
+        columns=EPSON_COLUMNS,
+    ).fillna("")
+    return epson_df.to_csv(index=False).encode("cp932")

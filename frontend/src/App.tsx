@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { fetchJournalMasters, prepareRegistration, searchJournals } from "./api/journal";
+import { downloadEpsonCsv, fetchJournalMasters, prepareRegistration, searchJournals } from "./api/journal";
 import type {
   JournalCandidate,
   JournalEditForm,
@@ -721,6 +721,7 @@ export default function App() {
   const [subClearWarning, setSubClearWarning] = useState<string | null>(null);
   const [registrationCart, setRegistrationCart] = useState<RegistrationCartItem[]>([]);
   const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
+  const [epsonDownloadLoading, setEpsonDownloadLoading] = useState(false);
   const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
   const [mastersLoading, setMastersLoading] = useState(false);
   const [mastersError, setMastersError] = useState<string | null>(null);
@@ -951,6 +952,38 @@ export default function App() {
   function clearRegistrationCart() {
     setRegistrationCart([]);
     setCartStatusMessage("画面上の出力待ちカートを空にしました。");
+  }
+
+  async function handleEpsonCsvDownload() {
+    if (registrationCart.length === 0 || epsonDownloadLoading) return;
+
+    setEpsonDownloadLoading(true);
+    setCartStatusMessage(null);
+    try {
+      const downloaded = await downloadEpsonCsv({
+        items: registrationCart.map((item) => ({
+          registration_id: item.registration_id,
+          prepared_journal: item.prepared_journal,
+          epson_base_row: item.epson_base_row,
+        })),
+      });
+      const objectUrl = URL.createObjectURL(downloaded.blob);
+      try {
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = downloaded.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+      setCartStatusMessage("EPSON CSVをダウンロードしました。検索DBには登録していません。");
+    } catch (caughtError) {
+      setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "EPSON CSVをダウンロードできませんでした。");
+    } finally {
+      setEpsonDownloadLoading(false);
+    }
   }
 
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
@@ -1190,8 +1223,14 @@ export default function App() {
         </summary>
         <div className="cart-details">
           <div className="cart-panel-heading">
-            <p className="registration-panel-note">画面上の一時保持です。リロードすると消え、まだ保存・CSV・Excel出力は行いません。</p>
-            <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
+            <p className="registration-panel-note">画面上の一時保持です。リロードすると消え、CSVダウンロードしても検索DBへは保存されません。</p>
+            <div className="cart-actions">
+              <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleEpsonCsvDownload}
+                disabled={registrationCart.length === 0 || epsonDownloadLoading}>
+                {epsonDownloadLoading ? "ダウンロード準備中…" : "EPSON CSVダウンロード"}
+              </button>
+              <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
+            </div>
           </div>
           <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
           {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">

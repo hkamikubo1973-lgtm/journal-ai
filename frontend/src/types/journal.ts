@@ -136,6 +136,14 @@ export type RegistrationCartItem = Omit<
   addedAt: string;
 };
 
+export type EpsonExportCsvRequest = {
+  items: Array<{
+    registration_id: string;
+    prepared_journal: PreparedJournal;
+    epson_base_row: EpsonBaseRow;
+  }>;
+};
+
 export type AccountMasterItem = {
   code: string;
   name: string;

@@ -2,10 +2,14 @@
 
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from engine import load_data
+from journal_export_service import (
+    EpsonExportValidationError,
+    export_epson_csv,
+)
 from journal_master_service import load_journal_masters
 from journal_registration_service import prepare_registration
 from journal_search_service import search_journals
@@ -100,6 +104,16 @@ class PrepareRegistrationResponse(BaseModel):
     prepared_journal: Optional[dict[str, Any]] = None
     epson_preview_row: Optional[dict[str, Any]] = None
     epson_base_row: Optional[dict[str, Any]] = None
+
+
+class EpsonExportItemRequest(BaseModel):
+    registration_id: str
+    prepared_journal: dict[str, Any]
+    epson_base_row: dict[str, Any]
+
+
+class EpsonExportCsvRequest(BaseModel):
+    items: list[EpsonExportItemRequest]
 
 
 class AccountMasterItem(BaseModel):
@@ -248,3 +262,32 @@ def post_journal_search(request: JournalSearchRequest):
 def post_prepare_registration(request: PrepareRegistrationRequest):
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     return prepare_registration(payload)
+
+
+@app.post("/api/journal/export-epson-csv")
+def post_export_epson_csv(request: EpsonExportCsvRequest):
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    try:
+        result = export_epson_csv(payload["items"])
+    except EpsonExportValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except UnicodeEncodeError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="EPSON CSVをCP932へ変換できない文字が含まれています。",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="EPSON CSVを生成できませんでした。",
+        ) from error
+
+    return Response(
+        content=result.content,
+        media_type="text/csv; charset=shift_jis",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{result.filename}"'
+            ),
+        },
+    )
