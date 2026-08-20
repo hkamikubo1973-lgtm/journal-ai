@@ -1,4 +1,5 @@
 {
   "company_name": "",
-  "csv_export_dir": ""
+  "csv_export_dir": "",
+  "fiscal_year_start_month": 2
 }

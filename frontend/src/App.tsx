@@ -966,7 +966,13 @@ export default function App() {
     <main className="app-shell" onKeyDown={handleAppTabKeyDown}>
       <header className="page-header">
         <div className="page-title"><h1>journal-ai</h1><span>通常仕訳</span></div>
-        <span className="workspace-status">確認用・未登録</span>
+        <div className="page-header-meta">
+          {masters?.system && <span className="fiscal-year-status">
+            会計年度：{masters.system.current_fiscal_year}年度
+            （{masters.system.fiscal_year_start_month}月～{masters.system.fiscal_year_end_month}月）
+          </span>}
+          <span className="workspace-status">確認用・未登録</span>
+        </div>
       </header>
 
       <div className="split-layout">

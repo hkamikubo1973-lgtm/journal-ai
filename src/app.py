@@ -427,6 +427,7 @@ def load_department_master():
 DEPARTMENT_MASTER = load_department_master()
 
 from datetime import datetime
+from system_settings import load_system_settings, save_system_settings
 
 from engine import (
     EXCLUDED_SUGGESTION_ACCOUNTS,
@@ -2583,59 +2584,12 @@ def build_receivable_check_excel(check_rows):
     return output.getvalue()
 
 
-SETTINGS_PATH = os.path.join(
-    "config",
-    "settings.json"
-)
-
-
-def load_system_settings():
-
-    try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as file:
-            settings = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-    if not isinstance(settings, dict):
-        return {}
-
-    return {
-        "company_name": str(settings.get("company_name", "") or ""),
-        "csv_export_dir": str(settings.get("csv_export_dir", "") or ""),
-    }
-
-
-def save_system_settings(company_name, csv_export_dir):
-
-    settings = {
-        "company_name": str(company_name or ""),
-        "csv_export_dir": str(csv_export_dir or ""),
-    }
-
-    try:
-        os.makedirs(
-            os.path.dirname(SETTINGS_PATH),
-            exist_ok=True
-        )
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as file:
-            json.dump(
-                settings,
-                file,
-                ensure_ascii=False,
-                indent=2
-            )
-    except OSError as e:
-        return False, f"システム設定を保存できませんでした: {e}"
-
-    return True, ""
-
-
 def save_system_settings_from_state():
 
     saved, message = save_system_settings(
         st.session_state.get("company_name", ""),
-        st.session_state.get("csv_export_dir", "")
+        st.session_state.get("csv_export_dir", ""),
+        st.session_state.get("fiscal_year_start_month", 2)
     )
 
     if not saved:
@@ -2946,6 +2900,12 @@ if "csv_export_dir" not in st.session_state:
     st.session_state["csv_export_dir"] = loaded_system_settings.get(
         "csv_export_dir",
         ""
+    )
+
+if "fiscal_year_start_month" not in st.session_state:
+    st.session_state["fiscal_year_start_month"] = loaded_system_settings.get(
+        "fiscal_year_start_month",
+        2
     )
 
 def render_system_settings_sidebar():

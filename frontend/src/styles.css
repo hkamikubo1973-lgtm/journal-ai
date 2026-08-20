@@ -17,6 +17,8 @@ input:focus, select:focus, textarea:focus { border-color: #16725f; outline: 3px 
 .page-title { display: flex; gap: 12px; align-items: baseline; }
 .page-header h1 { margin: 0; font-size: 1.35rem; line-height: 1.2; }
 .page-title > span { color: #43545c; font-size: 0.9rem; font-weight: 800; }
+.page-header-meta { display: flex; gap: 8px; align-items: center; }
+.fiscal-year-status { color: #43545c; font-size: 0.72rem; font-weight: 800; white-space: nowrap; }
 .workspace-status { padding: 4px 9px; border-radius: 999px; color: #6d5310; background: #fff2c7; font-size: 0.7rem; font-weight: 800; }
 .eyebrow, .step-label { margin: 0 0 5px; color: #16725f; font-size: 0.7rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
 
@@ -301,6 +303,7 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   .app-shell { width: min(100% - 20px, 620px); padding-top: 20px; }
   .page-header { align-items: flex-start; }
   .page-title { gap: 4px; align-items: flex-start; flex-direction: column; }
+  .page-header-meta { align-items: flex-end; flex-direction: column; }
   .candidate-list { grid-template-columns: 1fr; }
   .edit-overview { grid-template-columns: 1fr; }
   .status-strip, .master-check-panel[open] { grid-column: auto; }

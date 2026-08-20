@@ -10,6 +10,13 @@ import copy
 
 from collections import Counter
 from datetime import datetime
+from fiscal_year import (
+    get_current_fiscal_year,
+    get_fiscal_year,
+    KEEP_PAST_FISCAL_YEARS,
+    require_journal_date,
+)
+from system_settings import load_system_settings
 from columns import SEARCH_COLUMNS
 from columns import (
     EPSON_COLUMNS,
@@ -1407,6 +1414,8 @@ def normalize_rows(rows):
 
         r = clean_row(r)
 
+        require_journal_date(r.get(COL_DATE, ""))
+
         if not is_valid_row(r):
             continue
 
@@ -1417,29 +1426,32 @@ def normalize_rows(rows):
 # =========================================
 # 3年保持
 # =========================================
-KEEP_YEARS = 3
+KEEP_YEARS = KEEP_PAST_FISCAL_YEARS
 
-def keep_recent_years(rows):
+def keep_recent_years(rows, today=None, start_month=None):
 
-    current_year = datetime.now().year
+    if today is None:
+        today = datetime.now().date()
+
+    if start_month is None:
+        start_month = load_system_settings()[
+            "fiscal_year_start_month"
+        ]
+
+    minimum_fiscal_year = (
+        get_current_fiscal_year(today, start_month)
+        - KEEP_YEARS
+    )
 
     result = []
 
     for r in rows:
 
-        date_str = str(
+        journal_date = require_journal_date(
             r.get(COL_DATE, "")
         )
 
-        try:
-
-            year = int(date_str[:4])
-
-        except:
-
-            continue
-
-        if year >= current_year - KEEP_YEARS:
+        if get_fiscal_year(journal_date, start_month) >= minimum_fiscal_year:
 
             result.append(r)
 

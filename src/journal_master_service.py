@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 import csv
+from datetime import date
 from pathlib import Path
 from typing import Any
+
+from fiscal_year import build_fiscal_year_info
+from system_settings import load_system_settings
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -280,10 +284,17 @@ def load_journal_masters() -> dict:
         "warnings": warnings,
     }
 
+    settings = load_system_settings()
+    system = build_fiscal_year_info(
+        date.today(),
+        settings["fiscal_year_start_month"],
+    )
+
     return {
         "accounts": accounts,
         "sub_accounts": sub_accounts,
         "departments": departments,
         "sub_account_relations": sub_account_relations,
         "diagnostics": diagnostics,
+        "system": system,
     }

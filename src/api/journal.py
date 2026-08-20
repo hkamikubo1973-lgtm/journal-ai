@@ -170,6 +170,16 @@ class JournalMasterDiagnostics(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class FiscalYearSystemInfo(BaseModel):
+    fiscal_year_start_month: int
+    fiscal_year_end_month: int
+    current_fiscal_year: int
+    current_fiscal_year_start: str
+    current_fiscal_year_end: str
+    retention_start_date: str
+    keep_past_fiscal_years: int
+
+
 class JournalMastersResponse(BaseModel):
     accounts: list[AccountMasterItem]
     sub_accounts: list[SubAccountMasterItem]
@@ -178,6 +188,7 @@ class JournalMastersResponse(BaseModel):
         default_factory=list
     )
     diagnostics: JournalMasterDiagnostics
+    system: FiscalYearSystemInfo
 
 
 app = FastAPI(title="journal-ai API")

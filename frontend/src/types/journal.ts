@@ -176,10 +176,21 @@ export type JournalMastersDiagnostics = {
   warnings: string[];
 };
 
+export type FiscalYearSystemInfo = {
+  fiscal_year_start_month: number;
+  fiscal_year_end_month: number;
+  current_fiscal_year: number;
+  current_fiscal_year_start: string;
+  current_fiscal_year_end: string;
+  retention_start_date: string;
+  keep_past_fiscal_years: number;
+};
+
 export type JournalMastersResponse = {
   accounts: AccountMasterItem[];
   sub_accounts: SubAccountMasterItem[];
   departments: DepartmentMasterItem[];
   sub_account_relations: SubAccountRelation[];
   diagnostics: JournalMastersDiagnostics;
+  system: FiscalYearSystemInfo;
 };
