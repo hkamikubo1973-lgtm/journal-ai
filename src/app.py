@@ -428,6 +428,15 @@ DEPARTMENT_MASTER = load_department_master()
 
 from datetime import datetime
 from system_settings import load_system_settings, save_system_settings
+from export_file_service import (
+    get_export_target_dir,
+    save_csv_to_export_dir,
+)
+from journal_persistence_service import (
+    build_normal_journal_batch_id,
+    is_normal_journal_batch_in_transactions,
+    register_epson_rows_to_search_db,
+)
 
 from engine import (
     EXCLUDED_SUGGESTION_ACCOUNTS,
@@ -1812,93 +1821,6 @@ def journal_import_key(row):
     )
 
 
-NORMAL_JOURNAL_BATCH_COLUMNS = [
-    COL_DATE,
-    "借方科目",
-    COL_DEBIT,
-    "借方補助",
-    COL_DEBIT_SUB,
-    COL_DEBIT_AMOUNT,
-    "貸方科目",
-    COL_CREDIT,
-    "貸方補助",
-    COL_CREDIT_SUB,
-    COL_CREDIT_AMOUNT,
-    COL_SUMMARY,
-    "伝票摘要",
-    "入力会社",
-]
-
-
-def normalize_normal_journal_batch_value(column, value):
-
-    value = unicodedata.normalize(
-        "NFKC",
-        str(value or "")
-    )
-    value = " ".join(value.split())
-
-    if column == COL_DATE:
-        value = value.replace("/", "").replace("-", "")
-
-    if column in {COL_DEBIT_AMOUNT, COL_CREDIT_AMOUNT}:
-        value = value.replace(",", "")
-
-    return value
-
-
-def normal_journal_batch_row_key(row):
-
-    return tuple(
-        normalize_normal_journal_batch_value(
-            column,
-            row.get(column, "")
-        )
-        for column in NORMAL_JOURNAL_BATCH_COLUMNS
-    )
-
-
-def build_normal_journal_batch_id(rows):
-
-    row_keys = sorted(
-        normal_journal_batch_row_key(row)
-        for row in (rows or [])
-        if isinstance(row, dict)
-    )
-    serialized_rows = json.dumps(
-        row_keys,
-        ensure_ascii=False,
-        separators=(",", ":")
-    )
-
-    return hashlib.sha256(
-        serialized_rows.encode("utf-8")
-    ).hexdigest()
-
-
-def is_normal_journal_batch_in_transactions(rows):
-
-    target_keys = Counter(
-        normal_journal_batch_row_key(row)
-        for row in (rows or [])
-        if isinstance(row, dict)
-    )
-
-    if not target_keys:
-        return False
-
-    existing_df = load_transactions_df()
-    existing_keys = Counter(
-        normal_journal_batch_row_key(row)
-        for _, row in existing_df.iterrows()
-    )
-
-    return all(
-        existing_keys[key] >= count
-        for key, count in target_keys.items()
-    )
-
-
 def prepare_past_journal_import(upload_df, existing_df):
 
     existing_columns = list(existing_df.columns)
@@ -1972,97 +1894,6 @@ def append_past_journals_to_transactions(new_df):
     st.cache_data.clear()
 
     return len(new_df)
-
-
-def register_epson_rows_to_search_db(registered_rows):
-
-    registered_rows = [
-        row
-        for row in (registered_rows or [])
-        if isinstance(row, dict)
-    ]
-
-    if not registered_rows:
-        return False, "登録対象の仕訳がありません"
-
-    try:
-        before_count = len(load_transactions_df())
-        update_search_csv([registered_rows])
-        after_count = len(load_transactions_df())
-    except Exception as e:
-        return False, str(e)
-
-    appended_count = after_count - before_count
-
-    if appended_count <= 0:
-        return False, "transactions.csvへの追記を確認できませんでした"
-
-    return True, appended_count
-
-
-def ensure_output_subdir(base_dir, subdir_name):
-
-    base_dir = str(base_dir or "").strip()
-
-    if not base_dir:
-        return False, "CSV保存先フォルダを入力してください"
-
-    if not os.path.isdir(base_dir):
-        return False, "CSV保存先フォルダが存在しません"
-
-    output_dir = os.path.join(base_dir, subdir_name)
-
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-    except OSError as e:
-        return False, f"保存先フォルダを作成できませんでした: {e}"
-
-    return True, output_dir
-
-
-def get_export_target_dir(export_dir, subdir_name=None):
-
-    export_dir = str(export_dir or "").strip()
-
-    if not subdir_name:
-        if not export_dir:
-            return False, "CSV保存先フォルダを入力してください"
-
-        if not os.path.isdir(export_dir):
-            return False, "CSV保存先フォルダが存在しません"
-
-        return True, export_dir
-
-    return ensure_output_subdir(export_dir, subdir_name)
-
-
-def save_csv_to_export_dir(
-    csv_bytes,
-    filename,
-    export_dir,
-    subdir_name=None
-):
-
-    target_ready, target_dir_or_message = get_export_target_dir(
-        export_dir,
-        subdir_name
-    )
-
-    if not target_ready:
-        return False, target_dir_or_message
-
-    save_path = os.path.join(
-        target_dir_or_message,
-        os.path.basename(filename)
-    )
-
-    try:
-        with open(save_path, "wb") as file:
-            file.write(csv_bytes)
-    except OSError as e:
-        return False, f"CSVを保存できませんでした: {e}"
-
-    return True, f"保存しました：{save_path}"
 
 
 def save_file_to_export_dir(

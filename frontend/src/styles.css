@@ -243,9 +243,12 @@ th { background: #f1f5f3; }
 .cart-actions { display: flex; flex: 0 0 auto; gap: 8px; align-items: center; }
 .epson-download-button { min-height: 34px; padding: 6px 12px; color: #fff; border-color: #16725f; background: #16725f; font-size: 0.76rem; }
 .epson-download-button:not(:disabled):hover { background: #105d4d; }
+.epson-save-button { min-height: 34px; padding: 6px 12px; color: #fff; border-color: #245f79; background: #245f79; font-size: 0.76rem; }
+.epson-save-button:not(:disabled):hover { background: #194b61; }
 .clear-cart-button, .remove-cart-button { min-height: 34px; padding: 6px 12px; color: #8d2424; border: 1px solid #d8a5a5; background: #fff; font-size: 0.76rem; }
 .clear-cart-button:not(:disabled):hover, .remove-cart-button:hover { background: #fff0f0; }
 .registration-panel-note { margin: 0; color: #52636b; font-size: 0.76rem; }
+.cart-save-note { margin: 8px 0 0; color: #7b5310; font-size: 0.74rem; font-weight: 800; }
 .cart-total-note { margin: 7px 0 0; color: #627078; font-size: 0.7rem; }
 .cart-item-main span { color: #627078; font-size: 0.68rem; font-weight: 800; }
 .cart-status-message { margin: 12px 0 0; padding: 9px 11px; border-radius: 6px; color: #135b4c; background: #e8f5f1; font-size: 0.78rem; font-weight: 700; }

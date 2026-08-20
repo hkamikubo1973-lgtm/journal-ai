@@ -26,6 +26,7 @@ class EpsonExportValidationError(ValueError):
 class EpsonCsvExport:
     content: bytes
     filename: str
+    epson_base_rows: tuple[dict[str, Any], ...] = ()
 
 
 def _validated_prepared_journal(
@@ -159,4 +160,8 @@ def export_epson_csv(
         "epson_output_"
         f"{current_datetime.strftime('%Y%m%d_%H%M')}.csv"
     )
-    return EpsonCsvExport(content=csv_bytes, filename=filename)
+    return EpsonCsvExport(
+        content=csv_bytes,
+        filename=filename,
+        epson_base_rows=tuple(epson_base_rows),
+    )

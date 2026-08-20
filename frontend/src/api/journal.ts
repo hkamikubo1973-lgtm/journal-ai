@@ -1,5 +1,6 @@
 import type {
   EpsonExportCsvRequest,
+  EpsonSaveCsvResponse,
   PrepareRegistrationRequest,
   PrepareRegistrationResponse,
   JournalMastersResponse,
@@ -85,6 +86,24 @@ export async function downloadEpsonCsv(
     blob: await response.blob(),
     filename: getDownloadFilename(response.headers.get("Content-Disposition")),
   };
+}
+
+export async function saveEpsonCsv(
+  request: EpsonExportCsvRequest,
+): Promise<EpsonSaveCsvResponse> {
+  const response = await fetch("/api/journal/save-epson-csv", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    throw new Error(`EPSON CSV正式保存エラー: ${await getErrorMessage(response)}`);
+  }
+
+  return response.json() as Promise<EpsonSaveCsvResponse>;
 }
 
 export async function fetchJournalMasters(): Promise<JournalMastersResponse> {

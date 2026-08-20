@@ -144,6 +144,18 @@ export type EpsonExportCsvRequest = {
   }>;
 };
 
+export type EpsonSaveCsvResponse = {
+  ok: boolean;
+  csv_saved: boolean;
+  db_registered: boolean;
+  already_registered: boolean;
+  partial_failure: boolean;
+  filename: string;
+  save_path: string;
+  appended_count: number;
+  message: string;
+};
+
 export type AccountMasterItem = {
   code: string;
   name: string;

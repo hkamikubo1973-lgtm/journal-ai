@@ -12,6 +12,7 @@ from journal_export_service import (
 )
 from journal_master_service import load_journal_masters
 from journal_registration_service import prepare_registration
+from journal_save_service import EpsonSaveError, save_and_register_epson_csv
 from journal_search_service import search_journals
 
 
@@ -114,6 +115,18 @@ class EpsonExportItemRequest(BaseModel):
 
 class EpsonExportCsvRequest(BaseModel):
     items: list[EpsonExportItemRequest]
+
+
+class EpsonSaveCsvResponse(BaseModel):
+    ok: bool
+    csv_saved: bool
+    db_registered: bool
+    already_registered: bool
+    partial_failure: bool
+    filename: str
+    save_path: str
+    appended_count: int
+    message: str
 
 
 class AccountMasterItem(BaseModel):
@@ -291,3 +304,28 @@ def post_export_epson_csv(request: EpsonExportCsvRequest):
             ),
         },
     )
+
+
+@app.post(
+    "/api/journal/save-epson-csv",
+    response_model=EpsonSaveCsvResponse,
+)
+def post_save_epson_csv(request: EpsonExportCsvRequest):
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    try:
+        result = save_and_register_epson_csv(payload["items"])
+    except EpsonExportValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except UnicodeEncodeError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="EPSON CSVをCP932へ変換できない文字が含まれています。",
+        ) from error
+    except EpsonSaveError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="EPSON CSVの正式保存処理に失敗しました。検索DBを確認してください。",
+        ) from error
+    return result.to_dict()

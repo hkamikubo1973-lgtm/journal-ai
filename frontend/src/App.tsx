@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { downloadEpsonCsv, fetchJournalMasters, prepareRegistration, searchJournals } from "./api/journal";
+import { downloadEpsonCsv, fetchJournalMasters, prepareRegistration, saveEpsonCsv, searchJournals } from "./api/journal";
 import type {
   JournalCandidate,
   JournalEditForm,
@@ -722,6 +722,7 @@ export default function App() {
   const [registrationCart, setRegistrationCart] = useState<RegistrationCartItem[]>([]);
   const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
   const [epsonDownloadLoading, setEpsonDownloadLoading] = useState(false);
+  const [epsonSaveLoading, setEpsonSaveLoading] = useState(false);
   const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
   const [mastersLoading, setMastersLoading] = useState(false);
   const [mastersError, setMastersError] = useState<string | null>(null);
@@ -986,6 +987,27 @@ export default function App() {
     }
   }
 
+  async function handleEpsonCsvSave() {
+    if (registrationCart.length === 0 || epsonSaveLoading) return;
+
+    setEpsonSaveLoading(true);
+    setCartStatusMessage(null);
+    try {
+      const response = await saveEpsonCsv({
+        items: registrationCart.map((item) => ({
+          registration_id: item.registration_id,
+          prepared_journal: item.prepared_journal,
+          epson_base_row: item.epson_base_row,
+        })),
+      });
+      setCartStatusMessage(`${response.message} 保存先：${response.save_path}`);
+    } catch (caughtError) {
+      setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "EPSON CSVを正式保存できませんでした。検索DBは更新していません。");
+    } finally {
+      setEpsonSaveLoading(false);
+    }
+  }
+
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
     selectedCandidate.has_fukugo || selectedCandidate.has_sundry || selectedCandidate.contains_fukugo_or_sundry ||
     selectedCandidate.show_block_rows || selectedCandidate.is_complex
@@ -1229,9 +1251,14 @@ export default function App() {
                 disabled={registrationCart.length === 0 || epsonDownloadLoading}>
                 {epsonDownloadLoading ? "ダウンロード準備中…" : "EPSON CSVダウンロード"}
               </button>
+              <button type="button" className="epson-save-button" data-cart-tab="" onClick={handleEpsonCsvSave}
+                disabled={registrationCart.length === 0 || epsonSaveLoading}>
+                {epsonSaveLoading ? "保存・DB登録中…" : "保存先へ保存"}
+              </button>
               <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
             </div>
           </div>
+          <p className="cart-save-note">保存先へ保存すると検索DBへ登録します。</p>
           <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
           {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
             {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>

@@ -1457,7 +1457,12 @@ def keep_recent_years(rows, today=None, start_month=None):
 
     return result
 
-def append_to_csv(new_rows):
+def append_to_csv(
+    new_rows,
+    output_path=None,
+    today=None,
+    start_month=None,
+):
     """
     CSVへ上追加（最重要）
     """
@@ -1465,12 +1470,14 @@ def append_to_csv(new_rows):
     if not new_rows:
         return
 
+    target_path = output_path or OUTPUT_PATH
+
     # 既存読込
     existing = []
 
-    if os.path.exists(OUTPUT_PATH):
+    if os.path.exists(target_path):
 
-        with open(OUTPUT_PATH, encoding="utf-8-sig") as f:
+        with open(target_path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for r in reader:
                 existing.append(r)
@@ -1483,12 +1490,14 @@ def append_to_csv(new_rows):
 
     # 3年保持
     combined = keep_recent_years(
-        combined
+        combined,
+        today=today,
+        start_month=start_month,
     )
 
     # 書き込み
     with open(
-        OUTPUT_PATH,
+        target_path,
         "w",
         newline="",
         encoding="utf-8-sig"
@@ -1505,7 +1514,12 @@ def append_to_csv(new_rows):
             writer.writerow(r)
 
 
-def update_search_csv(confirmed_docs):
+def update_search_csv(
+    confirmed_docs,
+    output_path=None,
+    today=None,
+    start_month=None,
+):
     """
     メイン処理
     confirmed（登録済）をCSVへ反映
@@ -1524,4 +1538,9 @@ def update_search_csv(confirmed_docs):
         all_rows.extend(rows)
 
     # CSVへ追加
-    append_to_csv(all_rows)
+    append_to_csv(
+        all_rows,
+        output_path=output_path,
+        today=today,
+        start_month=start_month,
+    )
