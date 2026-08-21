@@ -919,13 +919,23 @@ export default function App() {
     try {
       const response = await prepareRegistration(request);
       setPrepareResponse(response);
-      if (response.ok && response.registration_id && response.prepared_journal && response.epson_preview_row && response.epson_base_row) {
+      if (
+        response.ok
+        && response.registration_id
+        && response.prepared_journal
+        && response.epson_preview_row
+        && response.epson_base_row
+        && response.print_metadata
+        && response.print_warnings
+      ) {
         const cartItem: RegistrationCartItem = {
           ...response,
           registration_id: response.registration_id,
           prepared_journal: response.prepared_journal,
           epson_preview_row: response.epson_preview_row,
           epson_base_row: response.epson_base_row,
+          print_metadata: response.print_metadata,
+          print_warnings: response.print_warnings,
           addedAt: new Date().toISOString(),
         };
         if (registrationCart.some((item) => item.registration_id === response.registration_id)) {

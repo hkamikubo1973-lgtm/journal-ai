@@ -113,6 +113,9 @@ export type PreparedJournal = {
 
 export type EpsonPreviewRow = Record<string, unknown>;
 export type EpsonBaseRow = Record<string, unknown>;
+export type JournalPrintMetadata = {
+  print_category: string;
+};
 
 export type PrepareRegistrationResponse = {
   ok: boolean;
@@ -123,16 +126,25 @@ export type PrepareRegistrationResponse = {
   prepared_journal: PreparedJournal | null;
   epson_preview_row: EpsonPreviewRow | null;
   epson_base_row: EpsonBaseRow | null;
+  print_metadata: JournalPrintMetadata | null;
+  print_warnings: string[] | null;
 };
 
 export type RegistrationCartItem = Omit<
   PrepareRegistrationResponse,
-  "registration_id" | "prepared_journal" | "epson_preview_row" | "epson_base_row"
+  | "registration_id"
+  | "prepared_journal"
+  | "epson_preview_row"
+  | "epson_base_row"
+  | "print_metadata"
+  | "print_warnings"
 > & {
   registration_id: string;
   prepared_journal: PreparedJournal;
   epson_preview_row: EpsonPreviewRow;
   epson_base_row: EpsonBaseRow;
+  print_metadata: JournalPrintMetadata;
+  print_warnings: string[];
   addedAt: string;
 };
 

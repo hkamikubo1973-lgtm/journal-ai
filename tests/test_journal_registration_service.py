@@ -10,7 +10,10 @@ sys.path.insert(0, str(SRC_DIR))
 
 from columns import EPSON_COLUMNS  # noqa: E402
 from epson_export_service import build_epson_rows  # noqa: E402
-from journal_registration_service import prepare_registration  # noqa: E402
+from journal_registration_service import (  # noqa: E402
+    build_print_warnings,
+    prepare_registration,
+)
 
 
 MASTERS = {
@@ -111,6 +114,8 @@ class JournalRegistrationServiceTest(unittest.TestCase):
             "prepared_journal",
             "epson_preview_row",
             "epson_base_row",
+            "print_metadata",
+            "print_warnings",
         ):
             self.assertIsNone(response[field], field)
 
@@ -190,6 +195,117 @@ class JournalRegistrationServiceTest(unittest.TestCase):
         self.assertEqual(len(result[0]), 45)
         self.assertEqual(result[0]["借方消費税コード"], "TAX-D")
         self.assertEqual(result[0]["入力会社"], "テスト会社")
+
+    def test_success_returns_print_metadata_and_no_default_warnings(self):
+        response = prepare_registration(self._payload())
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["print_metadata"], {"print_category": ""})
+        self.assertEqual(response["print_warnings"], [])
+
+    def test_print_category_uses_streamlit_priority(self):
+        cases = (
+            (
+                {"区分": "区分値", "source": "source値", "処理区分": "処理区分値"},
+                "区分値",
+            ),
+            ({"source": "source値", "処理区分": "処理区分値"}, "source値"),
+            ({"処理区分": "処理区分値"}, "処理区分値"),
+        )
+
+        for source_overrides, expected in cases:
+            with self.subTest(source_overrides=source_overrides):
+                response = prepare_registration(
+                    self._payload(source_overrides=source_overrides)
+                )
+                self.assertEqual(
+                    response["print_metadata"]["print_category"],
+                    expected,
+                )
+
+    def test_voucher_summary_warning_matches_presence(self):
+        present = prepare_registration(self._payload())
+        missing = prepare_registration(
+            self._payload(edit_overrides={"voucher_summary": ""})
+        )
+
+        self.assertNotIn("伝票摘要なし", present["print_warnings"])
+        self.assertIn("伝票摘要なし", missing["print_warnings"])
+
+    def test_valid_sub_account_does_not_add_missing_code_warning(self):
+        response = prepare_registration(self._payload())
+
+        self.assertNotIn("借方補助コード未取得", response["print_warnings"])
+        self.assertNotIn("貸方補助コード未取得", response["print_warnings"])
+
+    def test_print_warning_builder_detects_sub_name_without_code(self):
+        warnings = build_print_warnings(
+            {
+                "debit_sub_name": "小口",
+                "debit_sub_code": "",
+                "credit_sub_name": "本店",
+                "credit_sub_code": "",
+                "voucher_summary": "あり",
+            },
+            {},
+        )
+
+        self.assertEqual(
+            warnings,
+            ["借方補助コード未取得", "貸方補助コード未取得"],
+        )
+
+    def test_db_template_warning_requires_explicit_source_value(self):
+        absent = prepare_registration(self._payload())
+        legacy = prepare_registration(
+            self._payload(source_overrides={"DB雛形": "なし"})
+        )
+        boolean_flag = prepare_registration(
+            self._payload(source_overrides={"db_template_found": False})
+        )
+
+        self.assertNotIn("DB雛形なし", absent["print_warnings"])
+        self.assertIn("DB雛形なし", legacy["print_warnings"])
+        self.assertIn("DB雛形なし", boolean_flag["print_warnings"])
+
+    def test_print_only_metadata_does_not_change_registration_or_epson(self):
+        original = prepare_registration(self._payload())
+        with_print_values = prepare_registration(
+            self._payload(
+                source_overrides={
+                    "区分": "通常",
+                    "DB雛形": "なし",
+                }
+            )
+        )
+
+        self.assertEqual(
+            original["registration_id"],
+            with_print_values["registration_id"],
+        )
+        self.assertEqual(
+            original["epson_base_row"],
+            with_print_values["epson_base_row"],
+        )
+        original_epson = build_epson_rows(
+            [original["epson_base_row"]],
+            "テスト会社",
+            {"現金": "100", "売上": "200"},
+            {"小口": "1"},
+            machine_name="TEST-MACHINE",
+            user_name="TEST-USER",
+            input_date="20260821",
+        )
+        print_metadata_epson = build_epson_rows(
+            [with_print_values["epson_base_row"]],
+            "テスト会社",
+            {"現金": "100", "売上": "200"},
+            {"小口": "1"},
+            machine_name="TEST-MACHINE",
+            user_name="TEST-USER",
+            input_date="20260821",
+        )
+        self.assertEqual(original_epson, print_metadata_epson)
 
     @staticmethod
     def _source_row(**overrides):

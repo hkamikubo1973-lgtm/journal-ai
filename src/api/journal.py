@@ -105,6 +105,8 @@ class PrepareRegistrationResponse(BaseModel):
     prepared_journal: Optional[dict[str, Any]] = None
     epson_preview_row: Optional[dict[str, Any]] = None
     epson_base_row: Optional[dict[str, Any]] = None
+    print_metadata: Optional[dict[str, str]] = None
+    print_warnings: Optional[list[str]] = None
 
 
 class EpsonExportItemRequest(BaseModel):

@@ -102,7 +102,56 @@ def _blocked_response(
         "prepared_journal": None,
         "epson_preview_row": None,
         "epson_base_row": None,
+        "print_metadata": None,
+        "print_warnings": None,
     }
+
+
+def build_print_metadata(source_row: Any) -> dict[str, str]:
+    """元行に実在する区分情報だけから印刷用の最終表示値を作る。"""
+
+    if not isinstance(source_row, Mapping):
+        return {"print_category": ""}
+
+    for key in ("区分", "source", "処理区分"):
+        value = source_row.get(key, "")
+        if value not in (None, ""):
+            return {"print_category": str(value)}
+
+    return {"print_category": ""}
+
+
+def build_print_warnings(
+    prepared_journal: Mapping[str, Any],
+    source_row: Any,
+) -> list[str]:
+    """現行Streamlitと同じ文言・順序で印刷用注意を確定する。"""
+
+    warnings: list[str] = []
+    source = source_row if isinstance(source_row, Mapping) else {}
+
+    if (
+        source.get("DB雛形") == "なし"
+        or source.get("db_template_found") is False
+    ):
+        warnings.append("DB雛形なし")
+
+    if (
+        prepared_journal.get("debit_sub_name")
+        and not prepared_journal.get("debit_sub_code")
+    ):
+        warnings.append("借方補助コード未取得")
+
+    if (
+        prepared_journal.get("credit_sub_name")
+        and not prepared_journal.get("credit_sub_code")
+    ):
+        warnings.append("貸方補助コード未取得")
+
+    if not prepared_journal.get("voucher_summary"):
+        warnings.append("伝票摘要なし")
+
+    return warnings
 
 
 def extract_epson_source_row(
@@ -444,6 +493,11 @@ def prepare_registration(payload: dict) -> dict:
         prepared_journal,
         epson_base_row,
     )
+    print_metadata = build_print_metadata(source_row)
+    print_warnings = build_print_warnings(
+        prepared_journal,
+        source_row,
+    )
 
     return {
         "ok": True,
@@ -454,4 +508,6 @@ def prepare_registration(payload: dict) -> dict:
         "prepared_journal": prepared_journal,
         "epson_preview_row": epson_preview_row,
         "epson_base_row": epson_base_row,
+        "print_metadata": print_metadata,
+        "print_warnings": print_warnings,
     }
