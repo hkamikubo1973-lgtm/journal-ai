@@ -168,6 +168,23 @@ export type EpsonSaveCsvResponse = {
   message: string;
 };
 
+export type InputExcelRequest = {
+  items: Array<{
+    registration_id: string;
+    prepared_journal: PreparedJournal;
+    epson_base_row: EpsonBaseRow;
+    print_metadata: JournalPrintMetadata;
+    print_warnings: string[];
+  }>;
+};
+
+export type InputExcelSaveResponse = {
+  success: boolean;
+  filename: string;
+  saved_path: string;
+  message: string;
+};
+
 export type AccountMasterItem = {
   code: string;
   name: string;

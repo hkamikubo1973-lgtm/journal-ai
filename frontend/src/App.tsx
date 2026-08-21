@@ -1,5 +1,13 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { downloadEpsonCsv, fetchJournalMasters, prepareRegistration, saveEpsonCsv, searchJournals } from "./api/journal";
+import {
+  downloadEpsonCsv,
+  downloadInputExcel,
+  fetchJournalMasters,
+  prepareRegistration,
+  saveEpsonCsv,
+  saveInputExcel,
+  searchJournals,
+} from "./api/journal";
 import type {
   JournalCandidate,
   JournalEditForm,
@@ -723,6 +731,8 @@ export default function App() {
   const [cartStatusMessage, setCartStatusMessage] = useState<string | null>(null);
   const [epsonDownloadLoading, setEpsonDownloadLoading] = useState(false);
   const [epsonSaveLoading, setEpsonSaveLoading] = useState(false);
+  const [inputExcelDownloadLoading, setInputExcelDownloadLoading] = useState(false);
+  const [inputExcelSaveLoading, setInputExcelSaveLoading] = useState(false);
   const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
   const [mastersLoading, setMastersLoading] = useState(false);
   const [mastersError, setMastersError] = useState<string | null>(null);
@@ -1018,6 +1028,63 @@ export default function App() {
     }
   }
 
+  async function handleInputExcelDownload() {
+    if (registrationCart.length === 0 || inputExcelDownloadLoading) return;
+
+    setInputExcelDownloadLoading(true);
+    setCartStatusMessage(null);
+    try {
+      const downloaded = await downloadInputExcel({
+        items: registrationCart.map((item) => ({
+          registration_id: item.registration_id,
+          prepared_journal: item.prepared_journal,
+          epson_base_row: item.epson_base_row,
+          print_metadata: item.print_metadata,
+          print_warnings: item.print_warnings,
+        })),
+      });
+      const objectUrl = URL.createObjectURL(downloaded.blob);
+      try {
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = downloaded.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+      setCartStatusMessage("入力用Excelをダウンロードしました。検索DBは更新していません。");
+    } catch (caughtError) {
+      setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "入力用Excelをダウンロードできませんでした。");
+    } finally {
+      setInputExcelDownloadLoading(false);
+    }
+  }
+
+  async function handleInputExcelSave() {
+    if (registrationCart.length === 0 || inputExcelSaveLoading) return;
+
+    setInputExcelSaveLoading(true);
+    setCartStatusMessage(null);
+    try {
+      const response = await saveInputExcel({
+        items: registrationCart.map((item) => ({
+          registration_id: item.registration_id,
+          prepared_journal: item.prepared_journal,
+          epson_base_row: item.epson_base_row,
+          print_metadata: item.print_metadata,
+          print_warnings: item.print_warnings,
+        })),
+      });
+      setCartStatusMessage(`${response.message} 保存先：${response.saved_path}`);
+    } catch (caughtError) {
+      setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "入力用Excelを保存できませんでした。検索DBは更新していません。");
+    } finally {
+      setInputExcelSaveLoading(false);
+    }
+  }
+
   const selectedCandidateIsComplex = Boolean(selectedCandidate && (
     selectedCandidate.has_fukugo || selectedCandidate.has_sundry || selectedCandidate.contains_fukugo_or_sundry ||
     selectedCandidate.show_block_rows || selectedCandidate.is_complex
@@ -1265,10 +1332,19 @@ export default function App() {
                 disabled={registrationCart.length === 0 || epsonSaveLoading}>
                 {epsonSaveLoading ? "保存・DB登録中…" : "保存先へ保存"}
               </button>
+              <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleInputExcelDownload}
+                disabled={registrationCart.length === 0 || inputExcelDownloadLoading}>
+                {inputExcelDownloadLoading ? "Excel準備中…" : "入力用Excelダウンロード"}
+              </button>
+              <button type="button" className="epson-save-button" data-cart-tab="" onClick={handleInputExcelSave}
+                disabled={registrationCart.length === 0 || inputExcelSaveLoading}>
+                {inputExcelSaveLoading ? "Excel保存中…" : "入力用Excel保存"}
+              </button>
               <button type="button" className="clear-cart-button" onClick={clearRegistrationCart} disabled={registrationCart.length === 0}>カートを空にする</button>
             </div>
           </div>
           <p className="cart-save-note">保存先へ保存すると検索DBへ登録します。</p>
+          <p className="cart-save-note">入力用Excelは簡易仕訳帳・印刷用です。保存・ダウンロードしても検索DBには登録しません。</p>
           <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
           {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
             {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>

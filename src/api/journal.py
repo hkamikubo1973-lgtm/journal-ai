@@ -3,9 +3,17 @@
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictStr
 
 from engine import load_data
+from input_excel_save_service import (
+    InputExcelSaveError,
+    save_input_excel,
+)
+from input_excel_service import (
+    InputExcelValidationError,
+    export_input_excel,
+)
 from journal_export_service import (
     EpsonExportValidationError,
     export_epson_csv,
@@ -128,6 +136,29 @@ class EpsonSaveCsvResponse(BaseModel):
     filename: str
     save_path: str
     appended_count: int
+    message: str
+
+
+class InputExcelPrintMetadataRequest(BaseModel):
+    print_category: StrictStr
+
+
+class InputExcelItemRequest(BaseModel):
+    registration_id: str
+    prepared_journal: dict[str, Any]
+    epson_base_row: dict[str, Any]
+    print_metadata: InputExcelPrintMetadataRequest
+    print_warnings: list[StrictStr]
+
+
+class InputExcelRequest(BaseModel):
+    items: list[InputExcelItemRequest]
+
+
+class InputExcelSaveResponse(BaseModel):
+    success: bool
+    filename: str
+    saved_path: str
     message: str
 
 
@@ -329,5 +360,55 @@ def post_save_epson_csv(request: EpsonExportCsvRequest):
         raise HTTPException(
             status_code=500,
             detail="EPSON CSVの正式保存処理に失敗しました。検索DBを確認してください。",
+        ) from error
+    return result.to_dict()
+
+
+@app.post("/api/journal/export-input-excel")
+def post_export_input_excel(request: InputExcelRequest):
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    try:
+        result = export_input_excel(payload["items"])
+    except InputExcelValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="入力用Excelを生成できませんでした。",
+        ) from error
+
+    return Response(
+        content=result.content,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{result.filename}"'
+            ),
+        },
+    )
+
+
+@app.post(
+    "/api/journal/save-input-excel",
+    response_model=InputExcelSaveResponse,
+)
+def post_save_input_excel(request: InputExcelRequest):
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    try:
+        result = save_input_excel(payload["items"])
+    except InputExcelValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except InputExcelSaveError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "入力用Excelの保存に失敗しました。"
+                "検索DBは更新していません。"
+            ),
         ) from error
     return result.to_dict()

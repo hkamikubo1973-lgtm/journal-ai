@@ -1,6 +1,8 @@
 import type {
   EpsonExportCsvRequest,
   EpsonSaveCsvResponse,
+  InputExcelRequest,
+  InputExcelSaveResponse,
   PrepareRegistrationRequest,
   PrepareRegistrationResponse,
   JournalMastersResponse,
@@ -13,9 +15,12 @@ export type DownloadedFile = {
   filename: string;
 };
 
-function getDownloadFilename(contentDisposition: string | null): string {
+function getDownloadFilename(
+  contentDisposition: string | null,
+  fallback: string,
+): string {
   const match = contentDisposition?.match(/filename="?([^";]+)"?/i);
-  return match?.[1] || "epson_output.csv";
+  return match?.[1] || fallback;
 }
 
 async function getErrorMessage(response: Response): Promise<string> {
@@ -84,7 +89,10 @@ export async function downloadEpsonCsv(
 
   return {
     blob: await response.blob(),
-    filename: getDownloadFilename(response.headers.get("Content-Disposition")),
+    filename: getDownloadFilename(
+      response.headers.get("Content-Disposition"),
+      "epson_output.csv",
+    ),
   };
 }
 
@@ -104,6 +112,48 @@ export async function saveEpsonCsv(
   }
 
   return response.json() as Promise<EpsonSaveCsvResponse>;
+}
+
+export async function downloadInputExcel(
+  request: InputExcelRequest,
+): Promise<DownloadedFile> {
+  const response = await fetch("/api/journal/export-input-excel", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    throw new Error(`入力用Excelダウンロードエラー: ${await getErrorMessage(response)}`);
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: getDownloadFilename(
+      response.headers.get("Content-Disposition"),
+      "input_journal_print.xlsx",
+    ),
+  };
+}
+
+export async function saveInputExcel(
+  request: InputExcelRequest,
+): Promise<InputExcelSaveResponse> {
+  const response = await fetch("/api/journal/save-input-excel", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    throw new Error(`入力用Excel保存エラー: ${await getErrorMessage(response)}`);
+  }
+
+  return response.json() as Promise<InputExcelSaveResponse>;
 }
 
 export async function fetchJournalMasters(): Promise<JournalMastersResponse> {
