@@ -30,8 +30,6 @@ from ai_search.ai_search import (
 from receivable_engine import (
     append_standard_receivables,
     apply_receivable_candidates,
-    build_receivable_journal_rows,
-    calculate_receivable_difference,
     convert_company_billing_excel,
     exclude_duplicate_receivables,
     is_receivable_journal_registered,
@@ -40,6 +38,13 @@ from receivable_engine import (
     mark_receivable_journal_registered,
     normalize_standard_receivable_csv,
     organize_completed_receivables,
+)
+from receivable_preview_service import (
+    DIFFERENCE_ACCOUNT_MODE,
+    PARTIAL_SETTLEMENT_MODE,
+    build_receivable_fifo_candidates,
+    build_receivable_preview_from_fifo,
+    parse_receivable_payment_amount,
 )
 from events_engine import (
     add_event,
@@ -1844,33 +1849,6 @@ def keep_receivable_customer_open(customer_name):
     st.session_state[
         "active_receivable_customer"
     ] = customer_name
-
-def parse_receivable_payment_amount(value):
-
-    if value is None:
-        return None
-
-    normalized = str(value)
-    for old, new in [
-        (",", ""),
-        ("，", ""),
-        ("円", ""),
-        ("￥", ""),
-        ("¥", "")
-    ]:
-        normalized = normalized.replace(old, new)
-
-    normalized = "".join(normalized.split())
-
-    if not normalized or not normalized.isdigit():
-        return None
-
-    amount = int(normalized)
-
-    if amount <= 0:
-        return None
-
-    return amount
 
 account_master = sorted(
     ACCOUNT_MASTER.keys()
@@ -5064,83 +5042,21 @@ elif mode == "未収消込":
                         )
                         payment_amount = parsed_payment_amount
 
-                        fifo_df = detail_df.copy()
-
-                        fifo_df["_請求日"] = pd.to_datetime(
-                            fifo_df["請求日"],
-                            errors="coerce"
+                        fifo_result = build_receivable_fifo_candidates(
+                            detail_df,
+                            customer_name,
+                            payment_amount
                         )
-
-                        fifo_df["_表示順"] = range(
-                            len(fifo_df)
-                        )
-
-                        fifo_df = fifo_df.sort_values(
-                            ["_請求日", "_表示順"],
-                            na_position="last",
-                            kind="stable"
-                        )
-
-                        target_candidates = []
-                        partial_candidates = []
-                        remaining = int(payment_amount)
-
-                        for _, detail in fifo_df.iterrows():
-
-                            target_amount = int(detail["残高"])
-
-                            if target_amount <= 0:
-                                continue
-
-                            target_candidates.append({
-                                "コード": detail["コード"],
-                                "未収ID": detail["未収ID"],
-                                "請求日": detail["請求日"],
-                                "請求額": detail["請求金額"],
-                                "残高": detail["残高"],
-                                "消込予定": target_amount,
-                                "未収科目": detail["未収科目"],
-                                "未収補助": detail["未収補助"],
-                                "部門": detail["部門"],
-                                "取引先": customer_name,
-                                "摘要": detail.get("摘要", "")
-                            })
-
-                            if remaining <= 0:
-                                continue
-
-                            scheduled_amount = min(
-                                target_amount,
-                                remaining
-                            )
-
-                            if scheduled_amount <= 0:
-                                continue
-
-                            partial_candidates.append({
-                                "コード": detail["コード"],
-                                "未収ID": detail["未収ID"],
-                                "請求日": detail["請求日"],
-                                "請求額": detail["請求金額"],
-                                "残高": detail["残高"],
-                                "消込予定": scheduled_amount,
-                                "未収科目": detail["未収科目"],
-                                "未収補助": detail["未収補助"],
-                                "部門": detail["部門"],
-                                "取引先": customer_name,
-                                "摘要": detail.get("摘要", "")
-                            })
-
-                            remaining -= scheduled_amount
-
-                        target_total = sum(
-                            item["消込予定"]
-                            for item in target_candidates
-                        )
-                        difference = calculate_receivable_difference(
-                            int(payment_amount),
-                            target_total
-                        )
+                        target_candidates = fifo_result[
+                            "target_candidates"
+                        ]
+                        partial_candidates = fifo_result[
+                            "partial_candidates"
+                        ]
+                        target_total = fifo_result[
+                            "total_receivable_balance"
+                        ]
+                        difference = fifo_result["difference"]
 
                         st.session_state[
                             payment_candidates_key
@@ -5156,7 +5072,8 @@ elif mode == "未収消込":
                             "target_items": target_candidates,
                             "partial_items": partial_candidates,
                             "target_total": target_total,
-                            "difference": difference
+                            "difference": difference,
+                            "fifo_result": fifo_result
                         }
                         st.session_state.pop(
                             "pending_receivable_submission_key",
@@ -5213,9 +5130,8 @@ elif mode == "未収消込":
                             )
 
                             def execute_receivable_settlement(
-                                settlement_candidates,
+                                settlement_mode=None,
                                 difference_account=None,
-                                difference_side=None,
                                 difference_summary=None
                             ):
 
@@ -5241,33 +5157,28 @@ elif mode == "未収消込":
                                     )
                                     return
 
-                                journal_rows = build_receivable_journal_rows(
-                                    settlement_candidates,
-                                    candidate_state["payment_amount"],
-                                    candidate_state["receipt_account"],
+                                preview = build_receivable_preview_from_fifo(
+                                    candidate_state["fifo_result"],
                                     customer_name,
+                                    candidate_state["payment_amount"],
+                                    candidate_state["payment_date"],
+                                    candidate_state["receipt_account"],
+                                    settlement_mode,
                                     difference_account,
-                                    difference_side,
                                     difference_summary
                                 )
+                                settlement_candidates = preview[
+                                    "source_candidates"
+                                ]
+                                journal_rows = preview["rows"]
 
                                 settlement_id = uuid.uuid4().hex
-                                settlement_target_total = sum(
-                                    int(
-                                        candidate.get(
-                                            "消込予定",
-                                            0
-                                        )
-                                    )
-                                    for candidate
-                                    in settlement_candidates
-                                )
-                                settlement_difference = (
-                                    calculate_receivable_difference(
-                                        candidate_state["payment_amount"],
-                                        settlement_target_total
-                                    )
-                                )
+                                settlement_target_total = preview[
+                                    "target_total"
+                                ]
+                                settlement_difference = preview[
+                                    "difference"
+                                ]
 
                                 generated_receivable_journal = {
                                     "settlement_id": settlement_id,
@@ -5346,7 +5257,7 @@ elif mode == "未収消込":
 
                                     try:
                                         execute_receivable_settlement(
-                                            candidates
+                                            None
                                         )
                                     except Exception as e:
                                         st.error(str(e))
@@ -5456,7 +5367,7 @@ elif mode == "未収消込":
                                             == "部分消込（残額を未収に残す）"
                                         ):
                                             execute_receivable_settlement(
-                                                partial_candidates
+                                                PARTIAL_SETTLEMENT_MODE
                                             )
                                         else:
                                             selected_difference_account = (
@@ -5466,9 +5377,8 @@ elif mode == "未収消込":
                                                 )
                                             )
                                             execute_receivable_settlement(
-                                                target_candidates,
+                                                DIFFERENCE_ACCOUNT_MODE,
                                                 selected_difference_account,
-                                                "debit",
                                                 shortage_difference_summary
                                             )
                                     except Exception as e:
@@ -5567,9 +5477,8 @@ elif mode == "未収消込":
                                             )
                                         )
                                         execute_receivable_settlement(
-                                            target_candidates,
+                                            DIFFERENCE_ACCOUNT_MODE,
                                             selected_difference_account,
-                                            "credit",
                                             overpaid_difference_summary
                                         )
                                     except Exception as e:
