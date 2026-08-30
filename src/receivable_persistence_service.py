@@ -1,6 +1,6 @@
-"""Read-only persistence primitives for the receivable ledger.
+"""Persistence and recovery primitives for the receivable ledger.
 
-This phase intentionally contains no ledger CSV write or recovery behavior.
+This module does not execute settlements or automatically start recovery.
 """
 
 from __future__ import annotations
@@ -9,13 +9,17 @@ import errno
 import hashlib
 import importlib
 import io
+import json
 import os
+import shutil
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import Any, BinaryIO, Iterator, Mapping
 
 import pandas as pd
 
@@ -28,6 +32,26 @@ HISTORY_FILENAME = "receivable_history.csv"
 LEDGER_LOCK_FILENAME = ".receivable_ledger.lock"
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_POLL_INTERVAL_SECONDS = 0.05
+TRANSACTIONS_DIRECTORY_NAME = ".transactions"
+TRANSACTION_MARKER_FILENAME = "marker.json"
+
+TRANSACTION_STATES = frozenset(
+    {
+        "PREPARING",
+        "READY_TO_COMMIT",
+        "CURRENT_REPLACED",
+        "HISTORY_REPLACED",
+        "COMMITTED",
+        "RECOVERY_REQUIRED",
+    }
+)
+TRANSACTION_DECISIONS = frozenset({None, "COMMIT", "ROLLBACK"})
+
+RECOVERY_BOTH_BEFORE = "BOTH_BEFORE"
+RECOVERY_CURRENT_AFTER_HISTORY_BEFORE = "CURRENT_AFTER_HISTORY_BEFORE"
+RECOVERY_CURRENT_BEFORE_HISTORY_AFTER = "CURRENT_BEFORE_HISTORY_AFTER"
+RECOVERY_BOTH_AFTER = "BOTH_AFTER"
+RECOVERY_UNKNOWN = "UNKNOWN"
 
 
 class ReceivableLedgerError(Exception):
@@ -50,12 +74,40 @@ class ReceivableLedgerLockTimeout(ReceivableLedgerError):
     """Raised when the exclusive ledger lock cannot be acquired in time."""
 
 
+class ReceivableLedgerWriteError(ReceivableLedgerError):
+    """Raised when durable bytes cannot be written or replaced."""
+
+
+class ReceivableLedgerVerificationError(ReceivableLedgerWriteError):
+    """Raised when persisted bytes do not match their expected bytes."""
+
+
+class ReceivableLedgerRecoveryError(ReceivableLedgerError):
+    """Raised when transaction recovery metadata is invalid."""
+
+
+class ReceivableLedgerRecoveryRequired(ReceivableLedgerRecoveryError):
+    """Raised when recovery cannot safely choose before or after bytes."""
+
+
 @dataclass(frozen=True)
 class ReceivableLedgerPaths:
     receivables_directory: Path
     current_path: Path
     history_path: Path
     lock_path: Path
+
+
+@dataclass(frozen=True)
+class ReceivableTransactionPaths:
+    receivables_directory: Path
+    transactions_directory: Path
+    workspace_directory: Path
+    marker_path: Path
+    current_before_artifact: Path
+    current_after_artifact: Path
+    history_before_artifact: Path
+    history_after_artifact: Path
 
 
 @dataclass(frozen=True)
@@ -92,7 +144,137 @@ def resolve_receivable_ledger_paths(
 def calculate_current_revision(current_raw_bytes: bytes) -> str:
     """Return the revision of the exact bytes used to parse current.csv."""
 
-    return hashlib.sha256(current_raw_bytes).hexdigest()
+    return calculate_bytes_sha256(current_raw_bytes)
+
+
+def calculate_bytes_sha256(content: bytes) -> str:
+    """Return the shared, non-canonicalized SHA-256 for exact bytes."""
+
+    return hashlib.sha256(content).hexdigest()
+
+
+def resolve_receivable_transaction_paths(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+) -> ReceivableTransactionPaths:
+    """Resolve a fixed transaction workspace without creating it."""
+
+    if (
+        not transaction_id
+        or transaction_id in {".", ".."}
+        or Path(transaction_id).name != transaction_id
+        or "/" in transaction_id
+        or "\\" in transaction_id
+    ):
+        raise ValueError("transaction_id must be a single non-empty path name")
+
+    directory = Path(receivables_directory)
+    transactions_directory = directory / TRANSACTIONS_DIRECTORY_NAME
+    workspace_directory = transactions_directory / transaction_id
+    return ReceivableTransactionPaths(
+        receivables_directory=directory,
+        transactions_directory=transactions_directory,
+        workspace_directory=workspace_directory,
+        marker_path=workspace_directory / TRANSACTION_MARKER_FILENAME,
+        current_before_artifact=workspace_directory / "current.before.csv",
+        current_after_artifact=workspace_directory / "current.after.csv",
+        history_before_artifact=workspace_directory / "history.before.csv",
+        history_after_artifact=workspace_directory / "history.after.csv",
+    )
+
+
+def _write_all_and_fsync(file_handle: BinaryIO, content: bytes) -> None:
+    file_handle.write(content)
+    file_handle.flush()
+    os.fsync(file_handle.fileno())
+
+
+def _verify_file_bytes(
+    path: Path,
+    expected_size: int,
+    expected_hash: str,
+) -> None:
+    try:
+        persisted = path.read_bytes()
+    except OSError as exc:
+        raise ReceivableLedgerVerificationError(
+            f"Could not read back persisted bytes: {path}"
+        ) from exc
+
+    actual_hash = calculate_bytes_sha256(persisted)
+    if len(persisted) != expected_size or actual_hash != expected_hash:
+        raise ReceivableLedgerVerificationError(
+            f"Persisted bytes failed size/SHA-256 verification: {path}"
+        )
+
+
+def _fsync_directory_best_effort(directory: Path) -> None:
+    """Fsync a Unix directory when supported; never treat failure as corruption."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = None
+    try:
+        descriptor = os.open(directory, flags)
+        os.fsync(descriptor)
+    except OSError:
+        return
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def atomic_write_bytes(
+    target_path: str | os.PathLike[str],
+    content: bytes,
+) -> str:
+    """Atomically persist exact bytes through a verified same-directory temp."""
+
+    if not isinstance(content, bytes):
+        raise TypeError("content must be bytes")
+
+    target = Path(target_path)
+    expected_hash = calculate_bytes_sha256(content)
+    temp_path: Path | None = None
+    descriptor: int | None = None
+
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(descriptor, "wb") as file_handle:
+            descriptor = None
+            _write_all_and_fsync(file_handle, content)
+
+        _verify_file_bytes(temp_path, len(content), expected_hash)
+        os.replace(temp_path, target)
+        temp_path = None
+        _fsync_directory_best_effort(target.parent)
+        _verify_file_bytes(target, len(content), expected_hash)
+        return expected_hash
+    except ReceivableLedgerVerificationError:
+        raise
+    except OSError as exc:
+        raise ReceivableLedgerWriteError(
+            f"Could not atomically write bytes: {target}"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _read_required_bytes(path: Path, ledger_label: str) -> bytes:
@@ -371,3 +553,535 @@ def read_receivable_ledger_snapshot(
             history_raw_bytes=None if history_missing else history.raw_bytes,
             ledger_revision=calculate_current_revision(current.raw_bytes),
         )
+
+
+_MARKER_REQUIRED_FIELDS = frozenset(
+    {
+        "transaction_id",
+        "settlement_id",
+        "state",
+        "decision",
+        "created_at",
+        "updated_at",
+        "current_target",
+        "history_target",
+        "current_before_hash",
+        "current_after_hash",
+        "history_before_hash",
+        "history_after_hash",
+        "current_before_artifact",
+        "current_after_artifact",
+        "history_before_artifact",
+        "history_after_artifact",
+        "last_error",
+    }
+)
+_ARTIFACT_MARKER_FIELDS = (
+    "current_before_hash",
+    "current_after_hash",
+    "history_before_hash",
+    "history_after_hash",
+    "current_before_artifact",
+    "current_after_artifact",
+    "history_before_artifact",
+    "history_after_artifact",
+)
+_MARKER_TRANSITIONS = {
+    "PREPARING": {"PREPARING", "READY_TO_COMMIT", "RECOVERY_REQUIRED"},
+    "READY_TO_COMMIT": {
+        "READY_TO_COMMIT",
+        "CURRENT_REPLACED",
+        "HISTORY_REPLACED",
+        "COMMITTED",
+        "RECOVERY_REQUIRED",
+    },
+    "CURRENT_REPLACED": {
+        "CURRENT_REPLACED",
+        "HISTORY_REPLACED",
+        "COMMITTED",
+        "RECOVERY_REQUIRED",
+    },
+    "HISTORY_REPLACED": {
+        "HISTORY_REPLACED",
+        "CURRENT_REPLACED",
+        "COMMITTED",
+        "RECOVERY_REQUIRED",
+    },
+    "COMMITTED": {"COMMITTED"},
+    "RECOVERY_REQUIRED": {
+        "RECOVERY_REQUIRED",
+        "CURRENT_REPLACED",
+        "HISTORY_REPLACED",
+        "COMMITTED",
+    },
+}
+_UNSET = object()
+
+
+def _utc_now_text() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _validate_transaction_marker(marker: Mapping[str, Any]) -> None:
+    missing = sorted(_MARKER_REQUIRED_FIELDS.difference(marker))
+    if missing:
+        raise ReceivableLedgerRecoveryError(
+            "Transaction marker is missing fields: " + ", ".join(missing)
+        )
+    if marker["state"] not in TRANSACTION_STATES:
+        raise ReceivableLedgerRecoveryError(
+            f"Unknown transaction marker state: {marker['state']}"
+        )
+    if marker["decision"] not in TRANSACTION_DECISIONS:
+        raise ReceivableLedgerRecoveryError(
+            f"Unknown transaction marker decision: {marker['decision']}"
+        )
+
+    commit_states = {
+        "READY_TO_COMMIT",
+        "CURRENT_REPLACED",
+        "HISTORY_REPLACED",
+        "COMMITTED",
+    }
+    if marker["state"] in commit_states:
+        if marker["decision"] != "COMMIT":
+            raise ReceivableLedgerRecoveryError(
+                f"{marker['state']} requires decision=COMMIT"
+            )
+        empty_fields = [
+            field for field in _ARTIFACT_MARKER_FIELDS if not marker[field]
+        ]
+        if empty_fields:
+            raise ReceivableLedgerRecoveryError(
+                "Commit-ready marker is missing artifact metadata: "
+                + ", ".join(empty_fields)
+            )
+    if marker["state"] == "PREPARING" and marker["decision"] == "COMMIT":
+        raise ReceivableLedgerRecoveryError(
+            "PREPARING marker cannot contain a COMMIT decision"
+        )
+
+
+def _marker_json_bytes(marker: Mapping[str, Any]) -> bytes:
+    try:
+        text = json.dumps(
+            dict(marker),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReceivableLedgerRecoveryError(
+            "Transaction marker is not JSON serializable"
+        ) from exc
+    return (text + "\n").encode("utf-8")
+
+
+def _verify_ready_marker_artifacts(
+    marker_directory: Path,
+    marker: Mapping[str, Any],
+) -> None:
+    artifact_prefixes = (
+        "current_before",
+        "current_after",
+        "history_before",
+        "history_after",
+    )
+    for prefix in artifact_prefixes:
+        artifact_name = marker[f"{prefix}_artifact"]
+        if Path(artifact_name).name != artifact_name:
+            raise ReceivableLedgerRecoveryError(
+                f"Invalid transaction artifact name: {artifact_name}"
+            )
+        artifact_path = marker_directory / artifact_name
+        try:
+            artifact_bytes = artifact_path.read_bytes()
+        except OSError as exc:
+            raise ReceivableLedgerRecoveryError(
+                f"Transaction artifact is missing: {artifact_path}"
+            ) from exc
+        if (
+            calculate_bytes_sha256(artifact_bytes)
+            != marker[f"{prefix}_hash"]
+        ):
+            raise ReceivableLedgerRecoveryError(
+                f"Transaction artifact hash mismatch: {artifact_path}"
+            )
+
+
+def write_transaction_marker(
+    marker_path: str | os.PathLike[str],
+    marker: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically write a validated UTF-8 transaction marker."""
+
+    updated_marker = dict(marker)
+    updated_marker["updated_at"] = _utc_now_text()
+    _validate_transaction_marker(updated_marker)
+    path = Path(marker_path)
+    if updated_marker["state"] == "READY_TO_COMMIT":
+        _verify_ready_marker_artifacts(path.parent, updated_marker)
+    atomic_write_bytes(path, _marker_json_bytes(updated_marker))
+    return updated_marker
+
+
+def read_transaction_marker(
+    marker_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Strictly read and validate a transaction marker."""
+
+    path = Path(marker_path)
+    try:
+        raw_bytes = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction marker is missing: {path}"
+        ) from exc
+    except OSError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Could not read transaction marker: {path}"
+        ) from exc
+
+    try:
+        marker = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction marker is malformed: {path}"
+        ) from exc
+    if not isinstance(marker, dict):
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction marker must be a JSON object: {path}"
+        )
+    _validate_transaction_marker(marker)
+    return marker
+
+
+def _initial_transaction_marker(
+    paths: ReceivableTransactionPaths,
+    settlement_id: str | None,
+) -> dict[str, Any]:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    now = _utc_now_text()
+    return {
+        "transaction_id": paths.workspace_directory.name,
+        "settlement_id": settlement_id,
+        "state": "PREPARING",
+        "decision": None,
+        "created_at": now,
+        "updated_at": now,
+        "current_target": str(ledger_paths.current_path.resolve()),
+        "history_target": str(ledger_paths.history_path.resolve()),
+        "current_before_hash": None,
+        "current_after_hash": None,
+        "history_before_hash": None,
+        "history_after_hash": None,
+        "current_before_size": None,
+        "current_after_size": None,
+        "history_before_size": None,
+        "history_after_size": None,
+        "current_before_artifact": paths.current_before_artifact.name,
+        "current_after_artifact": paths.current_after_artifact.name,
+        "history_before_artifact": paths.history_before_artifact.name,
+        "history_after_artifact": paths.history_after_artifact.name,
+        "last_error": None,
+    }
+
+
+def create_transaction_workspace(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+    *,
+    settlement_id: str | None = None,
+) -> tuple[ReceivableTransactionPaths, dict[str, Any]]:
+    """Explicitly create a transaction workspace and PREPARING marker."""
+
+    paths = resolve_receivable_transaction_paths(
+        receivables_directory, transaction_id
+    )
+    try:
+        paths.transactions_directory.mkdir(parents=True, exist_ok=True)
+        paths.workspace_directory.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction workspace already exists: {paths.workspace_directory}"
+        ) from exc
+    except OSError as exc:
+        raise ReceivableLedgerWriteError(
+            f"Could not create transaction workspace: {paths.workspace_directory}"
+        ) from exc
+
+    marker = write_transaction_marker(
+        paths.marker_path,
+        _initial_transaction_marker(paths, settlement_id),
+    )
+    return paths, marker
+
+
+def prepare_transaction_artifacts(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+    *,
+    current_before_bytes: bytes,
+    current_after_bytes: bytes,
+    history_before_bytes: bytes,
+    history_after_bytes: bytes,
+    settlement_id: str | None = None,
+) -> tuple[ReceivableTransactionPaths, dict[str, Any]]:
+    """Durably prepare four artifacts before recording COMMIT decision."""
+
+    paths = resolve_receivable_transaction_paths(
+        receivables_directory, transaction_id
+    )
+    if paths.workspace_directory.exists():
+        marker = read_transaction_marker(paths.marker_path)
+        if marker["state"] != "PREPARING":
+            raise ReceivableLedgerRecoveryError(
+                "Artifacts can only be prepared from PREPARING state"
+            )
+        if (
+            settlement_id is not None
+            and marker["settlement_id"] != settlement_id
+        ):
+            raise ReceivableLedgerRecoveryError(
+                "settlement_id does not match the existing marker"
+            )
+    else:
+        paths, marker = create_transaction_workspace(
+            receivables_directory,
+            transaction_id,
+            settlement_id=settlement_id,
+        )
+
+    artifacts = (
+        (
+            "current_before",
+            paths.current_before_artifact,
+            current_before_bytes,
+        ),
+        ("current_after", paths.current_after_artifact, current_after_bytes),
+        (
+            "history_before",
+            paths.history_before_artifact,
+            history_before_bytes,
+        ),
+        ("history_after", paths.history_after_artifact, history_after_bytes),
+    )
+    prepared_marker = dict(marker)
+    for field_prefix, artifact_path, content in artifacts:
+        artifact_hash = atomic_write_bytes(artifact_path, content)
+        prepared_marker[f"{field_prefix}_hash"] = artifact_hash
+        prepared_marker[f"{field_prefix}_size"] = len(content)
+        prepared_marker[f"{field_prefix}_artifact"] = artifact_path.name
+
+    prepared_marker["state"] = "READY_TO_COMMIT"
+    prepared_marker["decision"] = "COMMIT"
+    prepared_marker["last_error"] = None
+    prepared_marker = write_transaction_marker(
+        paths.marker_path, prepared_marker
+    )
+    return paths, prepared_marker
+
+
+def transition_transaction_marker(
+    marker_path: str | os.PathLike[str],
+    state: str,
+    *,
+    decision: str | None | object = _UNSET,
+    last_error: str | None | object = _UNSET,
+) -> dict[str, Any]:
+    """Atomically perform a small, validated marker state transition."""
+
+    marker = read_transaction_marker(marker_path)
+    if state not in TRANSACTION_STATES:
+        raise ReceivableLedgerRecoveryError(
+            f"Unknown transaction marker state: {state}"
+        )
+    if state not in _MARKER_TRANSITIONS[marker["state"]]:
+        raise ReceivableLedgerRecoveryError(
+            f"Invalid marker transition: {marker['state']} -> {state}"
+        )
+    marker["state"] = state
+    if decision is not _UNSET:
+        marker["decision"] = decision
+    if last_error is not _UNSET:
+        marker["last_error"] = last_error
+    return write_transaction_marker(marker_path, marker)
+
+
+def _coerce_marker(marker_or_path: Mapping[str, Any] | str | os.PathLike[str]):
+    if isinstance(marker_or_path, Mapping):
+        marker = dict(marker_or_path)
+        _validate_transaction_marker(marker)
+        return marker
+    return read_transaction_marker(marker_or_path)
+
+
+def _file_hash_or_none(path: str | os.PathLike[str]) -> str | None:
+    try:
+        return calculate_bytes_sha256(Path(path).read_bytes())
+    except OSError:
+        return None
+
+
+def classify_recovery_state(
+    current_target_path: str | os.PathLike[str],
+    history_target_path: str | os.PathLike[str],
+    marker_or_path: Mapping[str, Any] | str | os.PathLike[str],
+) -> str:
+    """Classify actual target hashes against marker before/after hashes."""
+
+    marker = _coerce_marker(marker_or_path)
+    current_hash = _file_hash_or_none(current_target_path)
+    history_hash = _file_hash_or_none(history_target_path)
+
+    current_before = current_hash == marker["current_before_hash"]
+    current_after = current_hash == marker["current_after_hash"]
+    history_before = history_hash == marker["history_before_hash"]
+    history_after = history_hash == marker["history_after_hash"]
+
+    if current_before and history_before:
+        return RECOVERY_BOTH_BEFORE
+    if current_after and history_before:
+        return RECOVERY_CURRENT_AFTER_HISTORY_BEFORE
+    if current_before and history_after:
+        return RECOVERY_CURRENT_BEFORE_HISTORY_AFTER
+    if current_after and history_after:
+        return RECOVERY_BOTH_AFTER
+    return RECOVERY_UNKNOWN
+
+
+def plan_recovery_actions(
+    marker_or_path: Mapping[str, Any] | str | os.PathLike[str],
+    classification: str,
+) -> tuple[str, ...]:
+    """Return explicit recovery actions without changing any file."""
+
+    marker = _coerce_marker(marker_or_path)
+    valid_classifications = {
+        RECOVERY_BOTH_BEFORE,
+        RECOVERY_CURRENT_AFTER_HISTORY_BEFORE,
+        RECOVERY_CURRENT_BEFORE_HISTORY_AFTER,
+        RECOVERY_BOTH_AFTER,
+        RECOVERY_UNKNOWN,
+    }
+    if classification not in valid_classifications:
+        raise ReceivableLedgerRecoveryError(
+            f"Unknown recovery classification: {classification}"
+        )
+    if classification == RECOVERY_UNKNOWN:
+        raise ReceivableLedgerRecoveryRequired(
+            "Ledger targets do not match transaction before/after hashes"
+        )
+
+    commit_decided = (
+        marker["decision"] == "COMMIT"
+        and marker["state"] != "PREPARING"
+    )
+    if not commit_decided:
+        if classification == RECOVERY_BOTH_BEFORE:
+            return ("ABORT",)
+        raise ReceivableLedgerRecoveryRequired(
+            "Targets changed before a durable COMMIT decision"
+        )
+
+    actions = {
+        RECOVERY_BOTH_BEFORE: (
+            "ROLL_FORWARD_CURRENT",
+            "ROLL_FORWARD_HISTORY",
+        ),
+        RECOVERY_CURRENT_AFTER_HISTORY_BEFORE: ("ROLL_FORWARD_HISTORY",),
+        RECOVERY_CURRENT_BEFORE_HISTORY_AFTER: ("ROLL_FORWARD_CURRENT",),
+        RECOVERY_BOTH_AFTER: ("FINALIZE_COMMIT",),
+    }
+    return actions[classification]
+
+
+def _restore_from_artifact(
+    artifact_path: str | os.PathLike[str],
+    expected_hash: str,
+    target_path: str | os.PathLike[str],
+) -> str:
+    artifact = Path(artifact_path)
+    try:
+        content = artifact.read_bytes()
+    except OSError as exc:
+        raise ReceivableLedgerRecoveryRequired(
+            f"Recovery artifact cannot be read: {artifact}"
+        ) from exc
+    if calculate_bytes_sha256(content) != expected_hash:
+        raise ReceivableLedgerRecoveryRequired(
+            f"Recovery artifact hash mismatch: {artifact}"
+        )
+
+    persisted_hash = atomic_write_bytes(target_path, content)
+    if persisted_hash != expected_hash:
+        raise ReceivableLedgerRecoveryRequired(
+            f"Recovered target hash mismatch: {target_path}"
+        )
+    return persisted_hash
+
+
+def roll_forward_from_artifact(
+    artifact_path: str | os.PathLike[str],
+    expected_hash: str,
+    target_path: str | os.PathLike[str],
+) -> str:
+    """Restore exact after bytes while retaining the source artifact."""
+
+    return _restore_from_artifact(artifact_path, expected_hash, target_path)
+
+
+def rollback_from_artifact(
+    artifact_path: str | os.PathLike[str],
+    expected_hash: str,
+    target_path: str | os.PathLike[str],
+) -> str:
+    """Restore exact before bytes while retaining the source artifact."""
+
+    return _restore_from_artifact(artifact_path, expected_hash, target_path)
+
+
+def mark_transaction_recovery_required(
+    marker_path: str | os.PathLike[str],
+    error: str,
+) -> dict[str, Any]:
+    """Persist RECOVERY_REQUIRED without attempting a target overwrite."""
+
+    return transition_transaction_marker(
+        marker_path,
+        "RECOVERY_REQUIRED",
+        last_error=error,
+    )
+
+
+def cleanup_transaction_workspace(
+    workspace_directory: str | os.PathLike[str],
+) -> None:
+    """Remove only a terminal COMMITTED or explicitly rolled-back workspace."""
+
+    workspace = Path(workspace_directory)
+    if workspace.parent.name != TRANSACTIONS_DIRECTORY_NAME:
+        raise ReceivableLedgerRecoveryError(
+            f"Not a receivable transaction workspace: {workspace}"
+        )
+    marker = read_transaction_marker(workspace / TRANSACTION_MARKER_FILENAME)
+    if marker["transaction_id"] != workspace.name:
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction marker does not match workspace: {workspace}"
+        )
+    cleanup_allowed = marker["state"] == "COMMITTED" or (
+        marker["state"] == "PREPARING"
+        and marker["decision"] == "ROLLBACK"
+    )
+    if not cleanup_allowed:
+        raise ReceivableLedgerRecoveryError(
+            f"Transaction workspace is not safe to clean up: {workspace}"
+        )
+    try:
+        shutil.rmtree(workspace)
+    except OSError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Could not clean up transaction workspace: {workspace}"
+        ) from exc

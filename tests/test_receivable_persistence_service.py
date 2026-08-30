@@ -1,4 +1,5 @@
 import hashlib
+import json
 import multiprocessing
 import os
 import sys
@@ -7,6 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -23,7 +25,11 @@ from receivable_persistence_service import (  # noqa: E402
     ReceivableLedgerLockTimeout,
     ReceivableLedgerMalformedError,
     ReceivableLedgerMissingError,
+    ReceivableLedgerRecoveryError,
+    ReceivableLedgerRecoveryRequired,
     ReceivableLedgerSchemaError,
+    ReceivableLedgerVerificationError,
+    ReceivableLedgerWriteError,
     calculate_current_revision,
     load_current_receivables_read_only,
     load_receivable_history_or_empty_read_only,
@@ -121,6 +127,28 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             index=False,
             encoding="utf-8-sig",
         )
+
+    def prepare_artifacts(self, transaction_id="tx-001"):
+        before_current = b"current-before\r\n"
+        after_current = b"current-after\r\n"
+        before_history = b"history-before\r\n"
+        after_history = b"history-after\r\n"
+        paths, marker = service.prepare_transaction_artifacts(
+            self.receivables_directory,
+            transaction_id,
+            current_before_bytes=before_current,
+            current_after_bytes=after_current,
+            history_before_bytes=before_history,
+            history_after_bytes=after_history,
+            settlement_id="settlement-001",
+        )
+        contents = {
+            "current_before": before_current,
+            "current_after": after_current,
+            "history_before": before_history,
+            "history_after": after_history,
+        }
+        return paths, marker, contents
 
     def test_resolve_paths_has_no_filesystem_side_effect(self):
         missing_directory = self.receivables_directory / "missing"
@@ -432,6 +460,633 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
         self.assertFalse(acquiring_process.is_alive())
         self.assertEqual(acquiring_process.exitcode, 0)
         self.assertEqual(second_queue.get(timeout=1), "acquired")
+
+    def test_atomic_writer_creates_new_file_with_exact_hash_and_bytes(self):
+        target = self.receivables_directory / "new.csv"
+        content = b"header\r\nvalue\r\n"
+
+        persisted_hash = service.atomic_write_bytes(target, content)
+
+        self.assertEqual(target.read_bytes(), content)
+        self.assertEqual(persisted_hash, hashlib.sha256(content).hexdigest())
+
+    def test_atomic_writer_replaces_existing_file(self):
+        target = self.receivables_directory / "existing.csv"
+        target.write_bytes(b"old")
+
+        service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"new")
+
+    def test_atomic_writer_preserves_bom_japanese_and_newlines(self):
+        target = self.receivables_directory / "exact.csv"
+        content = "列1,列2\r\n日本語,値\r\n".encode("utf-8-sig")
+
+        service.atomic_write_bytes(target, content)
+
+        self.assertEqual(target.read_bytes(), content)
+        self.assertTrue(target.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_atomic_writer_temp_is_in_target_directory(self):
+        target = self.receivables_directory / "same-dir.csv"
+        replace_paths = []
+        real_replace = os.replace
+
+        def recording_replace(source, destination):
+            replace_paths.append((Path(source), Path(destination)))
+            real_replace(source, destination)
+
+        with patch.object(service.os, "replace", side_effect=recording_replace):
+            service.atomic_write_bytes(target, b"content")
+
+        self.assertEqual(replace_paths[0][0].parent, target.parent)
+        self.assertEqual(replace_paths[0][1], target)
+
+    def test_replace_failure_preserves_old_target_and_cleans_temp(self):
+        target = self.receivables_directory / "replace-failure.csv"
+        target.write_bytes(b"old")
+
+        with patch.object(
+            service.os,
+            "replace",
+            side_effect=PermissionError("blocked"),
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"old")
+        self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_temp_verification_failure_preserves_old_target(self):
+        target = self.receivables_directory / "verify-failure.csv"
+        target.write_bytes(b"old")
+
+        with patch.object(
+            service,
+            "_verify_file_bytes",
+            side_effect=ReceivableLedgerVerificationError("bad temp"),
+        ):
+            with self.assertRaises(ReceivableLedgerVerificationError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"old")
+        self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_target_readback_mismatch_raises_verification_error(self):
+        target = self.receivables_directory / "target-mismatch.csv"
+
+        with patch.object(
+            service,
+            "_verify_file_bytes",
+            side_effect=[
+                None,
+                ReceivableLedgerVerificationError("bad target"),
+            ],
+        ):
+            with self.assertRaises(ReceivableLedgerVerificationError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"new")
+
+    def test_failure_before_temp_write_cleans_temp(self):
+        target = self.receivables_directory / "before-write.csv"
+
+        with patch.object(
+            service,
+            "_write_all_and_fsync",
+            side_effect=OSError("write failed"),
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_partial_temp_write_failure_preserves_old_target(self):
+        target = self.receivables_directory / "partial.csv"
+        target.write_bytes(b"old")
+
+        def partial_write(file_handle, content):
+            file_handle.write(content[:2])
+            file_handle.flush()
+            raise OSError("partial write")
+
+        with patch.object(
+            service,
+            "_write_all_and_fsync",
+            side_effect=partial_write,
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"old")
+        self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_file_fsync_failure_preserves_old_target(self):
+        target = self.receivables_directory / "fsync.csv"
+        target.write_bytes(b"old")
+
+        with patch.object(service.os, "fsync", side_effect=OSError("fsync")):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.atomic_write_bytes(target, b"new")
+
+        self.assertEqual(target.read_bytes(), b"old")
+
+    def test_transaction_path_resolution_has_no_side_effect(self):
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-path"
+        )
+
+        self.assertEqual(paths.marker_path.name, "marker.json")
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_transaction_id_rejects_path_traversal(self):
+        with self.assertRaises(ValueError):
+            service.resolve_receivable_transaction_paths(
+                self.receivables_directory, "../escape"
+            )
+
+    def test_workspace_creation_writes_preparing_marker(self):
+        paths, marker = service.create_transaction_workspace(
+            self.receivables_directory,
+            "tx-preparing",
+            settlement_id="消込-001",
+        )
+
+        self.assertTrue(paths.workspace_directory.is_dir())
+        self.assertEqual(marker["state"], "PREPARING")
+        self.assertIsNone(marker["decision"])
+        self.assertEqual(marker["settlement_id"], "消込-001")
+        self.assertEqual(
+            service.read_transaction_marker(paths.marker_path), marker
+        )
+
+    def test_prepare_saves_four_exact_artifacts_and_hashes(self):
+        paths, marker, contents = self.prepare_artifacts()
+
+        for prefix, content in contents.items():
+            artifact = getattr(paths, f"{prefix}_artifact")
+            self.assertEqual(artifact.read_bytes(), content)
+            self.assertEqual(
+                marker[f"{prefix}_hash"], hashlib.sha256(content).hexdigest()
+            )
+            self.assertEqual(marker[f"{prefix}_size"], len(content))
+        self.assertEqual(marker["state"], "READY_TO_COMMIT")
+        self.assertEqual(marker["decision"], "COMMIT")
+
+    def test_marker_is_utf8_human_readable_json(self):
+        paths, _ = service.create_transaction_workspace(
+            self.receivables_directory,
+            "tx-json",
+            settlement_id="消込-日本語",
+        )
+
+        raw_bytes = paths.marker_path.read_bytes()
+        decoded = raw_bytes.decode("utf-8")
+
+        self.assertIn("消込-日本語", decoded)
+        self.assertEqual(json.loads(decoded)["state"], "PREPARING")
+
+    def test_marker_update_uses_same_directory_atomic_replace(self):
+        paths, _ = service.create_transaction_workspace(
+            self.receivables_directory, "tx-marker-atomic"
+        )
+        replacements = []
+        real_replace = os.replace
+
+        def recording_replace(source, destination):
+            replacements.append((Path(source), Path(destination)))
+            real_replace(source, destination)
+
+        with patch.object(service.os, "replace", side_effect=recording_replace):
+            service.transition_transaction_marker(
+                paths.marker_path,
+                "PREPARING",
+                decision="ROLLBACK",
+            )
+
+        self.assertEqual(replacements[0][0].parent, paths.marker_path.parent)
+        self.assertEqual(replacements[0][1], paths.marker_path)
+
+    def test_malformed_marker_raises_recovery_error(self):
+        marker_path = self.receivables_directory / "marker.json"
+        marker_path.write_bytes(b"{not-json")
+
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.read_transaction_marker(marker_path)
+
+    def test_missing_marker_raises_recovery_error(self):
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.read_transaction_marker(
+                self.receivables_directory / "missing-marker.json"
+            )
+
+    def test_unknown_marker_state_is_rejected(self):
+        paths, marker = service.create_transaction_workspace(
+            self.receivables_directory, "tx-unknown-state"
+        )
+        marker["state"] = "UNKNOWN_STATE"
+
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.write_transaction_marker(paths.marker_path, marker)
+
+    def test_ready_marker_without_all_artifacts_is_rejected(self):
+        paths, marker = service.create_transaction_workspace(
+            self.receivables_directory, "tx-not-ready"
+        )
+        marker["state"] = "READY_TO_COMMIT"
+        marker["decision"] = "COMMIT"
+
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.write_transaction_marker(paths.marker_path, marker)
+
+    def test_marker_temp_write_failure_does_not_create_marker(self):
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-marker-write-failure"
+        )
+
+        with patch.object(
+            service,
+            "_write_all_and_fsync",
+            side_effect=OSError("marker write"),
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.create_transaction_workspace(
+                    self.receivables_directory,
+                    "tx-marker-write-failure",
+                )
+
+        self.assertFalse(paths.marker_path.exists())
+        self.assertEqual(list(paths.workspace_directory.glob("*.tmp")), [])
+
+    def test_marker_replace_failure_does_not_create_marker(self):
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-marker-replace-failure"
+        )
+
+        with patch.object(
+            service.os,
+            "replace",
+            side_effect=PermissionError("marker replace"),
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.create_transaction_workspace(
+                    self.receivables_directory,
+                    "tx-marker-replace-failure",
+                )
+
+        self.assertFalse(paths.marker_path.exists())
+
+    def test_marker_update_replace_failure_preserves_old_marker(self):
+        paths, original = service.create_transaction_workspace(
+            self.receivables_directory, "tx-marker-update-failure"
+        )
+        original_bytes = paths.marker_path.read_bytes()
+
+        with patch.object(
+            service.os,
+            "replace",
+            side_effect=PermissionError("marker update replace"),
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.transition_transaction_marker(
+                    paths.marker_path,
+                    "PREPARING",
+                    decision="ROLLBACK",
+                )
+
+        self.assertEqual(paths.marker_path.read_bytes(), original_bytes)
+        self.assertEqual(
+            service.read_transaction_marker(paths.marker_path), original
+        )
+
+    def test_partial_artifact_failure_keeps_marker_preparing(self):
+        real_atomic_write = service.atomic_write_bytes
+        artifact_writes = 0
+
+        def fail_during_artifacts(target_path, content):
+            nonlocal artifact_writes
+            if Path(target_path).suffix == ".csv":
+                artifact_writes += 1
+                if artifact_writes == 3:
+                    raise ReceivableLedgerWriteError("artifact failure")
+            return real_atomic_write(target_path, content)
+
+        with patch.object(
+            service,
+            "atomic_write_bytes",
+            side_effect=fail_during_artifacts,
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.prepare_transaction_artifacts(
+                    self.receivables_directory,
+                    "tx-partial-artifacts",
+                    current_before_bytes=b"cb",
+                    current_after_bytes=b"ca",
+                    history_before_bytes=b"hb",
+                    history_after_bytes=b"ha",
+                )
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-partial-artifacts"
+        )
+        marker = service.read_transaction_marker(paths.marker_path)
+        self.assertEqual(marker["state"], "PREPARING")
+        self.assertIsNone(marker["decision"])
+
+    def test_ready_marker_rejects_fake_artifact_metadata(self):
+        paths, marker = service.create_transaction_workspace(
+            self.receivables_directory, "tx-fake-artifacts"
+        )
+        marker.update(
+            {
+                "state": "READY_TO_COMMIT",
+                "decision": "COMMIT",
+                "current_before_hash": "a" * 64,
+                "current_after_hash": "b" * 64,
+                "history_before_hash": "c" * 64,
+                "history_after_hash": "d" * 64,
+            }
+        )
+
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.write_transaction_marker(paths.marker_path, marker)
+
+    def assert_recovery_classification(
+        self,
+        current_content,
+        history_content,
+        expected,
+        transaction_id,
+    ):
+        _, marker, _ = self.prepare_artifacts(transaction_id)
+        self.paths.current_path.write_bytes(current_content)
+        self.paths.history_path.write_bytes(history_content)
+
+        classification = service.classify_recovery_state(
+            self.paths.current_path,
+            self.paths.history_path,
+            marker,
+        )
+
+        self.assertEqual(classification, expected)
+
+    def test_recovery_classifies_both_before(self):
+        self.assert_recovery_classification(
+            b"current-before\r\n",
+            b"history-before\r\n",
+            service.RECOVERY_BOTH_BEFORE,
+            "tx-both-before",
+        )
+
+    def test_recovery_classifies_current_after_history_before(self):
+        self.assert_recovery_classification(
+            b"current-after\r\n",
+            b"history-before\r\n",
+            service.RECOVERY_CURRENT_AFTER_HISTORY_BEFORE,
+            "tx-current-after",
+        )
+
+    def test_recovery_classifies_current_before_history_after(self):
+        self.assert_recovery_classification(
+            b"current-before\r\n",
+            b"history-after\r\n",
+            service.RECOVERY_CURRENT_BEFORE_HISTORY_AFTER,
+            "tx-history-after",
+        )
+
+    def test_recovery_classifies_both_after(self):
+        self.assert_recovery_classification(
+            b"current-after\r\n",
+            b"history-after\r\n",
+            service.RECOVERY_BOTH_AFTER,
+            "tx-both-after",
+        )
+
+    def test_recovery_classifies_unknown_current(self):
+        self.assert_recovery_classification(
+            b"unknown-current",
+            b"history-before\r\n",
+            service.RECOVERY_UNKNOWN,
+            "tx-unknown-current",
+        )
+
+    def test_recovery_classifies_unknown_history(self):
+        self.assert_recovery_classification(
+            b"current-before\r\n",
+            b"unknown-history",
+            service.RECOVERY_UNKNOWN,
+            "tx-unknown-history",
+        )
+
+    def test_commit_recovery_plans_roll_forward_and_finalize(self):
+        _, marker, _ = self.prepare_artifacts("tx-plan")
+
+        self.assertEqual(
+            service.plan_recovery_actions(
+                marker, service.RECOVERY_BOTH_BEFORE
+            ),
+            ("ROLL_FORWARD_CURRENT", "ROLL_FORWARD_HISTORY"),
+        )
+        self.assertEqual(
+            service.plan_recovery_actions(
+                marker,
+                service.RECOVERY_CURRENT_AFTER_HISTORY_BEFORE,
+            ),
+            ("ROLL_FORWARD_HISTORY",),
+        )
+        self.assertEqual(
+            service.plan_recovery_actions(marker, service.RECOVERY_BOTH_AFTER),
+            ("FINALIZE_COMMIT",),
+        )
+
+    def test_precommit_both_before_plans_abort(self):
+        _, marker = service.create_transaction_workspace(
+            self.receivables_directory, "tx-abort-plan"
+        )
+
+        self.assertEqual(
+            service.plan_recovery_actions(
+                marker, service.RECOVERY_BOTH_BEFORE
+            ),
+            ("ABORT",),
+        )
+
+    def test_unknown_recovery_requires_manual_intervention(self):
+        paths, marker, _ = self.prepare_artifacts("tx-manual")
+        self.paths.current_path.write_bytes(b"do-not-overwrite")
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.plan_recovery_actions(marker, service.RECOVERY_UNKNOWN)
+
+        updated = service.mark_transaction_recovery_required(
+            paths.marker_path, "unknown target hash"
+        )
+        self.assertEqual(updated["state"], "RECOVERY_REQUIRED")
+        self.assertEqual(self.paths.current_path.read_bytes(), b"do-not-overwrite")
+
+    def test_roll_forward_current_and_history_from_after_artifacts(self):
+        paths, marker, contents = self.prepare_artifacts("tx-roll-forward")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+
+        service.roll_forward_from_artifact(
+            paths.current_after_artifact,
+            marker["current_after_hash"],
+            self.paths.current_path,
+        )
+        service.roll_forward_from_artifact(
+            paths.history_after_artifact,
+            marker["history_after_hash"],
+            self.paths.history_path,
+        )
+
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+        self.assertTrue(paths.current_after_artifact.exists())
+        self.assertTrue(paths.history_after_artifact.exists())
+
+    def test_rollback_current_and_history_from_before_artifacts(self):
+        paths, marker, contents = self.prepare_artifacts("tx-rollback")
+        self.paths.current_path.write_bytes(contents["current_after"])
+        self.paths.history_path.write_bytes(contents["history_after"])
+
+        service.rollback_from_artifact(
+            paths.current_before_artifact,
+            marker["current_before_hash"],
+            self.paths.current_path,
+        )
+        service.rollback_from_artifact(
+            paths.history_before_artifact,
+            marker["history_before_hash"],
+            self.paths.history_path,
+        )
+
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_before"]
+        )
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_before"]
+        )
+
+    def test_artifact_hash_mismatch_requires_recovery_and_keeps_target(self):
+        paths, marker, _ = self.prepare_artifacts("tx-corrupt-artifact")
+        self.paths.current_path.write_bytes(b"original-target")
+        paths.current_after_artifact.write_bytes(b"corrupt")
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.roll_forward_from_artifact(
+                paths.current_after_artifact,
+                marker["current_after_hash"],
+                self.paths.current_path,
+            )
+
+        self.assertEqual(self.paths.current_path.read_bytes(), b"original-target")
+
+    def test_recovered_target_hash_exactly_matches_marker(self):
+        paths, marker, _ = self.prepare_artifacts("tx-recovered-hash")
+
+        recovered_hash = service.roll_forward_from_artifact(
+            paths.current_after_artifact,
+            marker["current_after_hash"],
+            self.paths.current_path,
+        )
+
+        self.assertEqual(recovered_hash, marker["current_after_hash"])
+        self.assertEqual(
+            hashlib.sha256(self.paths.current_path.read_bytes()).hexdigest(),
+            marker["current_after_hash"],
+        )
+
+    def test_crash_fixture_current_after_can_roll_history_forward(self):
+        paths, marker, contents = self.prepare_artifacts("tx-crash-current")
+        self.paths.current_path.write_bytes(contents["current_after"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+
+        classification = service.classify_recovery_state(
+            self.paths.current_path, self.paths.history_path, paths.marker_path
+        )
+        actions = service.plan_recovery_actions(marker, classification)
+        service.roll_forward_from_artifact(
+            paths.history_after_artifact,
+            marker["history_after_hash"],
+            self.paths.history_path,
+        )
+
+        self.assertEqual(actions, ("ROLL_FORWARD_HISTORY",))
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+
+    def test_crash_fixture_history_after_can_roll_current_forward(self):
+        paths, marker, contents = self.prepare_artifacts("tx-crash-history")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_after"])
+
+        classification = service.classify_recovery_state(
+            self.paths.current_path, self.paths.history_path, paths.marker_path
+        )
+        actions = service.plan_recovery_actions(marker, classification)
+        service.roll_forward_from_artifact(
+            paths.current_after_artifact,
+            marker["current_after_hash"],
+            self.paths.current_path,
+        )
+
+        self.assertEqual(actions, ("ROLL_FORWARD_CURRENT",))
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+
+    def test_atomic_primitives_work_inside_ledger_lock(self):
+        with receivable_ledger_lock(self.receivables_directory):
+            paths, marker, _ = self.prepare_artifacts("tx-under-lock")
+            service.roll_forward_from_artifact(
+                paths.current_after_artifact,
+                marker["current_after_hash"],
+                self.paths.current_path,
+            )
+
+        self.assertTrue(self.paths.current_path.exists())
+
+    def test_committed_workspace_can_be_cleaned(self):
+        paths, _, _ = self.prepare_artifacts("tx-clean-committed")
+        service.transition_transaction_marker(
+            paths.marker_path, "COMMITTED"
+        )
+
+        service.cleanup_transaction_workspace(paths.workspace_directory)
+
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_explicitly_rolled_back_preparing_workspace_can_be_cleaned(self):
+        paths, _ = service.create_transaction_workspace(
+            self.receivables_directory, "tx-clean-rollback"
+        )
+        service.transition_transaction_marker(
+            paths.marker_path,
+            "PREPARING",
+            decision="ROLLBACK",
+        )
+
+        service.cleanup_transaction_workspace(paths.workspace_directory)
+
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_recovery_required_workspace_is_never_cleaned(self):
+        paths, _, _ = self.prepare_artifacts("tx-keep-recovery")
+        service.mark_transaction_recovery_required(
+            paths.marker_path, "manual inspection"
+        )
+
+        with self.assertRaises(ReceivableLedgerRecoveryError):
+            service.cleanup_transaction_workspace(paths.workspace_directory)
+
+        self.assertTrue(paths.workspace_directory.exists())
 
 
 if __name__ == "__main__":
