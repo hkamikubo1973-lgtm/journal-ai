@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field, StrictStr
 
+from api.receivable import router as receivable_router
 from engine import load_data
 from input_excel_save_service import (
     InputExcelSaveError,
@@ -254,6 +255,7 @@ class JournalMastersResponse(BaseModel):
 
 
 app = FastAPI(title="journal-ai API")
+app.include_router(receivable_router)
 
 
 @app.get(

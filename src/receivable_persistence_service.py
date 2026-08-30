@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Mapping
+from typing import Any, BinaryIO, Iterator, Literal, Mapping
 
 import pandas as pd
 
@@ -56,6 +56,15 @@ RECOVERY_CURRENT_AFTER_HISTORY_BEFORE = "CURRENT_AFTER_HISTORY_BEFORE"
 RECOVERY_CURRENT_BEFORE_HISTORY_AFTER = "CURRENT_BEFORE_HISTORY_AFTER"
 RECOVERY_BOTH_AFTER = "BOTH_AFTER"
 RECOVERY_UNKNOWN = "UNKNOWN"
+
+LEDGER_HEALTH_READY = "ready"
+LEDGER_HEALTH_RECOVERY_PENDING = "recovery_pending"
+LEDGER_HEALTH_RECOVERY_REQUIRED = "recovery_required"
+ReceivableLedgerHealthStatus = Literal[
+    "ready",
+    "recovery_pending",
+    "recovery_required",
+]
 
 
 class ReceivableLedgerError(Exception):
@@ -143,6 +152,21 @@ class ReceivableLedgerSnapshot:
     current_raw_bytes: bytes
     history_raw_bytes: bytes | None
     ledger_revision: str
+
+
+@dataclass(frozen=True)
+class ReceivableCurrentSnapshot:
+    current_df: pd.DataFrame
+    current_raw_bytes: bytes
+    ledger_revision: str
+    settlement_available: bool
+
+
+@dataclass(frozen=True)
+class ReceivableLedgerHealth:
+    status: ReceivableLedgerHealthStatus
+    transaction_count: int
+    nonterminal_count: int
 
 
 @dataclass(frozen=True)
@@ -1794,6 +1818,236 @@ def _recover_transaction_workspace_locked(
         workspace_cleaned=cleaned,
         recovered=True,
     )
+
+
+def _preparing_workspace_is_recoverable_read_only(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> bool:
+    """Return whether PREPARING can be safely aborted without writing."""
+
+    _validate_transaction_recovery_paths(paths, marker)
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    try:
+        current_before = paths.current_before_artifact.read_bytes()
+        history_before = paths.history_before_artifact.read_bytes()
+        current_target = ledger_paths.current_path.read_bytes()
+        history_target = ledger_paths.history_path.read_bytes()
+    except OSError:
+        return False
+
+    if current_target != current_before or history_target != history_before:
+        return False
+
+    for artifact_path, hash_field in (
+        (paths.current_before_artifact, "current_before_hash"),
+        (paths.current_after_artifact, "current_after_hash"),
+        (paths.history_before_artifact, "history_before_hash"),
+        (paths.history_after_artifact, "history_after_hash"),
+    ):
+        if not artifact_path.exists():
+            continue
+        try:
+            artifact_bytes = artifact_path.read_bytes()
+        except OSError:
+            return False
+        expected_hash = marker.get(hash_field)
+        if (
+            expected_hash is not None
+            and calculate_bytes_sha256(artifact_bytes) != expected_hash
+        ):
+            return False
+    return True
+
+
+def _commit_workspace_is_recoverable_read_only(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> bool:
+    """Classify a decided transaction without recovery or marker updates."""
+
+    _validate_transaction_recovery_paths(paths, marker)
+    _verify_transaction_artifacts_for_recovery(paths, marker)
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    classification = classify_recovery_state(
+        ledger_paths.current_path,
+        ledger_paths.history_path,
+        marker,
+    )
+    if classification == RECOVERY_UNKNOWN:
+        return False
+    plan_recovery_actions(marker, classification)
+
+    if marker.get("receipt_required"):
+        receipt_path = _validate_receipt_marker_path(paths, marker)
+        expected = _expected_receipt_from_marker(marker)
+        _validate_settlement_receipt(expected)
+        if receipt_path.exists():
+            loaded = read_settlement_receipt(receipt_path)
+            if loaded.receipt != expected:
+                return False
+            if marker.get("receipt_hash") not in (
+                None,
+                loaded.receipt_hash,
+            ):
+                return False
+    return True
+
+
+def _inspect_receivable_ledger_health_locked(
+    receivables_directory: str | os.PathLike[str],
+) -> ReceivableLedgerHealth:
+    """Inspect transaction health while the caller holds the ledger lock."""
+
+    transactions_directory = (
+        Path(receivables_directory) / TRANSACTIONS_DIRECTORY_NAME
+    )
+    if not transactions_directory.exists():
+        return ReceivableLedgerHealth(
+            status=LEDGER_HEALTH_READY,
+            transaction_count=0,
+            nonterminal_count=0,
+        )
+
+    try:
+        entries = list(transactions_directory.iterdir())
+    except OSError:
+        return ReceivableLedgerHealth(
+            status=LEDGER_HEALTH_RECOVERY_REQUIRED,
+            transaction_count=0,
+            nonterminal_count=1,
+        )
+
+    records: list[tuple[ReceivableTransactionPaths, dict[str, Any]]] = []
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir():
+            return ReceivableLedgerHealth(
+                status=LEDGER_HEALTH_RECOVERY_REQUIRED,
+                transaction_count=len(entries),
+                nonterminal_count=1,
+            )
+        try:
+            paths = resolve_receivable_transaction_paths(
+                receivables_directory, entry.name
+            )
+            marker = read_transaction_marker(paths.marker_path)
+            _validate_transaction_recovery_paths(paths, marker)
+        except (OSError, ValueError, ReceivableLedgerError):
+            return ReceivableLedgerHealth(
+                status=LEDGER_HEALTH_RECOVERY_REQUIRED,
+                transaction_count=len(entries),
+                nonterminal_count=1,
+            )
+        records.append((paths, marker))
+
+    nonterminal = [
+        record for record in records if record[1]["state"] != "COMMITTED"
+    ]
+    if not nonterminal:
+        return ReceivableLedgerHealth(
+            status=LEDGER_HEALTH_READY,
+            transaction_count=len(records),
+            nonterminal_count=0,
+        )
+    if (
+        len(nonterminal) > 1
+        or any(
+            marker["state"] == "RECOVERY_REQUIRED"
+            for _, marker in nonterminal
+        )
+    ):
+        return ReceivableLedgerHealth(
+            status=LEDGER_HEALTH_RECOVERY_REQUIRED,
+            transaction_count=len(records),
+            nonterminal_count=len(nonterminal),
+        )
+
+    paths, marker = nonterminal[0]
+    try:
+        if marker["state"] == "PREPARING":
+            recoverable = _preparing_workspace_is_recoverable_read_only(
+                paths, marker
+            )
+        else:
+            recoverable = _commit_workspace_is_recoverable_read_only(
+                paths, marker
+            )
+    except (OSError, ValueError, ReceivableLedgerError):
+        recoverable = False
+
+    return ReceivableLedgerHealth(
+        status=(
+            LEDGER_HEALTH_RECOVERY_PENDING
+            if recoverable
+            else LEDGER_HEALTH_RECOVERY_REQUIRED
+        ),
+        transaction_count=len(records),
+        nonterminal_count=1,
+    )
+
+
+def inspect_receivable_ledger_health_read_only(
+    receivables_directory: str | os.PathLike[str] = (
+        DEFAULT_RECEIVABLES_DIRECTORY
+    ),
+    *,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> ReceivableLedgerHealth:
+    """Inspect ledger transaction health without recovery or cleanup."""
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        return _inspect_receivable_ledger_health_locked(
+            receivables_directory
+        )
+
+
+def read_receivable_current_snapshot_when_ready(
+    receivables_directory: str | os.PathLike[str] = (
+        DEFAULT_RECEIVABLES_DIRECTORY
+    ),
+    *,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> ReceivableCurrentSnapshot:
+    """Read strict current bytes only when transaction health is ready."""
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        health = _inspect_receivable_ledger_health_locked(
+            receivables_directory
+        )
+        if health.status != LEDGER_HEALTH_READY:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Receivable ledger health is {health.status}"
+            )
+        paths = resolve_receivable_ledger_paths(receivables_directory)
+        current = load_current_receivables_read_only(paths.current_path)
+        try:
+            load_receivable_history_read_only(paths.history_path)
+            settlement_available = True
+        except ReceivableLedgerMissingError:
+            # Execute owns the formal missing-history initialization path.
+            settlement_available = True
+        except ReceivableLedgerError:
+            settlement_available = False
+        return ReceivableCurrentSnapshot(
+            current_df=current.dataframe,
+            current_raw_bytes=current.raw_bytes,
+            ledger_revision=calculate_current_revision(current.raw_bytes),
+            settlement_available=settlement_available,
+        )
 
 
 def _transaction_workspace_records(

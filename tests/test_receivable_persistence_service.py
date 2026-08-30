@@ -2285,6 +2285,172 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
         self.assertFalse(result.workspace_cleaned)
         self.assertTrue(result.receipt_path.exists())
 
+    def test_read_only_health_without_transactions_is_ready(self):
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+        self.assertEqual(health.status, service.LEDGER_HEALTH_READY)
+        self.assertEqual(health.transaction_count, 0)
+        self.assertFalse(
+            (self.receivables_directory / ".transactions").exists()
+        )
+
+    def test_ready_current_snapshot_allows_valid_history(self):
+        self.write_current()
+        self.write_history()
+
+        snapshot = service.read_receivable_current_snapshot_when_ready(
+            self.receivables_directory
+        )
+
+        self.assertTrue(snapshot.settlement_available)
+
+    def test_ready_current_snapshot_allows_missing_history_without_creation(self):
+        self.write_current()
+        self.assertFalse(self.paths.history_path.exists())
+
+        snapshot = service.read_receivable_current_snapshot_when_ready(
+            self.receivables_directory
+        )
+
+        self.assertTrue(snapshot.settlement_available)
+        self.assertFalse(self.paths.history_path.exists())
+
+    def test_ready_current_snapshot_rejects_malformed_history_without_update(self):
+        self.write_current()
+        self.paths.history_path.write_bytes(b"\xff\xfeinvalid-history")
+        history_before = self.paths.history_path.read_bytes()
+
+        snapshot = service.read_receivable_current_snapshot_when_ready(
+            self.receivables_directory
+        )
+
+        self.assertFalse(snapshot.settlement_available)
+        self.assertEqual(self.paths.history_path.read_bytes(), history_before)
+
+    def test_ready_current_snapshot_rejects_history_schema_without_update(self):
+        self.write_current()
+        pd.DataFrame([{"消込ID": "S001"}]).to_csv(
+            self.paths.history_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        history_before = self.paths.history_path.read_bytes()
+
+        snapshot = service.read_receivable_current_snapshot_when_ready(
+            self.receivables_directory
+        )
+
+        self.assertFalse(snapshot.settlement_available)
+        self.assertEqual(self.paths.history_path.read_bytes(), history_before)
+
+    def test_read_only_health_committed_residue_is_ready_without_cleanup(self):
+        paths, _, _ = self.prepare_artifacts("tx-health-committed")
+        service.transition_transaction_marker(
+            paths.marker_path, "CURRENT_REPLACED"
+        )
+        service.transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED"
+        )
+        service.transition_transaction_marker(paths.marker_path, "COMMITTED")
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(health.status, service.LEDGER_HEALTH_READY)
+        self.assertTrue(paths.workspace_directory.exists())
+        self.assertEqual(
+            service.read_transaction_marker(paths.marker_path)["state"],
+            "COMMITTED",
+        )
+
+    def test_read_only_health_recoverable_nonterminal_is_pending(self):
+        paths, _, contents = self.prepare_artifacts("tx-health-pending")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            health.status, service.LEDGER_HEALTH_RECOVERY_PENDING
+        )
+        self.assertTrue(paths.workspace_directory.exists())
+
+    def test_read_only_health_recovery_required_state_is_required(self):
+        paths, _, _ = self.prepare_artifacts("tx-health-required")
+        service.mark_transaction_recovery_required(
+            paths.marker_path, "manual inspection"
+        )
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            health.status, service.LEDGER_HEALTH_RECOVERY_REQUIRED
+        )
+
+    def test_read_only_health_unknown_targets_is_required_without_marking(self):
+        paths, _, contents = self.prepare_artifacts("tx-health-unknown")
+        self.paths.current_path.write_bytes(b"unknown-current")
+        self.paths.history_path.write_bytes(contents["history_before"])
+        marker_before = paths.marker_path.read_bytes()
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            health.status, service.LEDGER_HEALTH_RECOVERY_REQUIRED
+        )
+        self.assertEqual(paths.marker_path.read_bytes(), marker_before)
+
+    def test_read_only_health_multiple_nonterminal_is_required(self):
+        service.create_transaction_workspace(
+            self.receivables_directory, "tx-health-multiple-a"
+        )
+        service.create_transaction_workspace(
+            self.receivables_directory, "tx-health-multiple-b"
+        )
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            health.status, service.LEDGER_HEALTH_RECOVERY_REQUIRED
+        )
+        self.assertEqual(health.nonterminal_count, 2)
+
+    def test_read_only_health_does_not_update_marker_artifacts_or_targets(self):
+        paths, _, contents = self.prepare_artifacts("tx-health-immutable")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+        protected_paths = [
+            paths.marker_path,
+            paths.current_before_artifact,
+            paths.current_after_artifact,
+            paths.history_before_artifact,
+            paths.history_after_artifact,
+            self.paths.current_path,
+            self.paths.history_path,
+        ]
+        before = {path: path.read_bytes() for path in protected_paths}
+
+        health = service.inspect_receivable_ledger_health_read_only(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            health.status, service.LEDGER_HEALTH_RECOVERY_PENDING
+        )
+        self.assertEqual(
+            {path: path.read_bytes() for path in protected_paths}, before
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
