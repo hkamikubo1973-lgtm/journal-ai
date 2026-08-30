@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from receivable_persistence_service import (
     DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
@@ -26,11 +30,99 @@ from receivable_persistence_service import (
     receivable_ledger_lock,
     resolve_receivable_ledger_paths,
 )
-from receivable_preview_service import parse_receivable_payment_amount
+from receivable_preview_service import (
+    DIFFERENCE_ACCOUNT_MODE,
+    build_receivable_fifo_candidates,
+    parse_receivable_payment_amount,
+)
 from receivable_settlement_service import (
     ReceivableSettlementValidationError,
     build_receivable_settlement_plan,
 )
+
+
+class ReceivableSettlementMasterValidationError(
+    ReceivableSettlementValidationError
+):
+    """Raised when a selected account is invalid in the supplied snapshot."""
+
+
+def _account_master_rows(account_master_snapshot: Any) -> list[dict[str, str]]:
+    if isinstance(account_master_snapshot, pd.DataFrame):
+        source_rows: Any = account_master_snapshot.to_dict("records")
+    elif isinstance(account_master_snapshot, Mapping):
+        if "accounts" in account_master_snapshot:
+            source_rows = account_master_snapshot["accounts"]
+        else:
+            source_rows = [
+                {"name": name, "code": code}
+                for name, code in account_master_snapshot.items()
+            ]
+    elif isinstance(account_master_snapshot, Sequence) and not isinstance(
+        account_master_snapshot, (str, bytes)
+    ):
+        source_rows = account_master_snapshot
+    else:
+        raise ReceivableSettlementMasterValidationError(
+            "account master snapshot must contain account rows"
+        )
+
+    if not isinstance(source_rows, Sequence) or isinstance(
+        source_rows, (str, bytes)
+    ):
+        raise ReceivableSettlementMasterValidationError(
+            "account master accounts must be a sequence"
+        )
+
+    rows: list[dict[str, str]] = []
+    for source in copy.deepcopy(list(source_rows)):
+        if not isinstance(source, Mapping):
+            raise ReceivableSettlementMasterValidationError(
+                "account master contains a malformed row"
+            )
+        code = str(source.get("code", "") or "").strip()
+        name = str(source.get("name", "") or "").strip()
+        if not code or not name:
+            raise ReceivableSettlementMasterValidationError(
+                "account master row requires code and name"
+            )
+        rows.append({"code": code, "name": name})
+    return rows
+
+
+def validate_receivable_settlement_accounts(
+    account_master_snapshot: Any,
+    *,
+    receipt_account: Any,
+    difference_account: Any,
+    difference_required: bool,
+) -> None:
+    """Validate name-only UI intent against an immutable master snapshot."""
+
+    rows = _account_master_rows(account_master_snapshot)
+    codes_by_name: dict[str, set[str]] = {}
+    for row in rows:
+        codes_by_name.setdefault(row["name"], set()).add(row["code"])
+
+    def require_unique_account(value: Any, label: str) -> None:
+        name = str(value or "").strip()
+        if not name:
+            raise ReceivableSettlementMasterValidationError(
+                f"{label} is required"
+            )
+        codes = codes_by_name.get(name)
+        if not codes:
+            raise ReceivableSettlementMasterValidationError(
+                f"{label} does not exist in the account master: {name}"
+            )
+        if len(codes) != 1:
+            raise ReceivableSettlementMasterValidationError(
+                f"{label} is ambiguous in the account master: {name}"
+            )
+
+    require_unique_account(receipt_account, "receipt account")
+    if difference_required:
+        require_unique_account(difference_account, "difference account")
 
 
 def _normalized_date_text(value: Any) -> str:
@@ -123,6 +215,7 @@ def execute_receivable_settlement(
     mode: str | None = None,
     difference_account: str | None = None,
     difference_summary: str | None = None,
+    account_master_snapshot: Any,
     lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
 ) -> ReceivableIdempotentTransactionResult:
@@ -169,6 +262,22 @@ def execute_receivable_settlement(
             raise ReceivableLedgerConflictError(
                 "current.csv revision no longer matches the preview"
             )
+
+        fifo_result = build_receivable_fifo_candidates(
+            snapshot.current_df,
+            customer_name,
+            payment_amount,
+        )
+        original_difference = int(fifo_result["difference"])
+        difference_required = original_difference > 0 or (
+            original_difference < 0 and mode == DIFFERENCE_ACCOUNT_MODE
+        )
+        validate_receivable_settlement_accounts(
+            account_master_snapshot,
+            receipt_account=receipt_account,
+            difference_account=difference_account,
+            difference_required=difference_required,
+        )
 
         settlement_id = _new_settlement_id()
         created_at = _new_created_at()

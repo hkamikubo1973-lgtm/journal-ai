@@ -65,6 +65,13 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
         self.preview_revision = persistence.calculate_current_revision(
             self.paths.current_path.read_bytes()
         )
+        self.account_master_snapshot = {
+            "accounts": [
+                {"code": "111", "name": "普通預金", "category": "資産"},
+                {"code": "751", "name": "支払手数料", "category": "費用"},
+                {"code": "251", "name": "仮受金", "category": "負債"},
+            ]
+        }
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -94,6 +101,7 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
             "mode": None,
             "difference_account": None,
             "difference_summary": None,
+            "account_master_snapshot": self.account_master_snapshot,
             "lock_timeout_seconds": 0.5,
             "lock_poll_interval_seconds": 0.01,
         }
@@ -227,6 +235,7 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
                 settlement_date=date(2026, 8, 30),
                 payment_amount=1000,
                 receipt_account="普通預金",
+                account_master_snapshot={"accounts": []},
             )
 
         self.assertTrue(replay.replayed)
@@ -492,6 +501,160 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
         )
         self.assertEqual(payload["settlement_date"], "2026-08-30")
         self.assertEqual(payload["payment_amount"], 1000)
+
+    def test_validator_accepts_journal_master_snapshot(self):
+        execute_service.validate_receivable_settlement_accounts(
+            self.account_master_snapshot,
+            receipt_account="普通預金",
+            difference_account="支払手数料",
+            difference_required=True,
+        )
+
+    def test_validator_accepts_dataframe_without_mutating_it(self):
+        snapshot = pd.DataFrame(
+            [
+                {"code": "111", "name": "普通預金", "category": "資産"},
+                {"code": "751", "name": "支払手数料", "category": "費用"},
+            ]
+        )
+        before = snapshot.copy(deep=True)
+
+        execute_service.validate_receivable_settlement_accounts(
+            snapshot,
+            receipt_account="普通預金",
+            difference_account="支払手数料",
+            difference_required=True,
+        )
+
+        pd.testing.assert_frame_equal(snapshot, before)
+
+    def test_validator_accepts_streamlit_name_to_code_mapping(self):
+        execute_service.validate_receivable_settlement_accounts(
+            {"普通預金": "111", "支払手数料": "751"},
+            receipt_account="普通預金",
+            difference_account="支払手数料",
+            difference_required=True,
+        )
+
+    def test_missing_receipt_account_is_master_validation_error(self):
+        with self.assertRaisesRegex(
+            execute_service.ReceivableSettlementMasterValidationError,
+            "receipt account does not exist",
+        ):
+            self.execute(receipt_account="存在しない科目")
+
+    def test_exact_match_does_not_require_difference_account(self):
+        result = self.execute(difference_account="存在しない差額科目")
+        self.assertEqual(result.settlement["difference"], 0)
+
+    def test_partial_settlement_does_not_require_difference_account(self):
+        result = self.execute(
+            payment_amount=400,
+            mode=PARTIAL_SETTLEMENT_MODE,
+            difference_account="存在しない差額科目",
+        )
+        self.assertEqual(result.settlement["difference"], 0)
+
+    def test_shortage_difference_requires_existing_difference_account(self):
+        with self.assertRaisesRegex(
+            execute_service.ReceivableSettlementMasterValidationError,
+            "difference account does not exist",
+        ):
+            self.execute(
+                payment_amount=900,
+                mode=DIFFERENCE_ACCOUNT_MODE,
+                difference_account="存在しない差額科目",
+            )
+
+    def test_overpayment_requires_existing_difference_account(self):
+        with self.assertRaisesRegex(
+            execute_service.ReceivableSettlementMasterValidationError,
+            "difference account does not exist",
+        ):
+            self.execute(
+                payment_amount=1200,
+                mode=DIFFERENCE_ACCOUNT_MODE,
+                difference_account="存在しない差額科目",
+            )
+
+    def test_duplicate_account_name_with_distinct_codes_is_ambiguous(self):
+        snapshot = {
+            "accounts": [
+                {"code": "111", "name": "普通預金"},
+                {"code": "112", "name": "普通預金"},
+            ]
+        }
+        with self.assertRaisesRegex(
+            execute_service.ReceivableSettlementMasterValidationError,
+            "receipt account is ambiguous",
+        ):
+            self.execute(account_master_snapshot=snapshot)
+
+    def test_malformed_master_snapshot_is_explicit(self):
+        with self.assertRaisesRegex(
+            execute_service.ReceivableSettlementMasterValidationError,
+            "requires code and name",
+        ):
+            self.execute(
+                account_master_snapshot={
+                    "accounts": [{"code": "111", "name": ""}]
+                }
+            )
+
+    def test_replay_ignores_changed_master_snapshot(self):
+        first = self.execute()
+
+        replay = self.execute(account_master_snapshot={"accounts": []})
+
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.settlement, first.settlement)
+
+    def test_revision_conflict_precedes_master_validation(self):
+        with patch.object(
+            execute_service, "validate_receivable_settlement_accounts"
+        ) as validator:
+            with self.assertRaises(persistence.ReceivableLedgerConflictError):
+                self.execute(
+                    preview_revision="0" * 64,
+                    account_master_snapshot={"accounts": []},
+                )
+
+        validator.assert_not_called()
+
+    def test_master_validation_failure_is_non_mutating_and_skips_later_work(self):
+        self.paths.history_path.unlink()
+        current_before = self.paths.current_path.read_bytes()
+        arguments = {
+            "idempotency_key": "invalid-master-operation",
+            "preview_revision": self.preview_revision,
+            "customer_name": "A商事",
+            "settlement_date": date(2026, 8, 30),
+            "payment_amount": 1000,
+            "receipt_account": "存在しない科目",
+            "account_master_snapshot": self.account_master_snapshot,
+        }
+
+        with patch.object(
+            execute_service, "_new_settlement_id"
+        ) as new_id, patch.object(
+            execute_service, "_new_created_at"
+        ) as new_time, patch.object(
+            execute_service, "build_receivable_settlement_plan"
+        ) as domain_plan:
+            with self.assertRaises(
+                execute_service.ReceivableSettlementMasterValidationError
+            ):
+                execute_service.execute_receivable_settlement(
+                    self.directory, **arguments
+                )
+
+        new_id.assert_not_called()
+        new_time.assert_not_called()
+        domain_plan.assert_not_called()
+        self.assertEqual(self.paths.current_path.read_bytes(), current_before)
+        self.assertFalse(self.paths.history_path.exists())
+        self.assertFalse((self.directory / ".transactions").exists())
+        self.assertFalse((self.directory / ".settlements").exists())
 
 
 if __name__ == "__main__":
