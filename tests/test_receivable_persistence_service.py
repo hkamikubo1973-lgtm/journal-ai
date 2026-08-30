@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -431,6 +432,30 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             snapshot.ledger_revision,
             hashlib.sha256(raw_bytes).hexdigest(),
         )
+
+    def test_locked_snapshot_matches_public_snapshot_contract(self):
+        self.write_current()
+        self.write_history()
+        with receivable_ledger_lock(self.receivables_directory):
+            snapshot = service._read_receivable_ledger_snapshot_locked(
+                self.receivables_directory,
+                history_missing_as_empty=False,
+            )
+
+        self.assertEqual(
+            snapshot.current_raw_bytes, self.paths.current_path.read_bytes()
+        )
+        self.assertEqual(
+            snapshot.history_raw_bytes, self.paths.history_path.read_bytes()
+        )
+
+    def test_empty_history_bytes_are_bom_header_only_and_strictly_loadable(self):
+        raw_bytes = service.build_empty_receivable_history_bytes()
+        dataframe = pd.read_csv(io.BytesIO(raw_bytes), dtype=str)
+
+        self.assertTrue(raw_bytes.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(list(dataframe.columns), HISTORY_COLUMNS)
+        self.assertTrue(dataframe.empty)
 
     def test_lock_can_be_acquired_and_leaves_lock_file(self):
         with receivable_ledger_lock(self.receivables_directory):
@@ -1884,6 +1909,33 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             self.receivables_directory, "tx-receipt"
         ).workspace_directory
         self.assertFalse(workspace.exists())
+
+    def test_locked_receipt_commit_matches_public_coordinator(self):
+        contents = self.write_coordinator_before_targets()
+        request_payload = {"customer": "日本商事", "amount": 900}
+        with receivable_ledger_lock(self.receivables_directory):
+            result = (
+                service._commit_receivable_ledger_transaction_with_receipt_locked(
+                    self.receivables_directory,
+                    "tx-locked-receipt",
+                    settlement_id="settlement-receipt",
+                    idempotency_key_hash=service.calculate_idempotency_key_hash(
+                        "locked-receipt-key"
+                    ),
+                    request_hash=service.calculate_request_hash(request_payload),
+                    settlement_response=self.settlement_response(),
+                    current_before_bytes=contents["current_before"],
+                    current_after_bytes=contents["current_after"],
+                    history_before_bytes=contents["history_before"],
+                    history_after_bytes=contents["history_after"],
+                )
+            )
+
+        self.assertFalse(result.replayed)
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+        self.assertTrue(result.receipt_path.exists())
 
     def test_receipt_preserves_japanese_candidates_rows_and_signed_difference(self):
         for index, difference in enumerate((-100, 100)):
