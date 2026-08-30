@@ -30,6 +30,7 @@ from receivable_persistence_service import (  # noqa: E402
     ReceivableLedgerSchemaError,
     ReceivableLedgerVerificationError,
     ReceivableLedgerWriteError,
+    ReceivableSettlementReceiptError,
     calculate_current_revision,
     load_current_receivables_read_only,
     load_receivable_history_or_empty_read_only,
@@ -179,6 +180,93 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             lock_timeout_seconds=0.5,
             lock_poll_interval_seconds=0.01,
         )
+
+    def settlement_response(self, difference=-100):
+        return {
+            "settlement_id": "settlement-receipt",
+            "settlement_date": "2026-08-31",
+            "customer_name": "日本商事",
+            "payment_amount": 900,
+            "target_total": 1000,
+            "difference": difference,
+            "source_candidates": [
+                {"未収ID": "R1", "消込予定": 600},
+                {"未収ID": "R2", "消込予定": 300},
+            ],
+            "rows": [
+                {"借方科目": "普通預金", "金額": 900},
+                {"貸方科目": "未収金", "金額": 900},
+            ],
+            "created_at": "2026-08-31T10:00:00+09:00",
+        }
+
+    def commit_with_receipt(
+        self,
+        transaction_id="tx-receipt",
+        key="client-operation-001",
+        request_payload=None,
+        contents=None,
+        settlement=None,
+    ):
+        if contents is None:
+            contents = self.coordinator_contents()
+        if request_payload is None:
+            request_payload = {"customer": "日本商事", "amount": 900}
+        if settlement is None:
+            settlement = self.settlement_response()
+        return service.commit_receivable_ledger_transaction_with_receipt(
+            self.receivables_directory,
+            transaction_id,
+            settlement_id="settlement-receipt",
+            idempotency_key=key,
+            request_payload=request_payload,
+            settlement_response=settlement,
+            current_before_bytes=contents["current_before"],
+            current_after_bytes=contents["current_after"],
+            history_before_bytes=contents["history_before"],
+            history_after_bytes=contents["history_after"],
+            lock_timeout_seconds=0.5,
+            lock_poll_interval_seconds=0.01,
+        )
+
+    def prepare_receipt_artifacts(
+        self,
+        transaction_id="tx-receipt-crash",
+        key=None,
+        request_payload=None,
+        settlement=None,
+    ):
+        if request_payload is None:
+            request_payload = {"amount": 900}
+        if settlement is None:
+            settlement = self.settlement_response()
+        contents = self.write_coordinator_before_targets()
+        if key is None:
+            key = f"crash-key-{transaction_id}"
+        key_hash = service.calculate_idempotency_key_hash(key)
+        receipt_path = service.resolve_settlement_receipt_path(
+            self.receivables_directory, key_hash
+        )
+        metadata = {
+            "receipt_required": True,
+            "idempotency_key_hash": key_hash,
+            "request_hash": service.calculate_request_hash(request_payload),
+            "receipt_path": str(receipt_path.resolve()),
+            "receipt_hash": None,
+            "settlement_response": settlement,
+            "committed_at": "2026-08-31T00:00:00+00:00",
+        }
+        paths, marker = service.prepare_transaction_artifacts(
+            self.receivables_directory,
+            transaction_id,
+            current_before_bytes=contents["current_before"],
+            current_after_bytes=contents["current_after"],
+            history_before_bytes=contents["history_before"],
+            history_after_bytes=contents["history_after"],
+            settlement_id="settlement-receipt",
+            marker_metadata=metadata,
+        )
+        return paths, marker, contents, receipt_path
 
     def test_resolve_paths_has_no_filesystem_side_effect(self):
         missing_directory = self.receivables_directory / "missing"
@@ -1721,6 +1809,429 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
 
         self.assertTrue(recovered[0].workspace_cleaned)
         self.assertFalse(paths.workspace_directory.exists())
+
+    def test_idempotency_key_hash_is_deterministic_and_hides_raw_key(self):
+        raw_key = "customer/secret operation key"
+        first = service.calculate_idempotency_key_hash(raw_key)
+        second = service.calculate_idempotency_key_hash(raw_key)
+        path = service.resolve_settlement_receipt_path(
+            self.receivables_directory, first
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 64)
+        self.assertEqual(path.name, f"{first}.json")
+        self.assertNotIn(raw_key, str(path))
+        self.assertFalse(path.parent.exists())
+
+    def test_empty_idempotency_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            service.calculate_idempotency_key_hash("")
+
+    def test_request_hash_is_canonical_for_dict_but_preserves_list_order(self):
+        first = {"b": 2, "a": 1, "items": [1, 2]}
+        reordered = {"items": [1, 2], "a": 1, "b": 2}
+        changed_list = {"b": 2, "a": 1, "items": [2, 1]}
+
+        self.assertEqual(
+            service.calculate_request_hash(first),
+            service.calculate_request_hash(reordered),
+        )
+        self.assertNotEqual(
+            service.calculate_request_hash(first),
+            service.calculate_request_hash(changed_list),
+        )
+
+    def test_precomputed_request_hash_is_accepted_by_commit_api(self):
+        contents = self.write_coordinator_before_targets()
+        payload = {"customer": "日本商事", "amount": 900}
+
+        result = service.commit_receivable_ledger_transaction_with_receipt(
+            self.receivables_directory,
+            "tx-precomputed-request-hash",
+            settlement_id="settlement-receipt",
+            idempotency_key="precomputed-request-key",
+            request_hash=service.calculate_request_hash(payload),
+            settlement_response=self.settlement_response(),
+            current_before_bytes=contents["current_before"],
+            current_after_bytes=contents["current_after"],
+            history_before_bytes=contents["history_before"],
+            history_after_bytes=contents["history_after"],
+            lock_timeout_seconds=0.5,
+            lock_poll_interval_seconds=0.01,
+        )
+
+        self.assertFalse(result.replayed)
+        with self.assertRaises(ValueError):
+            service.resolve_request_hash(
+                request_payload=payload,
+                request_hash=service.calculate_request_hash(payload),
+            )
+
+    def test_receipt_commit_persists_exact_reload_and_survives_cleanup(self):
+        contents = self.write_coordinator_before_targets()
+        result = self.commit_with_receipt(contents=contents)
+
+        loaded = service.read_settlement_receipt(result.receipt_path)
+
+        self.assertFalse(result.replayed)
+        self.assertEqual(result.settlement, self.settlement_response())
+        self.assertEqual(loaded.receipt["settlement"], result.settlement)
+        self.assertEqual(loaded.receipt_hash, result.receipt_hash)
+        self.assertEqual(loaded.receipt["schema_version"], 1)
+        self.assertTrue(result.receipt_path.exists())
+        workspace = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-receipt"
+        ).workspace_directory
+        self.assertFalse(workspace.exists())
+
+    def test_receipt_preserves_japanese_candidates_rows_and_signed_difference(self):
+        for index, difference in enumerate((-100, 100)):
+            with self.subTest(difference=difference):
+                contents = self.write_coordinator_before_targets()
+                settlement = self.settlement_response(difference)
+                result = self.commit_with_receipt(
+                    f"tx-signed-{index}",
+                    f"signed-key-{index}",
+                    {"operation": index},
+                    contents,
+                    settlement,
+                )
+                self.assertEqual(result.settlement["difference"], difference)
+                self.assertEqual(len(result.settlement["source_candidates"]), 2)
+                self.assertEqual(len(result.settlement["rows"]), 2)
+                self.assertEqual(
+                    result.settlement["customer_name"], "日本商事"
+                )
+
+    def test_ready_marker_durably_contains_receipt_recovery_snapshot(self):
+        paths, marker, _, receipt_path = self.prepare_receipt_artifacts(
+            "tx-ready-receipt-snapshot"
+        )
+        reloaded = service.read_transaction_marker(paths.marker_path)
+
+        self.assertEqual(marker["state"], "READY_TO_COMMIT")
+        self.assertTrue(reloaded["receipt_required"])
+        self.assertEqual(
+            reloaded["settlement_response"], self.settlement_response()
+        )
+        self.assertEqual(reloaded["receipt_path"], str(receipt_path.resolve()))
+        self.assertIsNotNone(reloaded["request_hash"])
+        self.assertIsNotNone(reloaded["committed_at"])
+
+    def test_receipt_is_durable_before_committed_marker(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+
+        def assert_receipt_before_committed(marker_path, state, **kwargs):
+            if state == "COMMITTED":
+                marker = service.read_transaction_marker(marker_path)
+                self.assertTrue(Path(marker["receipt_path"]).exists())
+                self.assertIsNotNone(marker["receipt_hash"])
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service,
+            "transition_transaction_marker",
+            side_effect=assert_receipt_before_committed,
+        ):
+            result = self.commit_with_receipt(
+                "tx-receipt-order", "receipt-order", contents=contents
+            )
+
+        self.assertFalse(result.replayed)
+
+    def test_same_key_same_request_replays_without_ledger_update_or_workspace(self):
+        contents = self.write_coordinator_before_targets()
+        first = self.commit_with_receipt(contents=contents)
+        current_after_first = self.paths.current_path.read_bytes()
+        history_after_first = self.paths.history_path.read_bytes()
+
+        replay = self.commit_with_receipt(
+            "tx-must-not-exist",
+            contents={
+                **contents,
+                "current_before": b"intentionally stale",
+                "history_before": b"intentionally stale",
+            },
+        )
+
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.settlement, first.settlement)
+        self.assertEqual(self.paths.current_path.read_bytes(), current_after_first)
+        self.assertEqual(self.paths.history_path.read_bytes(), history_after_first)
+        replay_workspace = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-must-not-exist"
+        ).workspace_directory
+        self.assertFalse(replay_workspace.exists())
+
+    def test_same_key_different_request_is_conflict_without_update(self):
+        contents = self.write_coordinator_before_targets()
+        self.commit_with_receipt(contents=contents)
+        before = self.paths.current_path.read_bytes()
+
+        with self.assertRaises(service.ReceivableIdempotencyConflictError):
+            self.commit_with_receipt(
+                "tx-conflicting-request",
+                request_payload={"customer": "日本商事", "amount": 901},
+                contents=contents,
+            )
+
+        self.assertEqual(self.paths.current_path.read_bytes(), before)
+
+    def test_different_key_same_request_allows_new_operation(self):
+        first_contents = self.write_coordinator_before_targets()
+        self.commit_with_receipt(contents=first_contents)
+        second_contents = {
+            "current_before": first_contents["current_after"],
+            "current_after": b"second-current-after",
+            "history_before": first_contents["history_after"],
+            "history_after": b"second-history-after",
+        }
+
+        second = self.commit_with_receipt(
+            "tx-second-key",
+            "client-operation-002",
+            contents=second_contents,
+        )
+
+        self.assertFalse(second.replayed)
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), b"second-current-after"
+        )
+
+    def test_receipt_malformed_and_missing_field_are_explicit_errors(self):
+        for index, raw in enumerate(
+            (b"{bad-json", json.dumps({"schema_version": 1}).encode())
+        ):
+            with self.subTest(index=index):
+                path = self.receivables_directory / f"bad-{index}.json"
+                path.write_bytes(raw)
+                with self.assertRaises(ReceivableSettlementReceiptError):
+                    service.read_settlement_receipt(path)
+
+    def valid_receipt_mapping(self):
+        return {
+            "schema_version": 1,
+            "idempotency_key_hash": "a" * 64,
+            "request_hash": "b" * 64,
+            "transaction_id": "tx-valid-receipt",
+            "settlement_id": "settlement-valid",
+            "settlement": self.settlement_response(),
+            "current_after_hash": "c" * 64,
+            "history_after_hash": "d" * 64,
+            "committed_at": "2026-08-31T00:00:00+00:00",
+        }
+
+    def test_receipt_atomic_write_failures_leave_no_receipt(self):
+        failure_patches = (
+            (service, "_write_all_and_fsync", OSError("temp write")),
+            (service.os, "fsync", OSError("fsync")),
+        )
+        for index, (owner, name, error) in enumerate(failure_patches):
+            with self.subTest(index=index):
+                path = self.receivables_directory / f"receipt-fail-{index}.json"
+                with patch.object(owner, name, side_effect=error):
+                    with self.assertRaises(ReceivableLedgerWriteError):
+                        service.save_settlement_receipt(
+                            path, self.valid_receipt_mapping()
+                        )
+                self.assertFalse(path.exists())
+
+    def test_receipt_replace_failure_leaves_no_receipt(self):
+        path = self.receivables_directory / "receipt-replace-fail.json"
+        with patch.object(
+            service.os, "replace", side_effect=PermissionError("replace")
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.save_settlement_receipt(
+                    path, self.valid_receipt_mapping()
+                )
+        self.assertFalse(path.exists())
+
+    def test_receipt_readback_failure_is_explicit(self):
+        path = self.receivables_directory / "receipt-readback-fail.json"
+        with patch.object(
+            service,
+            "read_settlement_receipt",
+            side_effect=ReceivableSettlementReceiptError("readback"),
+        ):
+            with self.assertRaises(ReceivableSettlementReceiptError):
+                service.save_settlement_receipt(
+                    path, self.valid_receipt_mapping()
+                )
+        self.assertTrue(path.exists())
+
+    def test_crash_both_after_receipt_missing_is_recovered(self):
+        paths, _, contents, receipt_path = self.prepare_receipt_artifacts(
+            "tx-crash-receipt-missing"
+        )
+        self.paths.current_path.write_bytes(contents["current_after"])
+        self.paths.history_path.write_bytes(contents["history_after"])
+        service.transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED"
+        )
+
+        result = service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )[0]
+
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertTrue(receipt_path.exists())
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_crash_valid_receipt_before_committed_is_verified(self):
+        paths, marker, contents, receipt_path = self.prepare_receipt_artifacts(
+            "tx-crash-receipt-valid"
+        )
+        self.paths.current_path.write_bytes(contents["current_after"])
+        self.paths.history_path.write_bytes(contents["history_after"])
+        marker = service.transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED"
+        )
+        service.save_settlement_receipt(
+            receipt_path, service._expected_receipt_from_marker(marker)
+        )
+
+        result = service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )[0]
+
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertTrue(receipt_path.exists())
+
+    def test_crash_partial_targets_without_receipt_roll_forward(self):
+        cases = (
+            ("current_after", "history_before"),
+            ("current_before", "history_after"),
+        )
+        for index, (current_key, history_key) in enumerate(cases):
+            with self.subTest(index=index):
+                paths, _, contents, receipt_path = (
+                    self.prepare_receipt_artifacts(f"tx-partial-receipt-{index}")
+                )
+                self.paths.current_path.write_bytes(contents[current_key])
+                self.paths.history_path.write_bytes(contents[history_key])
+
+                service.recover_receivable_ledger_transactions(
+                    self.receivables_directory
+                )
+
+                self.assertEqual(
+                    self.paths.current_path.read_bytes(), contents["current_after"]
+                )
+                self.assertEqual(
+                    self.paths.history_path.read_bytes(), contents["history_after"]
+                )
+                self.assertTrue(receipt_path.exists())
+                self.assertFalse(paths.workspace_directory.exists())
+
+    def test_existing_receipt_with_known_before_targets_rolls_forward(self):
+        paths, marker, contents, receipt_path = self.prepare_receipt_artifacts(
+            "tx-receipt-before-targets"
+        )
+        marker = service.read_transaction_marker(paths.marker_path)
+        service.save_settlement_receipt(
+            receipt_path, service._expected_receipt_from_marker(marker)
+        )
+
+        service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )
+
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+
+    def test_receipt_marker_request_or_settlement_conflict_requires_recovery(self):
+        for index, conflict_field in enumerate(("request_hash", "settlement_id")):
+            with self.subTest(field=conflict_field):
+                original_directory = self.receivables_directory
+                original_paths = self.paths
+                try:
+                    self.receivables_directory = original_directory / f"case-{index}"
+                    self.receivables_directory.mkdir()
+                    self.paths = resolve_receivable_ledger_paths(
+                        self.receivables_directory
+                    )
+                    paths, marker, contents, receipt_path = (
+                        self.prepare_receipt_artifacts(
+                            f"tx-receipt-conflict-{index}"
+                        )
+                    )
+                    self.paths.current_path.write_bytes(contents["current_after"])
+                    self.paths.history_path.write_bytes(contents["history_after"])
+                    receipt = service._expected_receipt_from_marker(marker)
+                    receipt[conflict_field] = (
+                        "f" * 64
+                        if conflict_field == "request_hash"
+                        else "other-settlement"
+                    )
+                    service.save_settlement_receipt(receipt_path, receipt)
+
+                    with self.assertRaises(ReceivableLedgerRecoveryRequired):
+                        service.recover_receivable_ledger_transactions(
+                            self.receivables_directory
+                        )
+                    reloaded = service.read_transaction_marker(paths.marker_path)
+                    self.assertEqual(reloaded["state"], "RECOVERY_REQUIRED")
+                finally:
+                    self.receivables_directory = original_directory
+                    self.paths = original_paths
+
+    def test_receipt_hash_conflict_requires_recovery(self):
+        paths, marker, contents, receipt_path = self.prepare_receipt_artifacts(
+            "tx-receipt-hash-conflict"
+        )
+        self.paths.current_path.write_bytes(contents["current_after"])
+        self.paths.history_path.write_bytes(contents["history_after"])
+        loaded = service.save_settlement_receipt(
+            receipt_path, service._expected_receipt_from_marker(marker)
+        )
+        marker["receipt_hash"] = "0" * 64
+        service.write_transaction_marker(paths.marker_path, marker)
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.recover_receivable_ledger_transactions(
+                self.receivables_directory
+            )
+        self.assertNotEqual(loaded.receipt_hash, "0" * 64)
+
+    def test_receipt_committed_marker_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+        failed = False
+
+        def fail_once(marker_path, state, **kwargs):
+            nonlocal failed
+            if state == "COMMITTED" and not failed:
+                failed = True
+                raise ReceivableLedgerWriteError("committed marker")
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service, "transition_transaction_marker", side_effect=fail_once
+        ):
+            result = self.commit_with_receipt(
+                "tx-receipt-commit-retry", "receipt-commit-retry", contents=contents
+            )
+
+        self.assertTrue(result.recovered)
+        self.assertTrue(result.receipt_path.exists())
+
+    def test_receipt_cleanup_failure_does_not_remove_receipt(self):
+        contents = self.write_coordinator_before_targets()
+        with patch.object(
+            service,
+            "cleanup_transaction_workspace",
+            side_effect=ReceivableLedgerRecoveryError("cleanup"),
+        ):
+            result = self.commit_with_receipt(
+                "tx-receipt-cleanup", "receipt-cleanup", contents=contents
+            )
+
+        self.assertFalse(result.workspace_cleaned)
+        self.assertTrue(result.receipt_path.exists())
 
 
 if __name__ == "__main__":

@@ -34,7 +34,10 @@ LEDGER_LOCK_FILENAME = ".receivable_ledger.lock"
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_POLL_INTERVAL_SECONDS = 0.05
 TRANSACTIONS_DIRECTORY_NAME = ".transactions"
+SETTLEMENTS_DIRECTORY_NAME = ".settlements"
 TRANSACTION_MARKER_FILENAME = "marker.json"
+SETTLEMENT_RECEIPT_SCHEMA_VERSION = 1
+_REQUEST_PAYLOAD_UNSET = object()
 
 TRANSACTION_STATES = frozenset(
     {
@@ -99,6 +102,14 @@ class ReceivableLedgerDuplicateTransactionError(ReceivableLedgerError):
     """Raised when a transaction workspace ID is already in use."""
 
 
+class ReceivableSettlementReceiptError(ReceivableLedgerRecoveryRequired):
+    """Raised when a durable settlement receipt is invalid or inconsistent."""
+
+
+class ReceivableIdempotencyConflictError(ReceivableLedgerConflictError):
+    """Raised when one idempotency key is reused for another request."""
+
+
 @dataclass(frozen=True)
 class ReceivableLedgerPaths:
     receivables_directory: Path
@@ -144,6 +155,27 @@ class ReceivableLedgerTransactionResult:
     recovered: bool
 
 
+@dataclass(frozen=True)
+class LoadedSettlementReceipt:
+    receipt: dict[str, Any]
+    raw_bytes: bytes
+    receipt_hash: str
+
+
+@dataclass(frozen=True)
+class ReceivableIdempotentTransactionResult:
+    replayed: bool
+    settlement: dict[str, Any]
+    settlement_id: str
+    transaction_id: str
+    current_after_hash: str
+    history_after_hash: str
+    receipt_path: Path
+    receipt_hash: str
+    workspace_cleaned: bool
+    recovered: bool
+
+
 def resolve_receivable_ledger_paths(
     receivables_directory: str | os.PathLike[str] = (
         DEFAULT_RECEIVABLES_DIRECTORY
@@ -170,6 +202,65 @@ def calculate_bytes_sha256(content: bytes) -> str:
     """Return the shared, non-canonicalized SHA-256 for exact bytes."""
 
     return hashlib.sha256(content).hexdigest()
+
+
+def calculate_idempotency_key_hash(idempotency_key: str) -> str:
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise ValueError("idempotency_key must be a non-empty string")
+    return calculate_bytes_sha256(idempotency_key.encode("utf-8"))
+
+
+def canonical_request_bytes(request_payload: Any) -> bytes:
+    try:
+        text = json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("request_payload must be JSON-safe") from exc
+    return text.encode("utf-8")
+
+
+def calculate_request_hash(request_payload: Any) -> str:
+    return calculate_bytes_sha256(canonical_request_bytes(request_payload))
+
+
+def resolve_request_hash(
+    *,
+    request_payload: Any = _REQUEST_PAYLOAD_UNSET,
+    request_hash: str | None = None,
+) -> str:
+    """Resolve exactly one canonical request payload or precomputed hash."""
+
+    has_payload = request_payload is not _REQUEST_PAYLOAD_UNSET
+    has_hash = request_hash is not None
+    if has_payload == has_hash:
+        raise ValueError(
+            "provide exactly one of request_payload or request_hash"
+        )
+    if has_payload:
+        return calculate_request_hash(request_payload)
+    if not isinstance(request_hash, str) or re.fullmatch(
+        r"[0-9a-f]{64}", request_hash
+    ) is None:
+        raise ValueError("request_hash must be lowercase SHA-256 hex")
+    return request_hash
+
+
+def resolve_settlement_receipt_path(
+    receivables_directory: str | os.PathLike[str],
+    idempotency_key_hash: str,
+) -> Path:
+    if re.fullmatch(r"[0-9a-f]{64}", idempotency_key_hash) is None:
+        raise ValueError("idempotency_key_hash must be lowercase SHA-256 hex")
+    return (
+        Path(receivables_directory)
+        / SETTLEMENTS_DIRECTORY_NAME
+        / f"{idempotency_key_hash}.json"
+    )
 
 
 def resolve_receivable_transaction_paths(
@@ -581,6 +672,131 @@ def read_receivable_ledger_snapshot(
         )
 
 
+_RECEIPT_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "idempotency_key_hash",
+        "request_hash",
+        "transaction_id",
+        "settlement_id",
+        "settlement",
+        "current_after_hash",
+        "history_after_hash",
+        "committed_at",
+    }
+)
+
+
+def _validate_settlement_receipt(receipt: Mapping[str, Any]) -> None:
+    missing = sorted(_RECEIPT_REQUIRED_FIELDS.difference(receipt))
+    if missing:
+        raise ReceivableSettlementReceiptError(
+            "Settlement receipt is missing fields: " + ", ".join(missing)
+        )
+    if receipt["schema_version"] != SETTLEMENT_RECEIPT_SCHEMA_VERSION:
+        raise ReceivableSettlementReceiptError(
+            "Unsupported settlement receipt schema_version"
+        )
+    for field in (
+        "idempotency_key_hash",
+        "request_hash",
+        "current_after_hash",
+        "history_after_hash",
+    ):
+        if not isinstance(receipt[field], str) or re.fullmatch(
+            r"[0-9a-f]{64}", receipt[field]
+        ) is None:
+            raise ReceivableSettlementReceiptError(
+                f"Settlement receipt has invalid {field}"
+            )
+    for field in ("transaction_id", "settlement_id", "committed_at"):
+        if not isinstance(receipt[field], str) or not receipt[field]:
+            raise ReceivableSettlementReceiptError(
+                f"Settlement receipt has invalid {field}"
+            )
+    if not isinstance(receipt["settlement"], dict):
+        raise ReceivableSettlementReceiptError(
+            "Settlement receipt settlement must be a JSON object"
+        )
+    try:
+        datetime.fromisoformat(receipt["committed_at"])
+    except ValueError as exc:
+        raise ReceivableSettlementReceiptError(
+            "Settlement receipt has invalid committed_at"
+        ) from exc
+
+
+def _settlement_receipt_json_bytes(receipt: Mapping[str, Any]) -> bytes:
+    _validate_settlement_receipt(receipt)
+    try:
+        text = json.dumps(
+            dict(receipt),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReceivableSettlementReceiptError(
+            "Settlement receipt is not JSON-safe"
+        ) from exc
+    return (text + "\n").encode("utf-8")
+
+
+def read_settlement_receipt(
+    receipt_path: str | os.PathLike[str],
+) -> LoadedSettlementReceipt:
+    path = Path(receipt_path)
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise ReceivableSettlementReceiptError(
+            f"Could not read settlement receipt: {path}"
+        ) from exc
+    try:
+        receipt = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceivableSettlementReceiptError(
+            f"Settlement receipt is malformed: {path}"
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise ReceivableSettlementReceiptError(
+            f"Settlement receipt must be a JSON object: {path}"
+        )
+    _validate_settlement_receipt(receipt)
+    return LoadedSettlementReceipt(
+        receipt=receipt,
+        raw_bytes=raw_bytes,
+        receipt_hash=calculate_bytes_sha256(raw_bytes),
+    )
+
+
+def save_settlement_receipt(
+    receipt_path: str | os.PathLike[str],
+    receipt: Mapping[str, Any],
+) -> LoadedSettlementReceipt:
+    path = Path(receipt_path)
+    if path.exists():
+        raise ReceivableSettlementReceiptError(
+            f"Settlement receipt already exists: {path}"
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ReceivableLedgerWriteError(
+            f"Could not create settlement receipt directory: {path.parent}"
+        ) from exc
+    expected = dict(receipt)
+    raw_bytes = _settlement_receipt_json_bytes(expected)
+    expected_hash = atomic_write_bytes(path, raw_bytes)
+    loaded = read_settlement_receipt(path)
+    if loaded.receipt != expected or loaded.receipt_hash != expected_hash:
+        raise ReceivableSettlementReceiptError(
+            f"Settlement receipt read-back verification failed: {path}"
+        )
+    return loaded
+
+
 _MARKER_REQUIRED_FIELDS = frozenset(
     {
         "transaction_id",
@@ -686,6 +902,32 @@ def _validate_transaction_marker(marker: Mapping[str, Any]) -> None:
         raise ReceivableLedgerRecoveryError(
             "PREPARING marker cannot contain a COMMIT decision"
         )
+    if marker.get("receipt_required") and marker["state"] in commit_states:
+        required_text_fields = (
+            "idempotency_key_hash",
+            "request_hash",
+            "receipt_path",
+            "committed_at",
+            "settlement_id",
+        )
+        empty_receipt_fields = [
+            field for field in required_text_fields if not marker.get(field)
+        ]
+        if marker.get("settlement_response") is None:
+            empty_receipt_fields.append("settlement_response")
+        if empty_receipt_fields:
+            raise ReceivableLedgerRecoveryError(
+                "Receipt-aware marker is missing metadata: "
+                + ", ".join(empty_receipt_fields)
+            )
+        if not isinstance(marker["settlement_response"], dict):
+            raise ReceivableLedgerRecoveryError(
+                "settlement_response must be a JSON object"
+            )
+        if marker["state"] == "COMMITTED" and not marker.get("receipt_hash"):
+            raise ReceivableLedgerRecoveryError(
+                "Receipt-aware COMMITTED marker requires receipt_hash"
+            )
 
 
 def _marker_json_bytes(marker: Mapping[str, Any]) -> bytes:
@@ -812,6 +1054,13 @@ def _initial_transaction_marker(
         "history_before_artifact": paths.history_before_artifact.name,
         "history_after_artifact": paths.history_after_artifact.name,
         "last_error": None,
+        "receipt_required": False,
+        "idempotency_key_hash": None,
+        "request_hash": None,
+        "receipt_path": None,
+        "receipt_hash": None,
+        "settlement_response": None,
+        "committed_at": None,
     }
 
 
@@ -854,6 +1103,7 @@ def prepare_transaction_artifacts(
     history_before_bytes: bytes,
     history_after_bytes: bytes,
     settlement_id: str | None = None,
+    marker_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[ReceivableTransactionPaths, dict[str, Any]]:
     """Durably prepare four artifacts before recording COMMIT decision."""
 
@@ -900,6 +1150,9 @@ def prepare_transaction_artifacts(
         prepared_marker[f"{field_prefix}_hash"] = artifact_hash
         prepared_marker[f"{field_prefix}_size"] = len(content)
         prepared_marker[f"{field_prefix}_artifact"] = artifact_path.name
+
+    if marker_metadata is not None:
+        prepared_marker.update(dict(marker_metadata))
 
     prepared_marker["state"] = "READY_TO_COMMIT"
     prepared_marker["decision"] = "COMMIT"
@@ -1368,6 +1621,73 @@ def _abort_failed_prepare_in_same_call(
     cleanup_transaction_workspace(paths.workspace_directory)
 
 
+def _expected_receipt_from_marker(
+    marker: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": SETTLEMENT_RECEIPT_SCHEMA_VERSION,
+        "idempotency_key_hash": marker["idempotency_key_hash"],
+        "request_hash": marker["request_hash"],
+        "transaction_id": marker["transaction_id"],
+        "settlement_id": marker["settlement_id"],
+        "settlement": marker["settlement_response"],
+        "current_after_hash": marker["current_after_hash"],
+        "history_after_hash": marker["history_after_hash"],
+        "committed_at": marker["committed_at"],
+    }
+
+
+def _validate_receipt_marker_path(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> Path:
+    try:
+        expected = resolve_settlement_receipt_path(
+            paths.receivables_directory,
+            marker["idempotency_key_hash"],
+        )
+        actual = Path(marker["receipt_path"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReceivableSettlementReceiptError(
+            "Marker contains invalid receipt path metadata"
+        ) from exc
+    if _normalized_resolved_path(actual) != _normalized_resolved_path(expected):
+        raise ReceivableSettlementReceiptError(
+            "Marker receipt_path does not match its idempotency key"
+        )
+    return expected
+
+
+def _ensure_receipt_durable_locked(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not marker.get("receipt_required"):
+        return dict(marker)
+    try:
+        receipt_path = _validate_receipt_marker_path(paths, marker)
+        expected = _expected_receipt_from_marker(marker)
+        _validate_settlement_receipt(expected)
+        if receipt_path.exists():
+            loaded = read_settlement_receipt(receipt_path)
+        else:
+            loaded = save_settlement_receipt(receipt_path, expected)
+        if loaded.receipt != expected:
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt conflicts with transaction marker"
+            )
+        if marker.get("receipt_hash") not in (None, loaded.receipt_hash):
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt hash conflicts with transaction marker"
+            )
+    except ReceivableSettlementReceiptError as exc:
+        _raise_transaction_recovery_required(paths, marker, str(exc))
+
+    updated = dict(marker)
+    updated["receipt_hash"] = loaded.receipt_hash
+    return write_transaction_marker(paths.marker_path, updated)
+
+
 def _recover_transaction_workspace_locked(
     paths: ReceivableTransactionPaths,
 ) -> ReceivableLedgerTransactionResult:
@@ -1389,6 +1709,7 @@ def _recover_transaction_workspace_locked(
         )
 
     if marker["state"] == "COMMITTED":
+        marker = _ensure_receipt_durable_locked(paths, marker)
         cleaned = _cleanup_committed_workspace_best_effort(paths)
         return _transaction_result(
             marker,
@@ -1439,6 +1760,7 @@ def _recover_transaction_workspace_locked(
         )
 
     _verify_final_after_hashes(paths, marker)
+    marker = _ensure_receipt_durable_locked(paths, marker)
     marker = transition_transaction_marker(paths.marker_path, "COMMITTED")
     cleaned = _cleanup_committed_workspace_best_effort(paths)
     return _transaction_result(
@@ -1689,6 +2011,212 @@ def commit_receivable_ledger_transaction(
         except ReceivableLedgerError as original_error:
             try:
                 return _recover_transaction_workspace_locked(paths)
+            except ReceivableLedgerRecoveryRequired:
+                raise
+            except ReceivableLedgerError:
+                raise original_error
+
+
+def _idempotent_result_from_loaded_receipt(
+    loaded: LoadedSettlementReceipt,
+    receipt_path: Path,
+    *,
+    replayed: bool,
+    workspace_cleaned: bool,
+    recovered: bool,
+) -> ReceivableIdempotentTransactionResult:
+    receipt = loaded.receipt
+    return ReceivableIdempotentTransactionResult(
+        replayed=replayed,
+        settlement=dict(receipt["settlement"]),
+        settlement_id=receipt["settlement_id"],
+        transaction_id=receipt["transaction_id"],
+        current_after_hash=receipt["current_after_hash"],
+        history_after_hash=receipt["history_after_hash"],
+        receipt_path=receipt_path,
+        receipt_hash=loaded.receipt_hash,
+        workspace_cleaned=workspace_cleaned,
+        recovered=recovered,
+    )
+
+
+def _lookup_idempotency_receipt_locked(
+    receivables_directory: str | os.PathLike[str],
+    idempotency_key_hash: str,
+    request_hash: str,
+) -> tuple[Path, LoadedSettlementReceipt | None]:
+    receipt_path = resolve_settlement_receipt_path(
+        receivables_directory, idempotency_key_hash
+    )
+    if not receipt_path.exists():
+        return receipt_path, None
+    loaded = read_settlement_receipt(receipt_path)
+    if loaded.receipt["idempotency_key_hash"] != idempotency_key_hash:
+        raise ReceivableSettlementReceiptError(
+            "Settlement receipt key hash does not match its path"
+        )
+    if loaded.receipt["request_hash"] != request_hash:
+        raise ReceivableIdempotencyConflictError(
+            "idempotency_key was already used for a different request"
+        )
+    return receipt_path, loaded
+
+
+def _commit_receipt_transaction_targets_locked(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> ReceivableIdempotentTransactionResult:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    roll_forward_from_artifact(
+        paths.current_after_artifact,
+        marker["current_after_hash"],
+        ledger_paths.current_path,
+    )
+    marker = transition_transaction_marker(
+        paths.marker_path, "CURRENT_REPLACED"
+    )
+    roll_forward_from_artifact(
+        paths.history_after_artifact,
+        marker["history_after_hash"],
+        ledger_paths.history_path,
+    )
+    marker = transition_transaction_marker(
+        paths.marker_path, "HISTORY_REPLACED"
+    )
+    _verify_final_after_hashes(paths, marker)
+    marker = _ensure_receipt_durable_locked(paths, marker)
+    marker = transition_transaction_marker(paths.marker_path, "COMMITTED")
+    receipt_path = Path(marker["receipt_path"])
+    loaded = read_settlement_receipt(receipt_path)
+    cleaned = _cleanup_committed_workspace_best_effort(paths)
+    return _idempotent_result_from_loaded_receipt(
+        loaded,
+        receipt_path,
+        replayed=False,
+        workspace_cleaned=cleaned,
+        recovered=False,
+    )
+
+
+def commit_receivable_ledger_transaction_with_receipt(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+    *,
+    settlement_id: str,
+    idempotency_key: str,
+    request_payload: Any = _REQUEST_PAYLOAD_UNSET,
+    request_hash: str | None = None,
+    settlement_response: Mapping[str, Any],
+    current_before_bytes: bytes,
+    current_after_bytes: bytes,
+    history_before_bytes: bytes,
+    history_after_bytes: bytes,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> ReceivableIdempotentTransactionResult:
+    """Commit a 2-file transaction with a durable replay receipt."""
+
+    if not isinstance(settlement_id, str) or not settlement_id:
+        raise ValueError("settlement_id must be a non-empty string")
+    if not isinstance(settlement_response, Mapping):
+        raise ValueError("settlement_response must be a JSON-safe mapping")
+    byte_values = (
+        current_before_bytes,
+        current_after_bytes,
+        history_before_bytes,
+        history_after_bytes,
+    )
+    if not all(isinstance(value, bytes) for value in byte_values):
+        raise TypeError("all before/after ledger values must be bytes")
+
+    key_hash = calculate_idempotency_key_hash(idempotency_key)
+    resolved_request_hash = resolve_request_hash(
+        request_payload=request_payload,
+        request_hash=request_hash,
+    )
+    try:
+        settlement_snapshot = json.loads(
+            canonical_request_bytes(dict(settlement_response)).decode("utf-8")
+        )
+    except ValueError as exc:
+        raise ValueError("settlement_response must be JSON-safe") from exc
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        _recover_receivable_ledger_transactions_locked(receivables_directory)
+        receipt_path, existing = _lookup_idempotency_receipt_locked(
+            receivables_directory, key_hash, resolved_request_hash
+        )
+        if existing is not None:
+            return _idempotent_result_from_loaded_receipt(
+                existing,
+                receipt_path,
+                replayed=True,
+                workspace_cleaned=True,
+                recovered=False,
+            )
+
+        _reject_existing_transaction_id(receivables_directory, transaction_id)
+        _read_and_verify_transaction_before_targets(
+            receivables_directory,
+            current_before_bytes,
+            history_before_bytes,
+        )
+        paths = resolve_receivable_transaction_paths(
+            receivables_directory, transaction_id
+        )
+        metadata = {
+            "receipt_required": True,
+            "idempotency_key_hash": key_hash,
+            "request_hash": resolved_request_hash,
+            "receipt_path": str(receipt_path.resolve()),
+            "receipt_hash": None,
+            "settlement_response": settlement_snapshot,
+            "committed_at": _utc_now_text(),
+        }
+        try:
+            paths, marker = prepare_transaction_artifacts(
+                receivables_directory,
+                transaction_id,
+                current_before_bytes=current_before_bytes,
+                current_after_bytes=current_after_bytes,
+                history_before_bytes=history_before_bytes,
+                history_after_bytes=history_after_bytes,
+                settlement_id=settlement_id,
+                marker_metadata=metadata,
+            )
+        except ReceivableLedgerError:
+            if paths.workspace_directory.exists():
+                try:
+                    _abort_failed_prepare_in_same_call(
+                        paths,
+                        current_before_bytes,
+                        history_before_bytes,
+                    )
+                except ReceivableLedgerRecoveryRequired:
+                    raise
+                except ReceivableLedgerError:
+                    pass
+            raise
+
+        try:
+            return _commit_receipt_transaction_targets_locked(paths, marker)
+        except ReceivableLedgerError as original_error:
+            try:
+                recovered = _recover_transaction_workspace_locked(paths)
+                loaded = read_settlement_receipt(receipt_path)
+                return _idempotent_result_from_loaded_receipt(
+                    loaded,
+                    receipt_path,
+                    replayed=False,
+                    workspace_cleaned=recovered.workspace_cleaned,
+                    recovered=True,
+                )
             except ReceivableLedgerRecoveryRequired:
                 raise
             except ReceivableLedgerError:
