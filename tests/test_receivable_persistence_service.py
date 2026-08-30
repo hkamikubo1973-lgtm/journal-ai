@@ -150,6 +150,36 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
         }
         return paths, marker, contents
 
+    def coordinator_contents(self):
+        return {
+            "current_before": "\ufeffコード,摘要\r\n1,旧\r\n".encode("utf-8"),
+            "current_after": "\ufeffコード,摘要\r\n1,新\r\n".encode("utf-8"),
+            "history_before": "\ufeff消込ID,摘要\r\nS0,旧\r\n".encode("utf-8"),
+            "history_after": "\ufeff消込ID,摘要\r\nS0,旧\r\nS1,新\r\n".encode("utf-8"),
+        }
+
+    def write_coordinator_before_targets(self, contents=None):
+        if contents is None:
+            contents = self.coordinator_contents()
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+        return contents
+
+    def commit_coordinator(self, transaction_id="tx-coordinator", contents=None):
+        if contents is None:
+            contents = self.coordinator_contents()
+        return service.commit_receivable_ledger_transaction(
+            self.receivables_directory,
+            transaction_id,
+            current_before_bytes=contents["current_before"],
+            current_after_bytes=contents["current_after"],
+            history_before_bytes=contents["history_before"],
+            history_after_bytes=contents["history_after"],
+            settlement_id="settlement-coordinator",
+            lock_timeout_seconds=0.5,
+            lock_poll_interval_seconds=0.01,
+        )
+
     def test_resolve_paths_has_no_filesystem_side_effect(self):
         missing_directory = self.receivables_directory / "missing"
         paths = resolve_receivable_ledger_paths(missing_directory)
@@ -601,10 +631,19 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
         self.assertFalse(paths.workspace_directory.exists())
 
     def test_transaction_id_rejects_path_traversal(self):
-        with self.assertRaises(ValueError):
-            service.resolve_receivable_transaction_paths(
-                self.receivables_directory, "../escape"
-            )
+        for unsafe_id in (
+            "../escape",
+            "tx..escape",
+            "C:drive",
+            "unsafe/name",
+            "unsafe\\name",
+            "日本語ID",
+        ):
+            with self.subTest(transaction_id=unsafe_id):
+                with self.assertRaises(ValueError):
+                    service.resolve_receivable_transaction_paths(
+                        self.receivables_directory, unsafe_id
+                    )
 
     def test_workspace_creation_writes_preparing_marker(self):
         paths, marker = service.create_transaction_workspace(
@@ -1087,6 +1126,601 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             service.cleanup_transaction_workspace(paths.workspace_directory)
 
         self.assertTrue(paths.workspace_directory.exists())
+
+    def test_coordinator_commits_two_exact_files_and_cleans_workspace(self):
+        contents = self.write_coordinator_before_targets()
+
+        result = self.commit_coordinator(contents=contents)
+
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertFalse(result.recovered)
+        self.assertTrue(result.workspace_cleaned)
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+        self.assertEqual(
+            result.current_after_hash,
+            hashlib.sha256(contents["current_after"]).hexdigest(),
+        )
+        self.assertEqual(
+            result.history_after_hash,
+            hashlib.sha256(contents["history_after"]).hexdigest(),
+        )
+        transaction_paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-coordinator"
+        )
+        self.assertFalse(transaction_paths.workspace_directory.exists())
+
+    def test_coordinator_replaces_current_before_history(self):
+        contents = self.write_coordinator_before_targets()
+        target_order = []
+        real_roll_forward = service.roll_forward_from_artifact
+
+        def recording_roll_forward(artifact_path, expected_hash, target_path):
+            target_order.append(Path(target_path).name)
+            return real_roll_forward(artifact_path, expected_hash, target_path)
+
+        with patch.object(
+            service,
+            "roll_forward_from_artifact",
+            side_effect=recording_roll_forward,
+        ):
+            self.commit_coordinator("tx-order", contents)
+
+        self.assertEqual(
+            target_order[:2], ["current.csv", "receivable_history.csv"]
+        )
+
+    def test_marker_transitions_follow_verified_target_bytes(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+        observed_states = []
+
+        def checking_transition(marker_path, state, **kwargs):
+            current = self.paths.current_path.read_bytes()
+            history = self.paths.history_path.read_bytes()
+            if state == "CURRENT_REPLACED":
+                self.assertEqual(current, contents["current_after"])
+                self.assertEqual(history, contents["history_before"])
+            elif state in {"HISTORY_REPLACED", "COMMITTED"}:
+                self.assertEqual(current, contents["current_after"])
+                self.assertEqual(history, contents["history_after"])
+            observed_states.append(state)
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service,
+            "transition_transaction_marker",
+            side_effect=checking_transition,
+        ):
+            self.commit_coordinator("tx-state-order", contents)
+
+        self.assertEqual(
+            observed_states,
+            ["CURRENT_REPLACED", "HISTORY_REPLACED", "COMMITTED"],
+        )
+
+    def test_coordinator_reaches_committed_marker_before_cleanup(self):
+        contents = self.write_coordinator_before_targets()
+
+        with patch.object(service, "cleanup_transaction_workspace"):
+            result = self.commit_coordinator("tx-marker-committed", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-marker-committed"
+        )
+        marker = service.read_transaction_marker(paths.marker_path)
+        self.assertEqual(marker["state"], "COMMITTED")
+        self.assertEqual(result.state, "COMMITTED")
+
+    def test_coordinator_releases_lock_after_success(self):
+        contents = self.write_coordinator_before_targets()
+        self.commit_coordinator("tx-lock-release", contents)
+
+        with receivable_ledger_lock(
+            self.receivables_directory,
+            timeout_seconds=0.1,
+            poll_interval_seconds=0.01,
+        ):
+            acquired = True
+
+        self.assertTrue(acquired)
+
+    def test_coordinator_uses_existing_ledger_lock_timeout(self):
+        contents = self.write_coordinator_before_targets()
+        result = []
+
+        def attempt_commit():
+            try:
+                service.commit_receivable_ledger_transaction(
+                    self.receivables_directory,
+                    "tx-lock-timeout",
+                    current_before_bytes=contents["current_before"],
+                    current_after_bytes=contents["current_after"],
+                    history_before_bytes=contents["history_before"],
+                    history_after_bytes=contents["history_after"],
+                    lock_timeout_seconds=0.1,
+                    lock_poll_interval_seconds=0.01,
+                )
+            except ReceivableLedgerLockTimeout:
+                result.append("timeout")
+
+        with receivable_ledger_lock(self.receivables_directory):
+            thread = threading.Thread(target=attempt_commit)
+            thread.start()
+            thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, ["timeout"])
+
+    def test_coordinator_preserves_bom_newlines_and_extra_bytes(self):
+        contents = {
+            "current_before": b"\xef\xbb\xbfextra,current\nold,1\r\n",
+            "current_after": b"\xef\xbb\xbfextra,current\nnew,2\r\n\n",
+            "history_before": b"\xef\xbb\xbfextra,history\r\nold,1\n",
+            "history_after": b"\xef\xbb\xbfextra,history\r\nnew,2\n\r\n",
+        }
+        self.write_coordinator_before_targets(contents)
+
+        self.commit_coordinator("tx-exact-bytes", contents)
+
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+
+    def test_current_before_conflict_stops_before_workspace_creation(self):
+        contents = self.write_coordinator_before_targets()
+        contents["current_before"] = b"stale-current"
+
+        with self.assertRaises(service.ReceivableLedgerConflictError):
+            self.commit_coordinator("tx-current-conflict", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-current-conflict"
+        )
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_history_before_conflict_stops_before_workspace_creation(self):
+        contents = self.write_coordinator_before_targets()
+        contents["history_before"] = b"stale-history"
+
+        with self.assertRaises(service.ReceivableLedgerConflictError):
+            self.commit_coordinator("tx-history-conflict", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-history-conflict"
+        )
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_missing_target_is_explicit_conflict(self):
+        contents = self.write_coordinator_before_targets()
+        self.paths.history_path.unlink()
+
+        with self.assertRaises(service.ReceivableLedgerConflictError):
+            self.commit_coordinator("tx-missing-target", contents)
+
+    def test_duplicate_transaction_id_is_rejected(self):
+        contents = self.write_coordinator_before_targets()
+        service.create_transaction_workspace(
+            self.receivables_directory, "tx-duplicate"
+        )
+
+        with self.assertRaises(
+            service.ReceivableLedgerDuplicateTransactionError
+        ):
+            self.commit_coordinator("tx-duplicate", contents)
+
+    def test_pending_recovery_runs_before_new_transaction(self):
+        pending_paths, pending_marker, pending = self.prepare_artifacts(
+            "tx-pending-first"
+        )
+        self.paths.current_path.write_bytes(pending["current_before"])
+        self.paths.history_path.write_bytes(pending["history_before"])
+        next_contents = {
+            "current_before": pending["current_after"],
+            "current_after": b"current-next-after",
+            "history_before": pending["history_after"],
+            "history_after": b"history-next-after",
+        }
+
+        result = self.commit_coordinator("tx-after-pending", next_contents)
+
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertFalse(pending_paths.workspace_directory.exists())
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), next_contents["current_after"]
+        )
+        self.assertEqual(
+            pending_marker["decision"], "COMMIT"
+        )
+
+    def test_multiple_nonterminal_workspaces_block_recovery(self):
+        self.write_coordinator_before_targets()
+        service.create_transaction_workspace(
+            self.receivables_directory, "tx-multiple-a"
+        )
+        service.create_transaction_workspace(
+            self.receivables_directory, "tx-multiple-b"
+        )
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.recover_receivable_ledger_transactions(
+                self.receivables_directory,
+                lock_timeout_seconds=0.5,
+                lock_poll_interval_seconds=0.01,
+            )
+
+    def test_preparing_both_before_aborts_and_cleans(self):
+        contents = self.write_coordinator_before_targets()
+        paths, _ = service.create_transaction_workspace(
+            self.receivables_directory, "tx-crash-preparing"
+        )
+        service.atomic_write_bytes(
+            paths.current_before_artifact, contents["current_before"]
+        )
+        service.atomic_write_bytes(
+            paths.history_before_artifact, contents["history_before"]
+        )
+
+        results = service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )
+
+        self.assertEqual(results[0].state, "ABORTED")
+        self.assertFalse(paths.workspace_directory.exists())
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_before"]
+        )
+
+    def recover_prepared_crash(
+        self,
+        transaction_id,
+        current_content,
+        history_content,
+        marker_state=None,
+    ):
+        paths, marker, contents = self.prepare_artifacts(transaction_id)
+        self.paths.current_path.write_bytes(current_content(contents))
+        self.paths.history_path.write_bytes(history_content(contents))
+        if marker_state is not None:
+            service.transition_transaction_marker(
+                paths.marker_path, marker_state
+            )
+        results = service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )
+        return paths, marker, contents, results[0]
+
+    def test_recover_ready_both_before(self):
+        paths, _, contents, result = self.recover_prepared_crash(
+            "tx-ready-before",
+            lambda value: value["current_before"],
+            lambda value: value["history_before"],
+        )
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_recover_ready_current_after_history_before(self):
+        _, _, contents, result = self.recover_prepared_crash(
+            "tx-ready-current-after",
+            lambda value: value["current_after"],
+            lambda value: value["history_before"],
+        )
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+
+    def test_recover_current_replaced_marker(self):
+        _, _, contents, result = self.recover_prepared_crash(
+            "tx-current-replaced",
+            lambda value: value["current_after"],
+            lambda value: value["history_before"],
+            "CURRENT_REPLACED",
+        )
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertEqual(
+            self.paths.history_path.read_bytes(), contents["history_after"]
+        )
+
+    def test_recover_current_before_history_after(self):
+        _, _, contents, result = self.recover_prepared_crash(
+            "tx-history-first-crash",
+            lambda value: value["current_before"],
+            lambda value: value["history_after"],
+        )
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_after"]
+        )
+
+    def test_recover_history_replaced_both_after(self):
+        _, _, _, result = self.recover_prepared_crash(
+            "tx-history-replaced",
+            lambda value: value["current_after"],
+            lambda value: value["history_after"],
+            "HISTORY_REPLACED",
+        )
+        self.assertEqual(result.state, "COMMITTED")
+
+    def test_recover_ready_both_after(self):
+        _, _, _, result = self.recover_prepared_crash(
+            "tx-ready-both-after",
+            lambda value: value["current_after"],
+            lambda value: value["history_after"],
+        )
+        self.assertEqual(result.state, "COMMITTED")
+
+    def test_recovery_unknown_marks_required_and_keeps_targets(self):
+        paths, _, contents = self.prepare_artifacts("tx-recovery-unknown")
+        self.paths.current_path.write_bytes(b"unknown-current")
+        self.paths.history_path.write_bytes(contents["history_before"])
+
+        with self.assertRaisesRegex(
+            ReceivableLedgerRecoveryRequired,
+            "transaction_id=tx-recovery-unknown",
+        ):
+            service.recover_receivable_ledger_transactions(
+                self.receivables_directory
+            )
+
+        marker = service.read_transaction_marker(paths.marker_path)
+        self.assertEqual(marker["state"], "RECOVERY_REQUIRED")
+        self.assertEqual(self.paths.current_path.read_bytes(), b"unknown-current")
+
+    def test_recovery_required_workspace_blocks_new_transaction(self):
+        contents = self.write_coordinator_before_targets()
+        paths, _, _ = self.prepare_artifacts("tx-blocking-recovery")
+        service.mark_transaction_recovery_required(
+            paths.marker_path, "manual recovery"
+        )
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            self.commit_coordinator("tx-must-not-start", contents)
+
+        new_paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-must-not-start"
+        )
+        self.assertFalse(new_paths.workspace_directory.exists())
+
+    def test_recovery_rejects_tampered_marker_target(self):
+        paths, marker, contents = self.prepare_artifacts("tx-target-tamper")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+        marker["current_target"] = str(
+            (self.receivables_directory / "outside.csv").resolve()
+        )
+        service.write_transaction_marker(paths.marker_path, marker)
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.recover_receivable_ledger_transactions(
+                self.receivables_directory
+            )
+
+        self.assertFalse((self.receivables_directory / "outside.csv").exists())
+
+    def test_recovery_rejects_artifact_path_outside_workspace(self):
+        paths, marker, contents = self.prepare_artifacts("tx-artifact-tamper")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+        marker["current_after_artifact"] = "../outside.csv"
+        paths.marker_path.write_bytes(service._marker_json_bytes(marker))
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.recover_receivable_ledger_transactions(
+                self.receivables_directory
+            )
+
+    def test_prepare_artifact_failure_aborts_without_target_change(self):
+        contents = self.write_coordinator_before_targets()
+        real_atomic_write = service.atomic_write_bytes
+
+        def fail_first_artifact(target_path, content):
+            if Path(target_path).name == "current.before.csv":
+                raise ReceivableLedgerWriteError("artifact prepare failed")
+            return real_atomic_write(target_path, content)
+
+        with patch.object(
+            service,
+            "atomic_write_bytes",
+            side_effect=fail_first_artifact,
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                self.commit_coordinator("tx-artifact-failure", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-artifact-failure"
+        )
+        self.assertFalse(paths.workspace_directory.exists())
+        self.assertEqual(
+            self.paths.current_path.read_bytes(), contents["current_before"]
+        )
+
+    def test_ready_marker_failure_aborts_preparing_workspace(self):
+        contents = self.write_coordinator_before_targets()
+        real_write_marker = service.write_transaction_marker
+
+        def fail_ready(marker_path, marker):
+            if marker["state"] == "READY_TO_COMMIT":
+                raise ReceivableLedgerWriteError("ready marker failed")
+            return real_write_marker(marker_path, marker)
+
+        with patch.object(
+            service, "write_transaction_marker", side_effect=fail_ready
+        ):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                self.commit_coordinator("tx-ready-failure", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-ready-failure"
+        )
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_current_write_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_roll_forward = service.roll_forward_from_artifact
+        current_attempts = 0
+
+        def fail_current_once(artifact_path, expected_hash, target_path):
+            nonlocal current_attempts
+            if Path(target_path).name == "current.csv":
+                current_attempts += 1
+                if current_attempts == 1:
+                    raise ReceivableLedgerWriteError("current write failed")
+            return real_roll_forward(artifact_path, expected_hash, target_path)
+
+        with patch.object(
+            service,
+            "roll_forward_from_artifact",
+            side_effect=fail_current_once,
+        ):
+            result = self.commit_coordinator("tx-current-retry", contents)
+
+        self.assertTrue(result.recovered)
+        self.assertEqual(current_attempts, 2)
+
+    def test_current_marker_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+        failed = False
+
+        def fail_current_marker(marker_path, state, **kwargs):
+            nonlocal failed
+            if state == "CURRENT_REPLACED" and not failed:
+                failed = True
+                raise ReceivableLedgerWriteError("current marker failed")
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service,
+            "transition_transaction_marker",
+            side_effect=fail_current_marker,
+        ):
+            result = self.commit_coordinator("tx-current-marker-retry", contents)
+
+        self.assertTrue(result.recovered)
+        self.assertEqual(result.state, "COMMITTED")
+
+    def test_history_write_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_roll_forward = service.roll_forward_from_artifact
+        history_attempts = 0
+
+        def fail_history_once(artifact_path, expected_hash, target_path):
+            nonlocal history_attempts
+            if Path(target_path).name == "receivable_history.csv":
+                history_attempts += 1
+                if history_attempts == 1:
+                    raise ReceivableLedgerWriteError("history write failed")
+            return real_roll_forward(artifact_path, expected_hash, target_path)
+
+        with patch.object(
+            service,
+            "roll_forward_from_artifact",
+            side_effect=fail_history_once,
+        ):
+            result = self.commit_coordinator("tx-history-retry", contents)
+
+        self.assertTrue(result.recovered)
+        self.assertEqual(history_attempts, 2)
+
+    def test_history_marker_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+        failed = False
+
+        def fail_history_marker(marker_path, state, **kwargs):
+            nonlocal failed
+            if state == "HISTORY_REPLACED" and not failed:
+                failed = True
+                raise ReceivableLedgerWriteError("history marker failed")
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service,
+            "transition_transaction_marker",
+            side_effect=fail_history_marker,
+        ):
+            result = self.commit_coordinator("tx-history-marker-retry", contents)
+
+        self.assertTrue(result.recovered)
+
+    def test_final_verification_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_verify = service._verify_final_after_hashes
+        attempts = 0
+
+        def fail_final_once(paths, marker):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ReceivableLedgerVerificationError("final verify failed")
+            return real_verify(paths, marker)
+
+        with patch.object(
+            service,
+            "_verify_final_after_hashes",
+            side_effect=fail_final_once,
+        ):
+            result = self.commit_coordinator("tx-final-retry", contents)
+
+        self.assertTrue(result.recovered)
+        self.assertEqual(attempts, 2)
+
+    def test_committed_marker_transient_failure_recovers_same_call(self):
+        contents = self.write_coordinator_before_targets()
+        real_transition = service.transition_transaction_marker
+        failed = False
+
+        def fail_committed_marker(marker_path, state, **kwargs):
+            nonlocal failed
+            if state == "COMMITTED" and not failed:
+                failed = True
+                raise ReceivableLedgerWriteError("committed marker failed")
+            return real_transition(marker_path, state, **kwargs)
+
+        with patch.object(
+            service,
+            "transition_transaction_marker",
+            side_effect=fail_committed_marker,
+        ):
+            result = self.commit_coordinator("tx-committed-retry", contents)
+
+        self.assertTrue(result.recovered)
+        self.assertEqual(result.state, "COMMITTED")
+
+    def test_cleanup_failure_keeps_committed_workspace_recoverable(self):
+        contents = self.write_coordinator_before_targets()
+
+        with patch.object(
+            service,
+            "cleanup_transaction_workspace",
+            side_effect=ReceivableLedgerRecoveryError("cleanup failed"),
+        ):
+            result = self.commit_coordinator("tx-cleanup-pending", contents)
+
+        paths = service.resolve_receivable_transaction_paths(
+            self.receivables_directory, "tx-cleanup-pending"
+        )
+        self.assertEqual(result.state, "COMMITTED")
+        self.assertFalse(result.workspace_cleaned)
+        self.assertTrue(paths.workspace_directory.exists())
+
+        recovered = service.recover_receivable_ledger_transactions(
+            self.receivables_directory
+        )
+
+        self.assertTrue(recovered[0].workspace_cleaned)
+        self.assertFalse(paths.workspace_directory.exists())
 
 
 if __name__ == "__main__":

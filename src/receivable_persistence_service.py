@@ -11,6 +11,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -90,6 +91,14 @@ class ReceivableLedgerRecoveryRequired(ReceivableLedgerRecoveryError):
     """Raised when recovery cannot safely choose before or after bytes."""
 
 
+class ReceivableLedgerConflictError(ReceivableLedgerError):
+    """Raised when supplied before bytes no longer match ledger targets."""
+
+
+class ReceivableLedgerDuplicateTransactionError(ReceivableLedgerError):
+    """Raised when a transaction workspace ID is already in use."""
+
+
 @dataclass(frozen=True)
 class ReceivableLedgerPaths:
     receivables_directory: Path
@@ -123,6 +132,16 @@ class ReceivableLedgerSnapshot:
     current_raw_bytes: bytes
     history_raw_bytes: bytes | None
     ledger_revision: str
+
+
+@dataclass(frozen=True)
+class ReceivableLedgerTransactionResult:
+    transaction_id: str
+    state: str
+    current_after_hash: str
+    history_after_hash: str
+    workspace_cleaned: bool
+    recovered: bool
 
 
 def resolve_receivable_ledger_paths(
@@ -161,12 +180,19 @@ def resolve_receivable_transaction_paths(
 
     if (
         not transaction_id
-        or transaction_id in {".", ".."}
+        or ".." in transaction_id
         or Path(transaction_id).name != transaction_id
-        or "/" in transaction_id
-        or "\\" in transaction_id
+        or Path(transaction_id).drive
+        or (
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]*", transaction_id
+            )
+            is None
+        )
     ):
-        raise ValueError("transaction_id must be a single non-empty path name")
+        raise ValueError(
+            "transaction_id must contain only safe ASCII path-name characters"
+        )
 
     directory = Path(receivables_directory)
     transactions_directory = directory / TRANSACTIONS_DIRECTORY_NAME
@@ -1085,3 +1111,585 @@ def cleanup_transaction_workspace(
         raise ReceivableLedgerRecoveryError(
             f"Could not clean up transaction workspace: {workspace}"
         ) from exc
+
+
+def _normalized_resolved_path(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def _validate_transaction_recovery_paths(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> None:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    expected_targets = {
+        "current_target": ledger_paths.current_path,
+        "history_target": ledger_paths.history_path,
+    }
+    try:
+        for field, expected_path in expected_targets.items():
+            if _normalized_resolved_path(marker[field]) != (
+                _normalized_resolved_path(expected_path)
+            ):
+                raise ReceivableLedgerRecoveryRequired(
+                    f"Marker {field} does not match this ledger"
+                )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ReceivableLedgerRecoveryRequired(
+            "Marker contains an invalid ledger target path"
+        ) from exc
+
+    expected_artifacts = {
+        "current_before_artifact": paths.current_before_artifact,
+        "current_after_artifact": paths.current_after_artifact,
+        "history_before_artifact": paths.history_before_artifact,
+        "history_after_artifact": paths.history_after_artifact,
+    }
+    for field, expected_path in expected_artifacts.items():
+        artifact_name = marker[field]
+        if not isinstance(artifact_name, str):
+            raise ReceivableLedgerRecoveryRequired(
+                f"Marker {field} is not a safe artifact name"
+            )
+        actual_path = paths.workspace_directory / artifact_name
+        if (
+            artifact_name != expected_path.name
+            or _normalized_resolved_path(actual_path)
+            != _normalized_resolved_path(expected_path)
+        ):
+            raise ReceivableLedgerRecoveryRequired(
+                f"Marker {field} escapes or changes the transaction workspace"
+            )
+
+    if marker["transaction_id"] != paths.workspace_directory.name:
+        raise ReceivableLedgerRecoveryRequired(
+            "Marker transaction_id does not match its workspace"
+        )
+
+
+def _recovery_required_message(
+    paths: ReceivableTransactionPaths,
+    detail: str,
+) -> str:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    current_hash = _file_hash_or_none(ledger_paths.current_path)
+    history_hash = _file_hash_or_none(ledger_paths.history_path)
+    return (
+        f"transaction_id={paths.workspace_directory.name}; "
+        f"current_hash={current_hash}; history_hash={history_hash}; "
+        f"workspace={paths.workspace_directory}; {detail}"
+    )
+
+
+def _raise_transaction_recovery_required(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any] | None,
+    detail: str,
+) -> None:
+    message = _recovery_required_message(paths, detail)
+    if marker is not None and marker.get("state") != "RECOVERY_REQUIRED":
+        try:
+            mark_transaction_recovery_required(paths.marker_path, message)
+        except ReceivableLedgerError:
+            pass
+    raise ReceivableLedgerRecoveryRequired(message)
+
+
+def _verify_transaction_artifacts_for_recovery(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> None:
+    artifact_fields = (
+        (paths.current_before_artifact, "current_before_hash"),
+        (paths.current_after_artifact, "current_after_hash"),
+        (paths.history_before_artifact, "history_before_hash"),
+        (paths.history_after_artifact, "history_after_hash"),
+    )
+    for artifact_path, hash_field in artifact_fields:
+        try:
+            artifact_bytes = artifact_path.read_bytes()
+        except OSError:
+            _raise_transaction_recovery_required(
+                paths,
+                marker,
+                f"artifact missing: {artifact_path}",
+            )
+        if calculate_bytes_sha256(artifact_bytes) != marker[hash_field]:
+            _raise_transaction_recovery_required(
+                paths,
+                marker,
+                f"artifact hash mismatch: {artifact_path}",
+            )
+
+
+def _verify_final_after_hashes(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> None:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    classification = classify_recovery_state(
+        ledger_paths.current_path,
+        ledger_paths.history_path,
+        marker,
+    )
+    if classification != RECOVERY_BOTH_AFTER:
+        _raise_transaction_recovery_required(
+            paths,
+            marker,
+            f"final target classification is {classification}",
+        )
+
+
+def _cleanup_committed_workspace_best_effort(
+    paths: ReceivableTransactionPaths,
+) -> bool:
+    try:
+        cleanup_transaction_workspace(paths.workspace_directory)
+        return True
+    except ReceivableLedgerRecoveryError:
+        return False
+
+
+def _transaction_result(
+    marker: Mapping[str, Any],
+    *,
+    state: str,
+    workspace_cleaned: bool,
+    recovered: bool,
+) -> ReceivableLedgerTransactionResult:
+    return ReceivableLedgerTransactionResult(
+        transaction_id=str(marker["transaction_id"]),
+        state=state,
+        current_after_hash=str(marker.get("current_after_hash") or ""),
+        history_after_hash=str(marker.get("history_after_hash") or ""),
+        workspace_cleaned=workspace_cleaned,
+        recovered=recovered,
+    )
+
+
+def _abort_preparing_transaction_locked(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> ReceivableLedgerTransactionResult:
+    _validate_transaction_recovery_paths(paths, marker)
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    try:
+        current_before = paths.current_before_artifact.read_bytes()
+        history_before = paths.history_before_artifact.read_bytes()
+        current_target = ledger_paths.current_path.read_bytes()
+        history_target = ledger_paths.history_path.read_bytes()
+    except OSError:
+        _raise_transaction_recovery_required(
+            paths,
+            marker,
+            "PREPARING transaction cannot prove both targets are before",
+        )
+
+    if current_target != current_before or history_target != history_before:
+        _raise_transaction_recovery_required(
+            paths,
+            marker,
+            "PREPARING transaction targets do not both match before artifacts",
+        )
+
+    for artifact_path, hash_field in (
+        (paths.current_before_artifact, "current_before_hash"),
+        (paths.current_after_artifact, "current_after_hash"),
+        (paths.history_before_artifact, "history_before_hash"),
+        (paths.history_after_artifact, "history_after_hash"),
+    ):
+        if not artifact_path.exists():
+            continue
+        artifact_bytes = artifact_path.read_bytes()
+        expected_hash = marker.get(hash_field)
+        if (
+            expected_hash is not None
+            and calculate_bytes_sha256(artifact_bytes) != expected_hash
+        ):
+            _raise_transaction_recovery_required(
+                paths,
+                marker,
+                f"PREPARING artifact hash mismatch: {artifact_path}",
+            )
+
+    rolled_back_marker = transition_transaction_marker(
+        paths.marker_path,
+        "PREPARING",
+        decision="ROLLBACK",
+    )
+    try:
+        cleanup_transaction_workspace(paths.workspace_directory)
+    except ReceivableLedgerRecoveryError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Could not clean aborted transaction: {paths.workspace_directory}"
+        ) from exc
+    return _transaction_result(
+        rolled_back_marker,
+        state="ABORTED",
+        workspace_cleaned=True,
+        recovered=True,
+    )
+
+
+def _abort_failed_prepare_in_same_call(
+    paths: ReceivableTransactionPaths,
+    current_before_bytes: bytes,
+    history_before_bytes: bytes,
+) -> None:
+    marker = read_transaction_marker(paths.marker_path)
+    _validate_transaction_recovery_paths(paths, marker)
+    if marker["state"] != "PREPARING" or marker["decision"] is not None:
+        _raise_transaction_recovery_required(
+            paths,
+            marker,
+            "failed prepare is no longer an undecided PREPARING transaction",
+        )
+    try:
+        _read_and_verify_transaction_before_targets(
+            paths.receivables_directory,
+            current_before_bytes,
+            history_before_bytes,
+        )
+    except ReceivableLedgerError as exc:
+        _raise_transaction_recovery_required(paths, marker, str(exc))
+    transition_transaction_marker(
+        paths.marker_path,
+        "PREPARING",
+        decision="ROLLBACK",
+    )
+    cleanup_transaction_workspace(paths.workspace_directory)
+
+
+def _recover_transaction_workspace_locked(
+    paths: ReceivableTransactionPaths,
+) -> ReceivableLedgerTransactionResult:
+    try:
+        marker = read_transaction_marker(paths.marker_path)
+    except ReceivableLedgerRecoveryError as exc:
+        _raise_transaction_recovery_required(paths, None, str(exc))
+
+    try:
+        _validate_transaction_recovery_paths(paths, marker)
+    except ReceivableLedgerRecoveryRequired as exc:
+        _raise_transaction_recovery_required(paths, marker, str(exc))
+
+    if marker["state"] == "RECOVERY_REQUIRED":
+        _raise_transaction_recovery_required(
+            paths,
+            marker,
+            str(marker.get("last_error") or "manual recovery is required"),
+        )
+
+    if marker["state"] == "COMMITTED":
+        cleaned = _cleanup_committed_workspace_best_effort(paths)
+        return _transaction_result(
+            marker,
+            state="COMMITTED",
+            workspace_cleaned=cleaned,
+            recovered=True,
+        )
+
+    if marker["state"] == "PREPARING":
+        if marker["decision"] not in (None, "ROLLBACK"):
+            _raise_transaction_recovery_required(
+                paths, marker, "PREPARING has an invalid durable decision"
+            )
+        return _abort_preparing_transaction_locked(paths, marker)
+
+    _verify_transaction_artifacts_for_recovery(paths, marker)
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    classification = classify_recovery_state(
+        ledger_paths.current_path,
+        ledger_paths.history_path,
+        marker,
+    )
+    if classification == RECOVERY_UNKNOWN:
+        _raise_transaction_recovery_required(
+            paths, marker, "target classification is UNKNOWN"
+        )
+
+    actions = plan_recovery_actions(marker, classification)
+    if "ROLL_FORWARD_CURRENT" in actions:
+        roll_forward_from_artifact(
+            paths.current_after_artifact,
+            marker["current_after_hash"],
+            ledger_paths.current_path,
+        )
+        marker = transition_transaction_marker(
+            paths.marker_path, "CURRENT_REPLACED"
+        )
+    if "ROLL_FORWARD_HISTORY" in actions:
+        roll_forward_from_artifact(
+            paths.history_after_artifact,
+            marker["history_after_hash"],
+            ledger_paths.history_path,
+        )
+        marker = transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED"
+        )
+
+    _verify_final_after_hashes(paths, marker)
+    marker = transition_transaction_marker(paths.marker_path, "COMMITTED")
+    cleaned = _cleanup_committed_workspace_best_effort(paths)
+    return _transaction_result(
+        marker,
+        state="COMMITTED",
+        workspace_cleaned=cleaned,
+        recovered=True,
+    )
+
+
+def _transaction_workspace_records(
+    receivables_directory: str | os.PathLike[str],
+) -> list[tuple[ReceivableTransactionPaths, dict[str, Any]]]:
+    directory = Path(receivables_directory) / TRANSACTIONS_DIRECTORY_NAME
+    if not directory.exists():
+        return []
+    try:
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        raise ReceivableLedgerRecoveryError(
+            f"Could not inspect transaction directory: {directory}"
+        ) from exc
+
+    records = []
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir():
+            raise ReceivableLedgerRecoveryRequired(
+                f"Unexpected entry in transaction directory: {entry}"
+            )
+        try:
+            paths = resolve_receivable_transaction_paths(
+                receivables_directory, entry.name
+            )
+        except ValueError as exc:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Unsafe transaction workspace name: {entry}"
+            ) from exc
+        marker = None
+        try:
+            marker = read_transaction_marker(paths.marker_path)
+            _validate_transaction_recovery_paths(paths, marker)
+        except ReceivableLedgerError as exc:
+            _raise_transaction_recovery_required(paths, marker, str(exc))
+        records.append((paths, marker))
+    records.sort(key=lambda item: (str(item[1]["created_at"]), item[0].workspace_directory.name))
+    return records
+
+
+def _recover_receivable_ledger_transactions_locked(
+    receivables_directory: str | os.PathLike[str],
+) -> tuple[ReceivableLedgerTransactionResult, ...]:
+    records = _transaction_workspace_records(receivables_directory)
+    nonterminal = [
+        record for record in records if record[1]["state"] != "COMMITTED"
+    ]
+    if len(nonterminal) > 1:
+        transaction_ids = ", ".join(
+            record[0].workspace_directory.name for record in nonterminal
+        )
+        raise ReceivableLedgerRecoveryRequired(
+            "Multiple nonterminal receivable transactions require manual "
+            f"inspection: {transaction_ids}"
+        )
+
+    results = []
+    for paths, _ in records:
+        results.append(_recover_transaction_workspace_locked(paths))
+    return tuple(results)
+
+
+def recover_receivable_ledger_transactions(
+    receivables_directory: str | os.PathLike[str] = (
+        DEFAULT_RECEIVABLES_DIRECTORY
+    ),
+    *,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> tuple[ReceivableLedgerTransactionResult, ...]:
+    """Recover pending 2-file transactions while holding the ledger lock."""
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        return _recover_receivable_ledger_transactions_locked(
+            receivables_directory
+        )
+
+
+def _read_and_verify_transaction_before_targets(
+    receivables_directory: str | os.PathLike[str],
+    current_before_bytes: bytes,
+    history_before_bytes: bytes,
+) -> None:
+    ledger_paths = resolve_receivable_ledger_paths(receivables_directory)
+    try:
+        actual_current = ledger_paths.current_path.read_bytes()
+        actual_history = ledger_paths.history_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise ReceivableLedgerConflictError(
+            f"A required ledger target is missing: {exc.filename}"
+        ) from exc
+    except OSError as exc:
+        raise ReceivableLedgerError(
+            "Could not read ledger targets before transaction"
+        ) from exc
+
+    if actual_current != current_before_bytes:
+        raise ReceivableLedgerConflictError(
+            "current.csv no longer matches supplied before bytes"
+        )
+    if actual_history != history_before_bytes:
+        raise ReceivableLedgerConflictError(
+            "receivable_history.csv no longer matches supplied before bytes"
+        )
+
+
+def _reject_existing_transaction_id(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+) -> None:
+    paths = resolve_receivable_transaction_paths(
+        receivables_directory, transaction_id
+    )
+    if not paths.workspace_directory.exists():
+        return
+    try:
+        marker = read_transaction_marker(paths.marker_path)
+    except ReceivableLedgerRecoveryError as exc:
+        raise ReceivableLedgerDuplicateTransactionError(
+            f"transaction_id already has an unreadable workspace: {transaction_id}"
+        ) from exc
+    if marker["state"] == "RECOVERY_REQUIRED":
+        raise ReceivableLedgerRecoveryRequired(
+            _recovery_required_message(
+                paths,
+                str(marker.get("last_error") or "existing recovery required"),
+            )
+        )
+    raise ReceivableLedgerDuplicateTransactionError(
+        f"transaction_id already exists with state={marker['state']}: "
+        f"{transaction_id}"
+    )
+
+
+def _commit_transaction_targets_locked(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> ReceivableLedgerTransactionResult:
+    ledger_paths = resolve_receivable_ledger_paths(
+        paths.receivables_directory
+    )
+    roll_forward_from_artifact(
+        paths.current_after_artifact,
+        marker["current_after_hash"],
+        ledger_paths.current_path,
+    )
+    marker = transition_transaction_marker(
+        paths.marker_path, "CURRENT_REPLACED"
+    )
+
+    roll_forward_from_artifact(
+        paths.history_after_artifact,
+        marker["history_after_hash"],
+        ledger_paths.history_path,
+    )
+    marker = transition_transaction_marker(
+        paths.marker_path, "HISTORY_REPLACED"
+    )
+
+    _verify_final_after_hashes(paths, marker)
+    marker = transition_transaction_marker(paths.marker_path, "COMMITTED")
+    cleaned = _cleanup_committed_workspace_best_effort(paths)
+    return _transaction_result(
+        marker,
+        state="COMMITTED",
+        workspace_cleaned=cleaned,
+        recovered=False,
+    )
+
+
+def commit_receivable_ledger_transaction(
+    receivables_directory: str | os.PathLike[str],
+    transaction_id: str,
+    *,
+    current_before_bytes: bytes,
+    current_after_bytes: bytes,
+    history_before_bytes: bytes,
+    history_after_bytes: bytes,
+    settlement_id: str | None = None,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> ReceivableLedgerTransactionResult:
+    """Commit exact current/history bytes as one recoverable transaction."""
+
+    byte_values = (
+        current_before_bytes,
+        current_after_bytes,
+        history_before_bytes,
+        history_after_bytes,
+    )
+    if not all(isinstance(value, bytes) for value in byte_values):
+        raise TypeError("all before/after ledger values must be bytes")
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        _reject_existing_transaction_id(receivables_directory, transaction_id)
+        _recover_receivable_ledger_transactions_locked(receivables_directory)
+        _read_and_verify_transaction_before_targets(
+            receivables_directory,
+            current_before_bytes,
+            history_before_bytes,
+        )
+
+        paths = resolve_receivable_transaction_paths(
+            receivables_directory, transaction_id
+        )
+        try:
+            paths, marker = prepare_transaction_artifacts(
+                receivables_directory,
+                transaction_id,
+                current_before_bytes=current_before_bytes,
+                current_after_bytes=current_after_bytes,
+                history_before_bytes=history_before_bytes,
+                history_after_bytes=history_after_bytes,
+                settlement_id=settlement_id,
+            )
+        except ReceivableLedgerError:
+            if paths.workspace_directory.exists():
+                try:
+                    _abort_failed_prepare_in_same_call(
+                        paths,
+                        current_before_bytes,
+                        history_before_bytes,
+                    )
+                except ReceivableLedgerRecoveryRequired:
+                    raise
+                except ReceivableLedgerError:
+                    pass
+            raise
+
+        try:
+            return _commit_transaction_targets_locked(paths, marker)
+        except ReceivableLedgerError as original_error:
+            try:
+                return _recover_transaction_workspace_locked(paths)
+            except ReceivableLedgerRecoveryRequired:
+                raise
+            except ReceivableLedgerError:
+                raise original_error
