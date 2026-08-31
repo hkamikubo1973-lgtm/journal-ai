@@ -19,6 +19,27 @@ import type {
   RegistrationCartItem,
   SubAccountRelation,
 } from "./types/journal";
+import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
+
+type Workspace = "journal" | "receivable";
+
+function WorkspaceTabs({ active, onChange }: {
+  active: Workspace;
+  onChange: (workspace: Workspace) => void;
+}) {
+  return (
+    <nav className="workspace-tabs" aria-label="業務画面" role="tablist">
+      <button type="button" role="tab" aria-selected={active === "journal"}
+        className={active === "journal" ? "active" : ""} onClick={() => onChange("journal")}>
+        通常仕訳
+      </button>
+      <button type="button" role="tab" aria-selected={active === "receivable"}
+        className={active === "receivable" ? "active" : ""} onClick={() => onChange("receivable")}>
+        未収消込
+      </button>
+    </nav>
+  );
+}
 
 const blockRowFields = [
   { key: "date", label: "日付", amount: false },
@@ -711,6 +732,7 @@ function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
 }
 
 export default function App() {
+  const [activeWorkspace, setActiveWorkspace] = useState<Workspace>("journal");
   const [keyword, setKeyword] = useState("りそな銀行");
   const [department, setDepartment] = useState("");
   const [amount, setAmount] = useState("");
@@ -1101,10 +1123,30 @@ export default function App() {
   };
   const hasMasterErrors = masterCheckCounts.error > 0;
 
+  if (activeWorkspace === "receivable") {
+    return (
+      <main className="app-shell receivable-shell">
+        <header className="page-header">
+          <div className="page-title"><h1>journal-ai</h1><span>未収消込</span></div>
+          <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
+          <div className="page-header-meta">
+            {masters?.system && <span className="fiscal-year-status">
+              会計年度：{masters.system.current_fiscal_year}年度
+              （{masters.system.fiscal_year_start_month}月～{masters.system.fiscal_year_end_month}月）
+            </span>}
+            <span className="workspace-status">Preview・未確定</span>
+          </div>
+        </header>
+        <ReceivableWorkspace masters={masters} mastersLoading={mastersLoading} mastersError={mastersError} />
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell" onKeyDown={handleAppTabKeyDown}>
       <header className="page-header">
         <div className="page-title"><h1>journal-ai</h1><span>通常仕訳</span></div>
+        <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
         <div className="page-header-meta">
           {masters?.system && <span className="fiscal-year-status">
             会計年度：{masters.system.current_fiscal_year}年度
