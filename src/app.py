@@ -46,6 +46,11 @@ from receivable_preview_service import (
     build_receivable_preview_from_fifo,
     parse_receivable_payment_amount,
 )
+import receivable_options_service
+from receivable_options_service import (
+    RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED,
+    RECEIVABLE_OVERPAID_RECOMMEND_EXCLUDED,
+)
 from events_engine import (
     add_event,
     complete_event,
@@ -807,38 +812,10 @@ def build_voucher_block_display(rows):
     return display_rows
 
 
-RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED = {
-    "資金複合",
-    "諸口",
-    "普通預金",
-    "当座預金",
-    "現金",
-    "未収運賃",
-    "未収金",
-    "売掛金",
-}
-
-RECEIVABLE_OVERPAID_RECOMMEND_EXCLUDED = {
-    "未払金",
-    "買掛金",
-    "未払費用",
-    "預り金",
-}
-
-
 def is_receivable_difference_recommend_excluded(account):
-
-    account = str(account or "").strip()
-
-    if (
-        account in RECEIVABLE_DIFFERENCE_RECOMMEND_EXCLUDED
-        or is_excluded_account(account)
-    ):
-        return True
-
     return (
-        "未収" in account
-        or "売掛" in account
+        receivable_options_service
+        .is_receivable_difference_recommend_excluded(account)
     )
 
 
@@ -847,41 +824,11 @@ def is_receivable_difference_recommendable(
     side,
     account_categories
 ):
-
-    if is_receivable_difference_recommend_excluded(account):
-        return False
-
-    if (
-        side == "credit"
-        and account in RECEIVABLE_OVERPAID_RECOMMEND_EXCLUDED
-    ):
-        return False
-
-    category = account_categories.get(account, "")
-
-    if category:
-        if side == "debit":
-            return category == "費用"
-
-        return category in {"負債", "収益"}
-
-    code = str(ACCOUNT_MASTER.get(account, "")).strip()
-
-    try:
-        code_number = int(code)
-    except Exception:
-        code_number = 0
-
-    if side == "debit":
-        return (
-            400 <= code_number < 600
-            or account in {"支払手数料", "雑費"}
-        )
-
-    return (
-        200 <= code_number < 300
-        or account in {"仮受金", "雑収入"}
-        or account.endswith("収入")
+    return receivable_options_service.is_receivable_difference_recommendable(
+        account,
+        side,
+        account_categories,
+        ACCOUNT_MASTER,
     )
 
 
@@ -893,114 +840,27 @@ def build_receivable_difference_account_options(
     default_account,
     top_n=5
 ):
-
-    allowed_accounts = [
-        account
-        for account in account_master
-        if not is_excluded_account(account)
-    ]
-
-    if not allowed_accounts:
-        return [], set(), ""
-
-    if default_account not in allowed_accounts:
-        default_account = allowed_accounts[0]
-
-    context_text = " ".join(
-        [str(customer_name or "")]
-        + [
-            str(candidate.get(column, "") or "")
-            for candidate in candidates
-            for column in [
-                "未収科目",
-                "未収補助",
-                "部門",
-                "摘要",
-            ]
-        ]
-    )
-    context_tokens = set(tokenize(context_text))
-
-    target_column = COL_DEBIT if side == "debit" else COL_CREDIT
     account_categories = {
         row["name"]: row.get("category", "")
         for row in load_account_master_rows()
     }
-
-    scores = {}
-    counts = {}
-    first_seen = {}
-
-    for rec in records:
-        for row in rec.get("rows", []):
-            account = str(row.get(target_column, "") or "").strip()
-
-            if (
-                not account
-                or account not in allowed_accounts
-                or is_excluded_account(account)
-                or not is_receivable_difference_recommendable(
-                    account,
-                    side,
-                    account_categories
-                )
-            ):
-                continue
-
-            row_text = " ".join([
-                str(row.get(COL_SUMMARY, "") or ""),
-                str(row.get("伝票摘要", "") or ""),
-                str(row.get(COL_DEBIT_SUB, "") or ""),
-                str(row.get(COL_CREDIT_SUB, "") or ""),
-                str(row.get(COL_DEBIT, "") or ""),
-                str(row.get(COL_CREDIT, "") or ""),
-            ])
-            row_tokens = set(tokenize(row_text))
-            score = len(context_tokens & row_tokens)
-
-            if score <= 0:
-                continue
-
-            if account not in first_seen:
-                first_seen[account] = len(first_seen)
-
-            scores[account] = scores.get(account, 0) + score
-            counts[account] = counts.get(account, 0) + 1
-
-    recommended_accounts = sorted(
-        scores,
-        key=lambda account: (
-            -scores[account],
-            -counts[account],
-            first_seen[account]
-        )
-    )[:top_n]
-
-    if (
-        is_receivable_difference_recommendable(
-            default_account,
-            side,
-            account_categories
-        )
-        and default_account not in recommended_accounts
-    ):
-        recommended_accounts.insert(0, default_account)
-        recommended_accounts = recommended_accounts[:top_n]
-
-    options = recommended_accounts + [
-        account
-        for account in [default_account]
-        if account not in recommended_accounts
-    ] + [
-        account
-        for account in allowed_accounts
-        if (
-            account not in recommended_accounts
-            and account != default_account
-        )
+    master_snapshot = [
+        {
+            "code": ACCOUNT_MASTER[account],
+            "name": account,
+            "category": account_categories.get(account, ""),
+        }
+        for account in account_master
     ]
-
-    return options, set(recommended_accounts), default_account
+    return receivable_options_service.build_receivable_difference_account_options(
+        master_snapshot,
+        records,
+        customer_name,
+        candidates,
+        side,
+        default_account,
+        top_n,
+    )
 
 
 def format_receivable_date(value):
