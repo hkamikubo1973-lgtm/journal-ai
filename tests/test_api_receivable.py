@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -135,6 +136,33 @@ class ReceivableApiTest(unittest.TestCase):
         return self.client.post(
             "/api/receivables/preview-settlement",
             json=self.preview_payload(**overrides),
+        )
+
+    def execute_payload(self, **overrides):
+        payload = {
+            "idempotency_key": "execute-operation-001",
+            "preview_revision": self.revision,
+            "customer_name": "A商事",
+            "settlement_date": "2026-08-30",
+            "payment_amount": 1000,
+            "receipt_account": "普通預金",
+            "mode": None,
+            "difference_account": None,
+            "difference_summary": None,
+        }
+        payload.update(overrides)
+        return payload
+
+    def post_execute(self, **overrides):
+        return self.client.post(
+            "/api/receivables/execute-settlement",
+            json=self.execute_payload(**overrides),
+        )
+
+    def ledger_bytes(self):
+        return (
+            self.paths.current_path.read_bytes(),
+            self.paths.history_path.read_bytes(),
         )
 
     def create_pending_transaction(self, transaction_id="api-pending"):
@@ -713,6 +741,379 @@ class ReceivableApiTest(unittest.TestCase):
         response = self.post_preview()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(self.paths.history_path.exists())
+
+    def test_execute_exact_persists_ledgers_receipt_and_formal_response(self):
+        response = self.post_execute()
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["replayed"])
+        self.assertEqual(body["message"], "未収消込が完了しました")
+        self.assertEqual(body["settlement_id"], body["transaction_id"])
+        self.assertEqual(
+            body["ledger_revision"],
+            hashlib.sha256(self.paths.current_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            body["history_revision"],
+            hashlib.sha256(self.paths.history_path.read_bytes()).hexdigest(),
+        )
+        current = persistence.load_current_receivables_read_only(
+            self.paths.current_path
+        ).dataframe
+        history = persistence.load_receivable_history_read_only(
+            self.paths.history_path
+        ).dataframe
+        self.assertEqual(current.iloc[0]["残高"], "0")
+        self.assertEqual(current.iloc[0]["ステータス"], "完了")
+        self.assertEqual(history.iloc[0]["消込額"], "1000")
+        receipts = [
+            path for path in (self.directory / ".settlements").rglob("*")
+            if path.is_file()
+        ]
+        self.assertEqual(len(receipts), 1)
+        transactions = self.directory / ".transactions"
+        self.assertTrue(transactions.exists())
+        self.assertEqual(list(transactions.iterdir()), [])
+
+    def test_execute_partial_returns_200_and_leaves_balance(self):
+        response = self.post_execute(payment_amount=400, mode="partial")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["settlement"]["difference"], 0)
+        current = persistence.load_current_receivables_read_only(
+            self.paths.current_path
+        ).dataframe
+        self.assertEqual(current.iloc[0]["残高"], "600")
+
+    def test_execute_shortage_difference_returns_200(self):
+        response = self.post_execute(
+            payment_amount=900,
+            mode="difference_account",
+            difference_account="支払手数料",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["settlement"]
+        self.assertEqual(body["difference"], -100)
+        self.assertEqual(body["rows"][-1]["debit_account"], "支払手数料")
+
+    def test_execute_overpayment_difference_returns_200(self):
+        response = self.post_execute(
+            payment_amount=1200,
+            mode="difference_account",
+            difference_account="仮受金",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["settlement"]
+        self.assertEqual(body["difference"], 200)
+        self.assertEqual(body["rows"][-1]["credit_account"], "仮受金")
+
+    def test_execute_shortage_none_preserves_partial_service_semantics(self):
+        response = self.post_execute(payment_amount=900)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["settlement"]
+        self.assertEqual(body["target_total"], 900)
+        self.assertEqual(body["difference"], 0)
+
+    def test_execute_incomplete_overpayment_is_422_without_autoselection(self):
+        before = self.ledger_bytes()
+        response = self.post_execute(payment_amount=1200)
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {
+            "detail": "選択した科目を現在のマスターで確認できません。"
+        })
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertFalse((self.directory / ".transactions").exists())
+        self.assertFalse((self.directory / ".settlements").exists())
+
+    def test_execute_same_key_same_body_replays_with_old_revision(self):
+        payload = self.execute_payload()
+        first = self.client.post(
+            "/api/receivables/execute-settlement", json=payload
+        )
+        after_first = self.ledger_bytes()
+        receipts_before = sorted(
+            str(path.relative_to(self.directory))
+            for path in (self.directory / ".settlements").rglob("*")
+            if path.is_file()
+        )
+
+        replay = self.client.post(
+            "/api/receivables/execute-settlement", json=payload
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertFalse(first.json()["replayed"])
+        self.assertTrue(replay.json()["replayed"])
+        for field in ("settlement_id", "transaction_id", "settlement"):
+            self.assertEqual(replay.json()[field], first.json()[field])
+        self.assertEqual(self.ledger_bytes(), after_first)
+        self.assertEqual(
+            sorted(
+                str(path.relative_to(self.directory))
+                for path in (self.directory / ".settlements").rglob("*")
+                if path.is_file()
+            ),
+            receipts_before,
+        )
+        self.assertEqual(list((self.directory / ".transactions").iterdir()), [])
+
+    def test_execute_same_key_different_request_is_409_and_non_mutating(self):
+        first = self.post_execute()
+        self.assertEqual(first.status_code, 200)
+        before = self.ledger_bytes()
+
+        conflict = self.post_execute(payment_amount=999, mode="partial")
+
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json(), {
+            "detail": "同じ操作IDが別の内容で使用されています。"
+        })
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_execute_revision_conflict_is_409_and_non_mutating(self):
+        before = self.ledger_bytes()
+        response = self.post_execute(
+            idempotency_key="new-stale-operation",
+            preview_revision="0" * 64,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {
+            "detail": "未収データが更新されています。内容を再確認してください。"
+        })
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertFalse((self.directory / ".transactions").exists())
+        self.assertFalse((self.directory / ".settlements").exists())
+
+    def test_execute_domain_conflict_is_409_and_non_mutating(self):
+        self.write_current([
+            current_row(code="C1", receivable_id="DUP", balance="400"),
+            current_row(code="C2", receivable_id="DUP", balance="600"),
+        ])
+        self.revision = persistence.calculate_current_revision(
+            self.paths.current_path.read_bytes()
+        )
+        before = self.ledger_bytes()
+
+        response = self.post_execute()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {
+            "detail": "消込対象が変更されています。内容を再確認してください。"
+        })
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_execute_master_validation_is_422_and_non_mutating(self):
+        before = self.ledger_bytes()
+        response = self.post_execute(receipt_account="存在しない科目")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {
+            "detail": "選択した科目を現在のマスターで確認できません。"
+        })
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_execute_domain_validation_is_422_and_non_mutating(self):
+        before = self.ledger_bytes()
+        response = self.post_execute(
+            customer_name="不存在",
+            mode="difference_account",
+            difference_account="仮受金",
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"detail": "入力内容を確認してください。"})
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_execute_maps_lock_recovery_write_and_unexpected_errors(self):
+        cases = [
+            (
+                persistence.ReceivableLedgerLockTimeout("C:/secret/lock"),
+                423,
+                "未収台帳をほかの処理が使用中です。",
+            ),
+            (
+                persistence.ReceivableLedgerRecoveryRequired("secret marker"),
+                503,
+                "未収台帳の復旧確認が必要です。",
+            ),
+            (
+                persistence.ReceivableLedgerWriteError("C:/secret/write"),
+                503,
+                "未収台帳を安全に更新できませんでした。",
+            ),
+            (
+                RuntimeError("C:/secret/internal"),
+                500,
+                "未収消込処理中にエラーが発生しました。",
+            ),
+        ]
+        for error, status, detail in cases:
+            with self.subTest(error=type(error).__name__), patch.object(
+                receivable_api,
+                "execute_receivable_settlement",
+                side_effect=error,
+            ):
+                response = self.post_execute()
+            self.assertEqual(response.status_code, status)
+            self.assertEqual(response.json(), {"detail": detail})
+            self.assertNotIn("secret", response.text)
+
+    def test_execute_current_missing_malformed_and_schema_are_503(self):
+        mutations = (
+            lambda: self.paths.current_path.unlink(),
+            lambda: self.paths.current_path.write_bytes(b"\xff\xfeinvalid"),
+            lambda: self.write_current([{"コード": "C001"}], columns=["コード"]),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                if index:
+                    self.write_current([current_row()])
+                    self.revision = persistence.calculate_current_revision(
+                        self.paths.current_path.read_bytes()
+                    )
+                mutate()
+                if self.paths.current_path.exists():
+                    self.revision = persistence.calculate_current_revision(
+                        self.paths.current_path.read_bytes()
+                    )
+                response = self.post_execute(
+                    idempotency_key=f"invalid-ledger-{index}"
+                )
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json(), {
+                    "detail": "未収台帳を安全に読み込めません。"
+                })
+
+    def test_execute_request_validation_contract(self):
+        invalid_payloads = [
+            {key: value for key, value in self.execute_payload().items() if key != "idempotency_key"},
+            self.execute_payload(idempotency_key="   "),
+            self.execute_payload(preview_revision="A" * 64),
+            self.execute_payload(customer_name="   "),
+            self.execute_payload(settlement_date="not-a-date"),
+            self.execute_payload(payment_amount=0),
+            self.execute_payload(payment_amount=-1),
+            self.execute_payload(payment_amount=1.5),
+            self.execute_payload(payment_amount=True),
+            self.execute_payload(receipt_account="   "),
+            self.execute_payload(mode="差額を科目で処理する"),
+            {**self.execute_payload(), "unexpected": True},
+        ]
+        for index, payload in enumerate(invalid_payloads):
+            with self.subTest(index=index):
+                response = self.client.post(
+                    "/api/receivables/execute-settlement",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422)
+
+    def test_execute_preserves_key_and_converts_date_and_wire_mode_only(self):
+        settlement = {
+            "settlement_id": "settlement-1",
+            "settlement_date": "2026-09-01",
+            "customer_name": "A商事",
+            "payment_amount": 900,
+            "target_total": 1000,
+            "difference": -100,
+            "source_candidates": [{
+                "コード": "C001", "未収ID": "R001", "請求日": "2026-08-01",
+                "請求額": 1000, "残高": 1000, "消込予定": 1000,
+                "未収科目": "未収運賃", "未収補助": "", "部門": "営業部",
+                "取引先": "A商事", "摘要": "8月分",
+            }],
+            "rows": [{
+                "借方科目": "普通預金", "貸方科目": "未収運賃",
+                "貸方補助": "", "部門": "営業部", "金額": 900,
+                "摘要": "A商事入金",
+            }],
+            "created_at": "2026-09-01T00:00:00+00:00",
+        }
+        result = SimpleNamespace(
+            replayed=False,
+            settlement_id="settlement-1",
+            transaction_id="transaction-1",
+            current_after_hash="a" * 64,
+            history_after_hash="b" * 64,
+            settlement=settlement,
+        )
+        with patch.object(
+            receivable_api,
+            "execute_receivable_settlement",
+            return_value=result,
+        ) as service:
+            response = self.post_execute(
+                idempotency_key="  raw-operation-key  ",
+                settlement_date="2026-09-01",
+                payment_amount=900,
+                mode="difference_account",
+                difference_account="支払手数料",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        arguments = service.call_args.kwargs
+        self.assertEqual(arguments["idempotency_key"], "  raw-operation-key  ")
+        self.assertEqual(arguments["settlement_date"], "2026-09-01")
+        self.assertEqual(arguments["mode"], receivable_api.DIFFERENCE_ACCOUNT_MODE)
+
+    def test_execute_response_dto_is_snake_case_json_safe_and_private_free(self):
+        response = self.post_execute()
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(set(body["settlement"]["source_candidates"][0]), {
+            "code", "receivable_id", "billing_date", "billed_amount",
+            "balance", "scheduled_amount", "receivable_account",
+            "receivable_sub_account", "department", "customer_name", "summary",
+        })
+        self.assertEqual(set(body["settlement"]["rows"][0]), {
+            "debit_account", "credit_account", "credit_sub_account",
+            "department", "amount", "summary",
+        })
+        self.assertIs(type(body["settlement"]["payment_amount"]), int)
+        self.assertIs(type(body["settlement"]["rows"][0]["amount"]), int)
+        self.assertIsInstance(body["settlement"]["settlement_date"], str)
+        self.assertIsInstance(body["settlement"]["created_at"], str)
+        serialized = json.dumps(body, ensure_ascii=False, allow_nan=False)
+        for private in (
+            "receipt_path", "workspace", "marker", "request_hash",
+            "idempotency_key_hash",
+        ):
+            self.assertNotIn(private, serialized)
+        for field in CURRENT_RECEIVABLE_COLUMNS:
+            self.assertNotIn(f'"{field}":', serialized)
+
+    def test_execute_route_contract_is_in_openapi(self):
+        schema = self.client.get("/openapi.json").json()
+        self.assertIn("/api/receivables/execute-settlement", schema["paths"])
+        schemas = schema["components"]["schemas"]
+        request = schemas["ReceivableSettlementExecuteRequest"]
+        self.assertFalse(request["additionalProperties"])
+        self.assertEqual(set(request["required"]), {
+            "idempotency_key", "preview_revision", "customer_name",
+            "settlement_date", "payment_amount", "receipt_account",
+        })
+        serialized = json.dumps(schemas, ensure_ascii=False)
+        for value in ("partial", "difference_account"):
+            self.assertIn(f'"{value}"', serialized)
+        self.assertIn("ReceivableSettlementExecuteResponse", schemas)
+
+    def test_execute_receipt_failure_then_retry_recovers_as_http_replay(self):
+        with patch.object(
+            persistence,
+            "save_settlement_receipt",
+            side_effect=persistence.ReceivableLedgerWriteError("receipt write"),
+        ):
+            failed = self.post_execute()
+
+        retry = self.post_execute()
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.json()["replayed"])
+        current = persistence.load_current_receivables_read_only(
+            self.paths.current_path
+        ).dataframe
+        self.assertEqual(current.iloc[0]["残高"], "0")
 
 
 if __name__ == "__main__":

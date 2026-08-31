@@ -20,6 +20,7 @@ from receivable_options_service import (
 )
 from receivable_persistence_service import (
     DEFAULT_RECEIVABLES_DIRECTORY,
+    ReceivableIdempotencyConflictError,
     ReceivableLedgerConflictError,
     ReceivableLedgerLockTimeout,
     ReceivableLedgerMalformedError,
@@ -27,6 +28,7 @@ from receivable_persistence_service import (
     ReceivableLedgerRecoveryRequired,
     ReceivableLedgerSchemaError,
     ReceivableLedgerSettlementUnavailableError,
+    ReceivableLedgerWriteError,
     read_receivable_current_snapshot_when_ready,
 )
 from receivable_preview_application_service import (
@@ -38,6 +40,17 @@ from receivable_query_service import (
     ReceivableCustomerNotFoundError,
     build_receivable_customer_detail,
     build_receivable_summary,
+)
+from receivable_preview_service import (
+    DIFFERENCE_ACCOUNT_MODE,
+    PARTIAL_SETTLEMENT_MODE,
+)
+from receivable_settlement_execute_service import (
+    execute_receivable_settlement,
+)
+from receivable_settlement_service import (
+    ReceivableSettlementConflictError,
+    ReceivableSettlementValidationError,
 )
 
 
@@ -180,6 +193,49 @@ class ReceivablePreviewResponse(BaseModel):
     source_candidates: list[ReceivablePreviewCandidate]
     rows: list[ReceivablePreviewJournalRow]
     recommended_difference_accounts: list[ReceivableRecommendedAccount]
+
+
+class ReceivableSettlementExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str
+    preview_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    customer_name: str
+    settlement_date: date
+    payment_amount: int = Field(gt=0, strict=True)
+    receipt_account: str
+    mode: ReceivablePreviewMode | None = None
+    difference_account: str | None = None
+    difference_summary: str | None = None
+
+    @field_validator("idempotency_key", "customer_name", "receipt_account")
+    @classmethod
+    def reject_blank_execute_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class ReceivableExecutedSettlement(BaseModel):
+    settlement_id: str
+    settlement_date: str
+    customer_name: str
+    payment_amount: int
+    target_total: int
+    difference: int
+    source_candidates: list[ReceivablePreviewCandidate]
+    rows: list[ReceivablePreviewJournalRow]
+    created_at: str
+
+
+class ReceivableSettlementExecuteResponse(BaseModel):
+    replayed: bool
+    settlement_id: str
+    transaction_id: str
+    ledger_revision: str
+    history_revision: str
+    settlement: ReceivableExecutedSettlement
+    message: str
 
 
 def get_receivables_directory() -> Path:
@@ -393,4 +449,150 @@ def post_receivable_preview_settlement(
         raise HTTPException(
             status_code=500,
             detail="未収Preview処理中にエラーが発生しました。",
+        ) from error
+
+
+def _execute_internal_mode(mode: ReceivablePreviewMode | None) -> str | None:
+    if mode == "partial":
+        return PARTIAL_SETTLEMENT_MODE
+    if mode == "difference_account":
+        return DIFFERENCE_ACCOUNT_MODE
+    return None
+
+
+def _settlement_candidate_response(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": candidate["コード"],
+        "receivable_id": candidate["未収ID"],
+        "billing_date": candidate["請求日"],
+        "billed_amount": candidate["請求額"],
+        "balance": candidate["残高"],
+        "scheduled_amount": candidate["消込予定"],
+        "receivable_account": candidate["未収科目"],
+        "receivable_sub_account": candidate["未収補助"],
+        "department": candidate["部門"],
+        "customer_name": candidate["取引先"],
+        "summary": candidate["摘要"],
+    }
+
+
+def _settlement_journal_row_response(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "debit_account": row["借方科目"],
+        "credit_account": row["貸方科目"],
+        "credit_sub_account": row["貸方補助"],
+        "department": row["部門"],
+        "amount": row["金額"],
+        "summary": row["摘要"],
+    }
+
+
+def _settlement_response(settlement: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "settlement_id": settlement["settlement_id"],
+        "settlement_date": settlement["settlement_date"],
+        "customer_name": settlement["customer_name"],
+        "payment_amount": settlement["payment_amount"],
+        "target_total": settlement["target_total"],
+        "difference": settlement["difference"],
+        "source_candidates": [
+            _settlement_candidate_response(candidate)
+            for candidate in settlement["source_candidates"]
+        ],
+        "rows": [
+            _settlement_journal_row_response(row)
+            for row in settlement["rows"]
+        ],
+        "created_at": settlement["created_at"],
+    }
+
+
+@router.post(
+    "/execute-settlement",
+    response_model=ReceivableSettlementExecuteResponse,
+)
+def post_receivable_execute_settlement(
+    request: ReceivableSettlementExecuteRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+    account_master_snapshot: dict[str, Any] = Depends(
+        get_receivable_account_master_snapshot
+    ),
+):
+    try:
+        result = execute_receivable_settlement(
+            receivables_directory,
+            idempotency_key=request.idempotency_key,
+            preview_revision=request.preview_revision,
+            customer_name=request.customer_name,
+            settlement_date=request.settlement_date.isoformat(),
+            payment_amount=request.payment_amount,
+            receipt_account=request.receipt_account,
+            mode=_execute_internal_mode(request.mode),
+            difference_account=request.difference_account,
+            difference_summary=request.difference_summary,
+            account_master_snapshot=account_master_snapshot,
+        )
+        return {
+            "replayed": result.replayed,
+            "settlement_id": result.settlement_id,
+            "transaction_id": result.transaction_id,
+            "ledger_revision": result.current_after_hash,
+            "history_revision": result.history_after_hash,
+            "settlement": _settlement_response(result.settlement),
+            "message": "未収消込が完了しました",
+        }
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableIdempotencyConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="同じ操作IDが別の内容で使用されています。",
+        ) from error
+    except ReceivableLedgerConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="未収データが更新されています。内容を再確認してください。",
+        ) from error
+    except ReceivableSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="消込対象が変更されています。内容を再確認してください。",
+        ) from error
+    except ReceivableSettlementMasterValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="選択した科目を現在のマスターで確認できません。",
+        ) from error
+    except ReceivableSettlementValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="入力内容を確認してください。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except (
+        ReceivableLedgerMissingError,
+        ReceivableLedgerMalformedError,
+        ReceivableLedgerSchemaError,
+    ) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳を安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerWriteError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳を安全に更新できませんでした。",
+        ) from error
+    except Exception as error:
+        logger.exception("Unexpected error during receivable settlement")
+        raise HTTPException(
+            status_code=500,
+            detail="未収消込処理中にエラーが発生しました。",
         ) from error
