@@ -7,8 +7,6 @@ import csv
 from pathlib import Path
 from typing import Any, Callable
 
-import pandas as pd
-
 from columns import (
     COL_CREDIT,
     COL_CREDIT_SUB,
@@ -17,6 +15,11 @@ from columns import (
     COL_SUMMARY,
 )
 from engine import EXCLUDED_SUGGESTION_ACCOUNTS, load_data, tokenize
+from receivable_account_validation_service import (
+    build_receivable_account_code_index,
+    normalize_receivable_account_master,
+    resolve_unique_receivable_account,
+)
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -70,42 +73,10 @@ def load_payment_accounts(
 def _account_master_rows(account_master_snapshot: Any) -> list[dict[str, str]]:
     """既存master DTO/DataFrame/rowsを安全解決用の行へ正規化する。"""
 
-    if isinstance(account_master_snapshot, pd.DataFrame):
-        source_rows: Any = account_master_snapshot.to_dict("records")
-    elif isinstance(account_master_snapshot, Mapping):
-        if "accounts" in account_master_snapshot:
-            source_rows = account_master_snapshot.get("accounts")
-        else:
-            source_rows = [
-                {"name": name, "code": code}
-                for name, code in account_master_snapshot.items()
-            ]
-    elif isinstance(account_master_snapshot, Sequence) and not isinstance(
-        account_master_snapshot, (str, bytes)
-    ):
-        source_rows = account_master_snapshot
-    else:
-        return []
-
-    if not isinstance(source_rows, Sequence) or isinstance(
-        source_rows, (str, bytes)
-    ):
-        return []
-
-    rows: list[dict[str, str]] = []
-    for source in source_rows:
-        if not isinstance(source, Mapping):
-            continue
-        code = _text(source.get("code"))
-        name = _text(source.get("name"))
-        if not code or not name:
-            continue
-        rows.append({
-            "code": code,
-            "name": name,
-            "category": _text(source.get("category")),
-        })
-    return rows
+    return normalize_receivable_account_master(
+        account_master_snapshot,
+        strict=False,
+    )
 
 
 def resolve_unique_account_options(
@@ -114,9 +85,10 @@ def resolve_unique_account_options(
 ) -> tuple[list[dict[str, str]], list[str]]:
     """科目名を一意なcodeへ解決し、解決不能名を候補から除く。"""
 
-    codes_by_name: dict[str, set[str]] = {}
-    for row in _account_master_rows(account_master_snapshot):
-        codes_by_name.setdefault(row["name"], set()).add(row["code"])
+    codes_by_name = build_receivable_account_code_index(
+        account_master_snapshot,
+        strict=False,
+    )
 
     options: list[dict[str, str]] = []
     invalid_names: list[str] = []
@@ -126,11 +98,11 @@ def resolve_unique_account_options(
         if name in seen_names:
             continue
         seen_names.add(name)
-        codes = codes_by_name.get(name, set())
-        if name and len(codes) == 1:
-            options.append({"code": next(iter(codes)), "name": name})
-        else:
+        resolved = resolve_unique_receivable_account(codes_by_name, name)
+        if resolved is None:
             invalid_names.append(name)
+        else:
+            options.append(resolved)
     return options, invalid_names
 
 
@@ -389,6 +361,42 @@ def build_safe_receivable_difference_options(
         "default_difference_account": safe_by_name.get(selected_default),
         "invalid_difference_account_names": invalid_names,
     }
+
+
+def build_receivable_difference_summary(
+    customer_name: Any,
+    side: str,
+) -> str:
+    """Return the existing Streamlit default summary for one difference side."""
+
+    customer = _text(customer_name)
+    if side == "debit":
+        return f"{customer} 差額調整"
+    if side == "credit":
+        return f"{customer} 過入金調整"
+    raise ValueError("difference side must be debit or credit")
+
+
+def load_safe_receivable_difference_options(
+    account_master_snapshot: Any,
+    customer_name: Any,
+    candidates: Sequence[Mapping[str, Any]],
+    side: str,
+    default_account: Any,
+    top_n: int = 5,
+) -> dict[str, Any]:
+    """Read production transactions and return API-safe recommendations."""
+
+    records, _name_to_code, _frequency = load_data()
+    return build_safe_receivable_difference_options(
+        account_master_snapshot,
+        records,
+        customer_name,
+        candidates,
+        side,
+        default_account,
+        top_n,
+    )
 
 
 def load_receivable_difference_account_options(

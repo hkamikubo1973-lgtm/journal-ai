@@ -107,6 +107,10 @@ class ReceivableLedgerConflictError(ReceivableLedgerError):
     """Raised when supplied before bytes no longer match ledger targets."""
 
 
+class ReceivableLedgerSettlementUnavailableError(ReceivableLedgerError):
+    """Raised when ledger bytes cannot support a settlement preview."""
+
+
 class ReceivableLedgerDuplicateTransactionError(ReceivableLedgerError):
     """Raised when a transaction workspace ID is already in use."""
 
@@ -2047,6 +2051,61 @@ def read_receivable_current_snapshot_when_ready(
             current_raw_bytes=current.raw_bytes,
             ledger_revision=calculate_current_revision(current.raw_bytes),
             settlement_available=settlement_available,
+        )
+
+
+def read_receivable_preview_snapshot(
+    receivables_directory: str | os.PathLike[str] = (
+        DEFAULT_RECEIVABLES_DIRECTORY
+    ),
+    *,
+    expected_revision: str,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> ReceivableCurrentSnapshot:
+    """Read one revision-matched, settlement-ready snapshot under one lock."""
+
+    if not isinstance(expected_revision, str) or re.fullmatch(
+        r"[0-9a-f]{64}", expected_revision
+    ) is None:
+        raise ValueError("expected_revision must be lowercase SHA-256 hex")
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        health = _inspect_receivable_ledger_health_locked(
+            receivables_directory
+        )
+        if health.status != LEDGER_HEALTH_READY:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Receivable ledger health is {health.status}"
+            )
+
+        paths = resolve_receivable_ledger_paths(receivables_directory)
+        current = load_current_receivables_read_only(paths.current_path)
+        try:
+            load_receivable_history_read_only(paths.history_path)
+        except ReceivableLedgerMissingError:
+            # A missing history is formally available and remains uncreated.
+            pass
+        except ReceivableLedgerError as exc:
+            raise ReceivableLedgerSettlementUnavailableError(
+                "Receivable settlement preview is unavailable"
+            ) from exc
+
+        ledger_revision = calculate_current_revision(current.raw_bytes)
+        if ledger_revision != expected_revision:
+            raise ReceivableLedgerConflictError(
+                "current.csv revision no longer matches the preview request"
+            )
+
+        return ReceivableCurrentSnapshot(
+            current_df=current.dataframe,
+            current_raw_bytes=current.raw_bytes,
+            ledger_revision=ledger_revision,
+            settlement_available=True,
         )
 
 

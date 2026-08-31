@@ -2451,6 +2451,150 @@ class ReceivablePersistenceServiceTest(unittest.TestCase):
             {path: path.read_bytes() for path in protected_paths}, before
         )
 
+    def test_preview_snapshot_is_ready_available_and_revision_matched(self):
+        self.write_current()
+        self.write_history()
+        expected = calculate_current_revision(
+            self.paths.current_path.read_bytes()
+        )
+
+        snapshot = service.read_receivable_preview_snapshot(
+            self.receivables_directory,
+            expected_revision=expected,
+        )
+
+        self.assertEqual(snapshot.ledger_revision, expected)
+        self.assertTrue(snapshot.settlement_available)
+        self.assertEqual(snapshot.current_raw_bytes, self.paths.current_path.read_bytes())
+
+    def test_preview_snapshot_revision_conflict_uses_existing_conflict_error(self):
+        self.write_current()
+        self.write_history()
+
+        with self.assertRaises(service.ReceivableLedgerConflictError):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision="0" * 64,
+            )
+
+    def test_preview_snapshot_missing_history_succeeds_without_creation(self):
+        self.write_current()
+        expected = calculate_current_revision(
+            self.paths.current_path.read_bytes()
+        )
+
+        snapshot = service.read_receivable_preview_snapshot(
+            self.receivables_directory,
+            expected_revision=expected,
+        )
+
+        self.assertTrue(snapshot.settlement_available)
+        self.assertFalse(self.paths.history_path.exists())
+
+    def test_preview_snapshot_malformed_history_is_unavailable_and_unchanged(self):
+        self.write_current()
+        self.paths.history_path.write_bytes(b"\xff\xfeinvalid-history")
+        expected = calculate_current_revision(
+            self.paths.current_path.read_bytes()
+        )
+        before = self.paths.history_path.read_bytes()
+
+        with self.assertRaises(
+            service.ReceivableLedgerSettlementUnavailableError
+        ):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision=expected,
+            )
+
+        self.assertEqual(self.paths.history_path.read_bytes(), before)
+
+    def test_preview_snapshot_history_schema_is_unavailable(self):
+        self.write_current()
+        pd.DataFrame([{"消込ID": "S001"}]).to_csv(
+            self.paths.history_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        expected = calculate_current_revision(
+            self.paths.current_path.read_bytes()
+        )
+
+        with self.assertRaises(
+            service.ReceivableLedgerSettlementUnavailableError
+        ):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision=expected,
+            )
+
+    def test_preview_snapshot_recovery_pending_is_rejected_without_recovery(self):
+        paths, _, contents = self.prepare_artifacts("tx-preview-pending")
+        self.paths.current_path.write_bytes(contents["current_before"])
+        self.paths.history_path.write_bytes(contents["history_before"])
+        marker_before = paths.marker_path.read_bytes()
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision=calculate_current_revision(
+                    contents["current_before"]
+                ),
+            )
+
+        self.assertEqual(paths.marker_path.read_bytes(), marker_before)
+
+    def test_preview_snapshot_recovery_required_is_rejected_without_update(self):
+        paths, _ = service.create_transaction_workspace(
+            self.receivables_directory,
+            "tx-preview-required",
+        )
+        service.mark_transaction_recovery_required(
+            paths.marker_path,
+            "manual inspection",
+        )
+        marker_before = paths.marker_path.read_bytes()
+
+        with self.assertRaises(ReceivableLedgerRecoveryRequired):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision="0" * 64,
+            )
+
+        self.assertEqual(paths.marker_path.read_bytes(), marker_before)
+
+    def test_preview_snapshot_rejects_malformed_current(self):
+        self.paths.current_path.write_bytes(b"\xff\xfeinvalid-current")
+        self.write_history()
+
+        with self.assertRaises(ReceivableLedgerMalformedError):
+            service.read_receivable_preview_snapshot(
+                self.receivables_directory,
+                expected_revision="0" * 64,
+            )
+
+    def test_preview_snapshot_does_not_change_ledger_bytes(self):
+        self.write_current()
+        self.write_history()
+        before = {
+            path: path.read_bytes()
+            for path in (self.paths.current_path, self.paths.history_path)
+        }
+        expected = calculate_current_revision(before[self.paths.current_path])
+
+        service.read_receivable_preview_snapshot(
+            self.receivables_directory,
+            expected_revision=expected,
+        )
+
+        self.assertEqual(
+            {
+                path: path.read_bytes()
+                for path in (self.paths.current_path, self.paths.history_path)
+            },
+            before,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
