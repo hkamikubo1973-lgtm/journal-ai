@@ -136,6 +136,10 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
         self.assertEqual(self.loaded_history().iloc[0]["消込額"], "1000")
         self.assertTrue(result.receipt_path.exists())
         self.assertEqual(result.settlement_id, "fixed-settlement")
+        self.assertEqual(
+            result.receipt_ref,
+            persistence.calculate_idempotency_key_hash("operation-key-001"),
+        )
 
     def test_partial_settlement_persists_partial_balance(self):
         result = self.execute(
@@ -214,6 +218,7 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
 
         self.assertTrue(replay.replayed)
         self.assertEqual(replay.settlement, first.settlement)
+        self.assertEqual(replay.receipt_ref, first.receipt_ref)
         self.assertEqual(
             self.paths.current_path.read_bytes(), b"revision changed and malformed"
         )
@@ -467,6 +472,9 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
             self.execute()
 
     def test_receipt_write_failure_then_retry_recovers_and_replays(self):
+        expected_ref = persistence.calculate_idempotency_key_hash(
+            "operation-key-001"
+        )
         with patch.object(
             persistence,
             "save_settlement_receipt",
@@ -477,6 +485,7 @@ class ReceivableSettlementExecuteServiceTest(unittest.TestCase):
 
         retry = self.execute()
         self.assertTrue(retry.replayed)
+        self.assertEqual(retry.receipt_ref, expected_ref)
         self.assertTrue(retry.receipt_path.exists())
         self.assertEqual(self.loaded_current().iloc[0]["残高"], "0")
 

@@ -119,6 +119,10 @@ class ReceivableSettlementReceiptError(ReceivableLedgerRecoveryRequired):
     """Raised when a durable settlement receipt is invalid or inconsistent."""
 
 
+class ReceivableSettlementReceiptNotFoundError(ReceivableLedgerError):
+    """Raised when a valid receipt reference has no durable receipt."""
+
+
 class ReceivableIdempotencyConflictError(ReceivableLedgerConflictError):
     """Raised when one idempotency key is reused for another request."""
 
@@ -193,6 +197,7 @@ class LoadedSettlementReceipt:
 @dataclass(frozen=True)
 class ReceivableIdempotentTransactionResult:
     replayed: bool
+    receipt_ref: str
     settlement: dict[str, Any]
     settlement_id: str
     transaction_id: str
@@ -282,13 +287,24 @@ def resolve_settlement_receipt_path(
     receivables_directory: str | os.PathLike[str],
     idempotency_key_hash: str,
 ) -> Path:
-    if re.fullmatch(r"[0-9a-f]{64}", idempotency_key_hash) is None:
+    if not isinstance(idempotency_key_hash, str) or re.fullmatch(
+        r"[0-9a-f]{64}", idempotency_key_hash
+    ) is None:
         raise ValueError("idempotency_key_hash must be lowercase SHA-256 hex")
     return (
         Path(receivables_directory)
         / SETTLEMENTS_DIRECTORY_NAME
         / f"{idempotency_key_hash}.json"
     )
+
+
+def _path_is_link_like(path: Path) -> bool:
+    """Reject symlinks and Windows junctions at secure read boundaries."""
+
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
 
 
 def resolve_receivable_transaction_paths(
@@ -2014,6 +2030,72 @@ def inspect_receivable_ledger_health_read_only(
         )
 
 
+def read_settlement_receipt_when_ready(
+    receivables_directory: str | os.PathLike[str],
+    receipt_ref: str,
+    *,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> LoadedSettlementReceipt:
+    """Read one fixed-directory receipt under a read-only readiness gate."""
+
+    receipt_path = resolve_settlement_receipt_path(
+        receivables_directory, receipt_ref
+    )
+    settlements_directory = (
+        Path(receivables_directory) / SETTLEMENTS_DIRECTORY_NAME
+    )
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        health = _inspect_receivable_ledger_health_locked(
+            receivables_directory
+        )
+        if health.status != LEDGER_HEALTH_READY:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Receivable ledger health is {health.status}"
+            )
+
+        if _path_is_link_like(settlements_directory):
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt directory must not be a link"
+            )
+        if _path_is_link_like(receipt_path):
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt must not be a link"
+            )
+        if not receipt_path.exists():
+            raise ReceivableSettlementReceiptNotFoundError(
+                f"Settlement receipt was not found for ref: {receipt_ref}"
+            )
+        if not settlements_directory.is_dir() or not receipt_path.is_file():
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt path is not a regular file"
+            )
+
+        try:
+            resolved_directory = settlements_directory.resolve(strict=True)
+            resolved_receipt = receipt_path.resolve(strict=True)
+        except OSError as exc:
+            raise ReceivableSettlementReceiptError(
+                "Could not securely resolve settlement receipt path"
+            ) from exc
+        if resolved_receipt.parent != resolved_directory:
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt resolved outside its fixed directory"
+            )
+
+        loaded = read_settlement_receipt(receipt_path)
+        if loaded.receipt["idempotency_key_hash"] != receipt_ref:
+            raise ReceivableSettlementReceiptError(
+                "Settlement receipt key hash does not match its reference"
+            )
+        return loaded
+
+
 def read_receivable_current_snapshot_when_ready(
     receivables_directory: str | os.PathLike[str] = (
         DEFAULT_RECEIVABLES_DIRECTORY
@@ -2366,6 +2448,7 @@ def _idempotent_result_from_loaded_receipt(
     receipt = loaded.receipt
     return ReceivableIdempotentTransactionResult(
         replayed=replayed,
+        receipt_ref=receipt["idempotency_key_hash"],
         settlement=dict(receipt["settlement"]),
         settlement_id=receipt["settlement_id"],
         transaction_id=receipt["transaction_id"],
