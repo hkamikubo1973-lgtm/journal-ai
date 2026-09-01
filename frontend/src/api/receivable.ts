@@ -3,6 +3,8 @@ import type {
   ReceivableOptionsResponse,
   ReceivablePreviewRequest,
   ReceivablePreviewResponse,
+  ReceivableSettlementExecuteRequest,
+  ReceivableSettlementExecuteResponse,
   ReceivableSummaryResponse,
 } from "../types/receivable";
 
@@ -72,6 +74,19 @@ export function previewReceivableSettlement(
 ): Promise<ReceivablePreviewResponse> {
   return requestReceivable<ReceivablePreviewResponse>(
     "/api/receivables/preview-settlement",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export function executeReceivableSettlement(
+  request: ReceivableSettlementExecuteRequest,
+): Promise<ReceivableSettlementExecuteResponse> {
+  return requestReceivable<ReceivableSettlementExecuteResponse>(
+    "/api/receivables/execute-settlement",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

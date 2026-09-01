@@ -23,13 +23,14 @@ import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
 
 type Workspace = "journal" | "receivable";
 
-function WorkspaceTabs({ active, onChange }: {
+function WorkspaceTabs({ active, onChange, journalDisabled = false }: {
   active: Workspace;
   onChange: (workspace: Workspace) => void;
+  journalDisabled?: boolean;
 }) {
   return (
     <nav className="workspace-tabs" aria-label="業務画面" role="tablist">
-      <button type="button" role="tab" aria-selected={active === "journal"}
+      <button type="button" role="tab" aria-selected={active === "journal"} disabled={journalDisabled}
         className={active === "journal" ? "active" : ""} onClick={() => onChange("journal")}>
         通常仕訳
       </button>
@@ -733,6 +734,7 @@ function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
 
 export default function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace>("journal");
+  const [receivableExecutionLocked, setReceivableExecutionLocked] = useState(false);
   const [keyword, setKeyword] = useState("りそな銀行");
   const [department, setDepartment] = useState("");
   const [amount, setAmount] = useState("");
@@ -1128,7 +1130,8 @@ export default function App() {
       <main className="app-shell receivable-shell">
         <header className="page-header">
           <div className="page-title"><h1>journal-ai</h1><span>未収消込</span></div>
-          <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
+          <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace}
+            journalDisabled={receivableExecutionLocked} />
           <div className="page-header-meta">
             {masters?.system && <span className="fiscal-year-status">
               会計年度：{masters.system.current_fiscal_year}年度
@@ -1137,7 +1140,8 @@ export default function App() {
             <span className="workspace-status">Preview・未確定</span>
           </div>
         </header>
-        <ReceivableWorkspace masters={masters} mastersLoading={mastersLoading} mastersError={mastersError} />
+        <ReceivableWorkspace masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
+          onExecutionLockChange={setReceivableExecutionLocked} />
       </main>
     );
   }

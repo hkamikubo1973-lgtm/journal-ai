@@ -121,3 +121,37 @@ export type ReceivablePreviewResponse = {
   rows: ReceivablePreviewJournalRow[];
   recommended_difference_accounts: ReceivableRecommendedAccount[];
 };
+
+export type ReceivableSettlementExecuteRequest = {
+  idempotency_key: string;
+  preview_revision: string;
+  customer_name: string;
+  settlement_date: string;
+  payment_amount: number;
+  receipt_account: string;
+  mode: ReceivablePreviewMode | null;
+  difference_account: string | null;
+  difference_summary: string | null;
+};
+
+export type ReceivableExecutedSettlement = {
+  settlement_id: string;
+  settlement_date: string;
+  customer_name: string;
+  payment_amount: number;
+  target_total: number;
+  difference: number;
+  source_candidates: ReceivablePreviewCandidate[];
+  rows: ReceivablePreviewJournalRow[];
+  created_at: string;
+};
+
+export type ReceivableSettlementExecuteResponse = {
+  replayed: boolean;
+  settlement_id: string;
+  transaction_id: string;
+  ledger_revision: string;
+  history_revision: string;
+  settlement: ReceivableExecutedSettlement;
+  message: string;
+};

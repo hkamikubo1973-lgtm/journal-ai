@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ReceivableApiError,
+  executeReceivableSettlement,
   fetchReceivableDetail,
   fetchReceivableOptions,
   fetchReceivableSummary,
@@ -14,6 +15,7 @@ import type {
   ReceivablePreviewPattern,
   ReceivablePreviewResponse,
   ReceivableRecommendedAccount,
+  ReceivableSettlementExecuteRequest,
   ReceivableSummaryResponse,
 } from "../../types/receivable";
 
@@ -21,7 +23,98 @@ type ReceivableWorkspaceProps = {
   masters: JournalMastersResponse | null;
   mastersLoading: boolean;
   mastersError: string | null;
+  onExecutionLockChange?: (locked: boolean) => void;
 };
+
+type ExecutionCandidate = Omit<ReceivableSettlementExecuteRequest, "idempotency_key">;
+
+type PendingExecuteOperation = {
+  idempotencyKey: string;
+  requestBody: Readonly<ReceivableSettlementExecuteRequest>;
+};
+
+type StoredPendingExecuteOperation = PendingExecuteOperation & {
+  version: 1;
+};
+
+const pendingExecuteStorageKey = "journal-ai.receivable.pending-execute.v1";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function parseStoredPendingOperation(value: unknown): PendingExecuteOperation | null {
+  if (!isRecord(value) || value.version !== 1 || typeof value.idempotencyKey !== "string") return null;
+  if (!isRecord(value.requestBody)) return null;
+  const request = value.requestBody;
+  const mode = request.mode;
+  if (
+    !value.idempotencyKey.trim()
+    || request.idempotency_key !== value.idempotencyKey
+    || typeof request.preview_revision !== "string"
+    || !/^[0-9a-f]{64}$/.test(request.preview_revision)
+    || typeof request.customer_name !== "string"
+    || !request.customer_name.trim()
+    || typeof request.settlement_date !== "string"
+    || !/^\d{4}-\d{2}-\d{2}$/.test(request.settlement_date)
+    || typeof request.payment_amount !== "number"
+    || !Number.isInteger(request.payment_amount)
+    || request.payment_amount <= 0
+    || typeof request.receipt_account !== "string"
+    || !request.receipt_account.trim()
+    || (mode !== null && mode !== "partial" && mode !== "difference_account")
+    || !isNullableString(request.difference_account)
+    || !isNullableString(request.difference_summary)
+  ) return null;
+
+  const requestBody = Object.freeze({
+    idempotency_key: value.idempotencyKey,
+    preview_revision: request.preview_revision,
+    customer_name: request.customer_name,
+    settlement_date: request.settlement_date,
+    payment_amount: request.payment_amount,
+    receipt_account: request.receipt_account,
+    mode,
+    difference_account: request.difference_account,
+    difference_summary: request.difference_summary,
+  });
+  return { idempotencyKey: value.idempotencyKey, requestBody };
+}
+
+function clearStoredPendingOperation(): void {
+  try {
+    window.sessionStorage.removeItem(pendingExecuteStorageKey);
+  } catch {
+    // Storageが利用できない環境でも画面を壊さない。
+  }
+}
+
+function restorePendingOperation(): PendingExecuteOperation | null {
+  try {
+    const stored = window.sessionStorage.getItem(pendingExecuteStorageKey);
+    if (!stored) return null;
+    const operation = parseStoredPendingOperation(JSON.parse(stored) as unknown);
+    if (operation) return operation;
+    clearStoredPendingOperation();
+  } catch {
+    clearStoredPendingOperation();
+  }
+  return null;
+}
+
+function storePendingOperation(operation: PendingExecuteOperation): boolean {
+  const stored: StoredPendingExecuteOperation = { version: 1, ...operation };
+  try {
+    window.sessionStorage.setItem(pendingExecuteStorageKey, JSON.stringify(stored));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const patternLabels: Record<ReceivablePreviewPattern, string> = {
   exact_match: "完全一致",
@@ -73,6 +166,7 @@ export default function ReceivableWorkspace({
   masters,
   mastersLoading,
   mastersError,
+  onExecutionLockChange,
 }: ReceivableWorkspaceProps) {
   const [summary, setSummary] = useState<ReceivableSummaryResponse | null>(null);
   const [options, setOptions] = useState<ReceivableOptionsResponse | null>(null);
@@ -98,16 +192,40 @@ export default function ReceivableWorkspace({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [refreshSuggested, setRefreshSuggested] = useState(false);
+  const [executionCandidate, setExecutionCandidate] = useState<ExecutionCandidate | null>(null);
+  const [pendingOperation, setPendingOperation] = useState<PendingExecuteOperation | null>(restorePendingOperation);
+  const [restoredPending, setRestoredPending] = useState(() => pendingOperation !== null);
+  const [executeLoading, setExecuteLoading] = useState(false);
+  const [executeError, setExecuteError] = useState<string | null>(null);
+  const [executeSuccess, setExecuteSuccess] = useState<string | null>(null);
   const detailRequestId = useRef(0);
   const previewRequestId = useRef(0);
+  const executeInFlight = useRef(false);
 
   useEffect(() => {
     void refreshWorkspace(false);
   }, []);
 
+  useEffect(() => {
+    onExecutionLockChange?.(executeLoading || pendingOperation !== null);
+  }, [executeLoading, onExecutionLockChange, pendingOperation]);
+
+  useEffect(() => () => onExecutionLockChange?.(false), [onExecutionLockChange]);
+
+  useEffect(() => {
+    if (!pendingOperation) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [pendingOperation]);
+
   function resetPreviewState(resetChoices = true): void {
     previewRequestId.current += 1;
     setPreview(null);
+    setExecutionCandidate(null);
     setPreviewError(null);
     setPreviewLoading(false);
     if (resetChoices) {
@@ -134,7 +252,7 @@ export default function ReceivableWorkspace({
     });
   }
 
-  async function loadDetail(customerName: string): Promise<void> {
+  async function loadDetail(customerName: string, missingIsNormal = false): Promise<void> {
     const requestId = ++detailRequestId.current;
     setDetailLoading(true);
     setDetail(null);
@@ -147,6 +265,13 @@ export default function ReceivableWorkspace({
       setPreviewRevision(response.ledger_revision);
     } catch (error) {
       if (requestId !== detailRequestId.current) return;
+      if (missingIsNormal && error instanceof ReceivableApiError && error.status === 404) {
+        setSelectedCustomer(null);
+        setDetail(null);
+        setDetailError(null);
+        setPreviewRevision(null);
+        return;
+      }
       setDetailError(errorMessage(error, "未収明細を取得できませんでした。"));
       setRefreshSuggested(requiresRefresh(error));
     } finally {
@@ -154,10 +279,39 @@ export default function ReceivableWorkspace({
     }
   }
 
+  async function refreshLedgerAfterOperation(customerName: string): Promise<void> {
+    detailRequestId.current += 1;
+    setSummaryLoading(true);
+    setDetailLoading(true);
+    setSummaryError(null);
+    setDetailError(null);
+    setRefreshSuggested(false);
+    try {
+      const nextSummary = await fetchReceivableSummary();
+      setSummary(nextSummary);
+      if (!nextSummary.customers.some((item) => item.customer_name === customerName)) {
+        setSelectedCustomer(null);
+        setDetail(null);
+        setPreviewRevision(null);
+        setDetailLoading(false);
+        return;
+      }
+      await loadDetail(customerName, true);
+    } catch (error) {
+      setSummaryError(errorMessage(error, "未収集計を再取得できませんでした。"));
+      setRefreshSuggested(true);
+      setDetailLoading(false);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }
+
   async function refreshWorkspace(refreshSelected = true): Promise<void> {
     const customerToRefresh = refreshSelected ? selectedCustomer : null;
     detailRequestId.current += 1;
     resetPreviewState();
+    setExecuteError(null);
+    setExecuteSuccess(null);
     setRefreshSuggested(false);
     setSummaryLoading(true);
     setOptionsLoading(true);
@@ -212,18 +366,24 @@ export default function ReceivableWorkspace({
   }
 
   function selectCustomer(customerName: string): void {
+    if (executeLoading || pendingOperation) return;
     if (customerName === selectedCustomer && detail) return;
     setSelectedCustomer(customerName);
     setDetailError(null);
     setRefreshSuggested(false);
     setPaymentAmount("");
     resetPreviewState();
+    setExecuteError(null);
+    setExecuteSuccess(null);
     void loadDetail(customerName);
   }
 
   function changeCoreInput(change: () => void): void {
+    if (executeLoading || pendingOperation) return;
     change();
     resetPreviewState();
+    setExecuteError(null);
+    setExecuteSuccess(null);
   }
 
   const parsedPaymentAmount = Number(paymentAmount);
@@ -242,7 +402,9 @@ export default function ReceivableWorkspace({
     && settlementDate
     && validPaymentAmount
     && receiptAccount
-    && !previewLoading,
+    && !previewLoading
+    && !executeLoading
+    && !pendingOperation,
   );
 
   async function runPreview(
@@ -254,6 +416,8 @@ export default function ReceivableWorkspace({
     const requestId = ++previewRequestId.current;
     setPreview(null);
     setPreviewError(null);
+    setExecuteError(null);
+    setExecuteSuccess(null);
     setPreviewLoading(true);
     try {
       const response = await previewReceivableSettlement({
@@ -273,6 +437,18 @@ export default function ReceivableWorkspace({
       setAvailableModes(response.available_modes);
       setRecommendations(response.recommended_difference_accounts);
       setDifferenceAccountRequired(response.difference_account_required);
+      setExecutionCandidate(response.preview_complete && response.rows.length > 0
+        ? Object.freeze({
+          preview_revision: response.ledger_revision,
+          customer_name: response.customer_name,
+          settlement_date: response.settlement_date,
+          payment_amount: response.payment_amount,
+          receipt_account: response.receipt_account,
+          mode: response.mode,
+          difference_account: requestedDifferenceAccount || null,
+          difference_summary: requestedDifferenceSummary || null,
+        })
+        : null);
     } catch (error) {
       if (requestId !== previewRequestId.current) return;
       setPreviewError(errorMessage(error, "未収Previewを取得できませんでした。"));
@@ -288,9 +464,13 @@ export default function ReceivableWorkspace({
   }
 
   function changeMode(nextMode: ReceivablePreviewMode): void {
+    if (executeLoading || pendingOperation) return;
     previewRequestId.current += 1;
     setPreview(null);
+    setExecutionCandidate(null);
     setPreviewError(null);
+    setExecuteError(null);
+    setExecuteSuccess(null);
     setMode(nextMode);
     if (nextMode === "partial") {
       setDifferenceAccount("");
@@ -300,17 +480,120 @@ export default function ReceivableWorkspace({
   }
 
   function chooseDifferenceAccount(accountName: string): void {
+    if (executeLoading || pendingOperation) return;
     previewRequestId.current += 1;
     setPreview(null);
+    setExecutionCandidate(null);
     setPreviewError(null);
+    setExecuteError(null);
+    setExecuteSuccess(null);
     setDifferenceAccount(accountName);
     setMode("difference_account");
     if (accountName) void runPreview("difference_account", accountName);
   }
 
+  async function runExecute(operation: PendingExecuteOperation): Promise<void> {
+    if (executeInFlight.current) return;
+    executeInFlight.current = true;
+    setPendingOperation(operation);
+    setExecuteLoading(true);
+    setExecuteError(null);
+    setExecuteSuccess(null);
+    try {
+      const response = await executeReceivableSettlement(operation.requestBody);
+      clearStoredPendingOperation();
+      setPendingOperation(null);
+      setRestoredPending(false);
+      resetPreviewState();
+      setExecuteSuccess(response.message || "未収消込が完了しました");
+      await refreshLedgerAfterOperation(operation.requestBody.customer_name);
+    } catch (error) {
+      if (!(error instanceof ReceivableApiError)) {
+        setExecuteError("処理結果を確認できませんでした。同じ操作IDで再確認できます。");
+        return;
+      }
+      if (error.status === 423) {
+        setExecuteError(`${error.message} 同じ操作IDで再確認できます。`);
+        return;
+      }
+      if (error.status >= 500) {
+        setExecuteError(`${error.message} 処理結果が不明なため、同じ操作IDで再確認してください。`);
+        return;
+      }
+
+      clearStoredPendingOperation();
+      setPendingOperation(null);
+      setRestoredPending(false);
+      if (error.status === 409) {
+        resetPreviewState();
+        if (error.message.includes("操作ID")) {
+          setExecuteError("操作IDの整合性を確認できません。再読込後にもう一度Previewしてください。");
+          setRefreshSuggested(true);
+          return;
+        }
+        setExecuteError(`${error.message} 最新データで再度Previewしてください。`);
+        await refreshLedgerAfterOperation(operation.requestBody.customer_name);
+        return;
+      }
+      if (error.status === 422) {
+        setExecutionCandidate(null);
+        setExecuteError(`${error.message} 入力を修正し、もう一度Previewしてください。`);
+        return;
+      }
+      setExecutionCandidate(null);
+      setExecuteError(error.message);
+    } finally {
+      executeInFlight.current = false;
+      setExecuteLoading(false);
+    }
+  }
+
+  function startExecute(): void {
+    if (!executionCandidate || pendingOperation || executeInFlight.current) return;
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = crypto.randomUUID();
+    } catch {
+      setExecuteError("安全な操作IDを生成できませんでした。ブラウザ環境を確認してください。");
+      return;
+    }
+    const requestBody = Object.freeze({
+      idempotency_key: idempotencyKey,
+      ...executionCandidate,
+    });
+    const operation = { idempotencyKey, requestBody };
+    setPendingOperation(operation);
+    setRestoredPending(false);
+    if (!storePendingOperation(operation)) {
+      setPendingOperation(null);
+      setExecuteError("再確認に必要な操作情報を一時保存できないため、消込を開始しませんでした。");
+      return;
+    }
+    void runExecute(operation);
+  }
+
+  function retryExecute(): void {
+    if (!pendingOperation || executeInFlight.current) return;
+    if (!storePendingOperation(pendingOperation)) {
+      setExecuteError("再確認に必要な操作情報を一時保存できないため、送信しませんでした。");
+      return;
+    }
+    setRestoredPending(false);
+    void runExecute(pendingOperation);
+  }
+
   const recommendationCodes = new Set(recommendations.map((item) => item.code));
   const showDifferenceAccount = mode === "difference_account"
     || differenceAccountRequired;
+  const canExecute = Boolean(
+    preview?.preview_complete
+    && preview.rows.length > 0
+    && executionCandidate
+    && settlementAvailable
+    && !executeLoading
+    && !pendingOperation,
+  );
+  const executionLocked = executeLoading || pendingOperation !== null;
 
   return (
     <section className="receivable-workspace" aria-label="未収消込">
@@ -318,7 +601,7 @@ export default function ReceivableWorkspace({
         <div className="receivable-panel-heading">
           <div><p className="eyebrow">Receivables</p><h2>未収一覧</h2></div>
           <button type="button" className="receivable-refresh" onClick={() => void refreshWorkspace()}
-            disabled={summaryLoading || optionsLoading || detailLoading || previewLoading}>
+            disabled={summaryLoading || optionsLoading || detailLoading || previewLoading || executionLocked}>
             再読込
           </button>
         </div>
@@ -339,6 +622,7 @@ export default function ReceivableWorkspace({
               className={`receivable-customer${selectedCustomer === customer.customer_name ? " selected" : ""}`}
               key={customer.customer_name}
               onClick={() => selectCustomer(customer.customer_name)}
+              disabled={executionLocked}
             >
               <span>{customer.customer_name}</span>
               <small>{customer.outstanding_count}件</small>
@@ -390,19 +674,21 @@ export default function ReceivableWorkspace({
 
       <section className="receivable-panel receivable-preview-panel" aria-live="polite">
         <div className="receivable-panel-heading">
-          <div><p className="eyebrow">Read-only Preview</p><h2>入金・仕訳Preview</h2></div>
-          <span className="status-badge">確認のみ</span>
+          <div><p className="eyebrow">Preview & Execute</p><h2>入金・仕訳Preview</h2></div>
+          <span className="status-badge">{pendingOperation
+            ? "結果未確認"
+            : preview?.preview_complete ? "確定可能" : "確認中"}</span>
         </div>
         <form className="receivable-preview-form" onSubmit={submitPreview}>
           <label>入金日<input type="date" value={settlementDate}
             onChange={(event) => changeCoreInput(() => setSettlementDate(event.target.value))}
-            disabled={!detail || !settlementAvailable} /></label>
+            disabled={!detail || !settlementAvailable || executionLocked} /></label>
           <label>入金額<input type="number" min="1" step="1" inputMode="numeric" value={paymentAmount}
             onChange={(event) => changeCoreInput(() => setPaymentAmount(event.target.value))}
-            disabled={!detail || !settlementAvailable} placeholder="0" /></label>
+            disabled={!detail || !settlementAvailable || executionLocked} placeholder="0" /></label>
           <label>入金科目<select value={receiptAccount}
             onChange={(event) => changeCoreInput(() => setReceiptAccount(event.target.value))}
-            disabled={!detail || !settlementAvailable || optionsLoading || !hasReceiptOptions}>
+            disabled={!detail || !settlementAvailable || optionsLoading || !hasReceiptOptions || executionLocked}>
             <option value="">{optionsLoading ? "読み込み中…" : "入金科目を選択"}</option>
             {options?.receipt_accounts.map((account) => <option value={account.name} key={account.code}>
               {account.name}（{account.code}）
@@ -414,7 +700,26 @@ export default function ReceivableWorkspace({
         {!optionsLoading && options?.receipt_accounts.length === 0 && <p className="notice notice-warning">
           利用できる入金科目がありません。Previewは実行できません。
         </p>}
-        {refreshSuggested && <button type="button" className="receivable-reload-guidance" onClick={() => void refreshWorkspace()}>
+        {executeSuccess && <p className="notice notice-success" role="status">{executeSuccess}</p>}
+        {executeError && <p className="error-message" role="alert">{executeError}</p>}
+        {pendingOperation && !executeLoading && <div className="receivable-retry-panel">
+          <div>
+            <strong>{restoredPending
+              ? "前回の消込処理の結果を確認できていません。"
+              : "消込処理の結果を確認できていません。"}</strong>
+            <p>送信時に固定した内容を変更せず、同じ操作IDで結果を再確認します。</p>
+            <dl>
+              <div><dt>得意先</dt><dd>{pendingOperation.requestBody.customer_name}</dd></div>
+              <div><dt>入金日</dt><dd>{pendingOperation.requestBody.settlement_date}</dd></div>
+              <div><dt>入金額</dt><dd>{formatAmount(pendingOperation.requestBody.payment_amount)}</dd></div>
+              <div><dt>入金科目</dt><dd>{pendingOperation.requestBody.receipt_account}</dd></div>
+            </dl>
+          </div>
+          <button type="button" onClick={retryExecute}>同じ内容で再確認</button>
+        </div>}
+        {executeLoading && <p className="receivable-loading" role="status">未収消込を確認中…</p>}
+        {refreshSuggested && <button type="button" className="receivable-reload-guidance" onClick={() => void refreshWorkspace()}
+          disabled={executionLocked}>
           未収一覧と明細を再読込
         </button>}
         {previewError && <p className="error-message" role="alert">{previewError}</p>}
@@ -424,14 +729,14 @@ export default function ReceivableWorkspace({
           <span>処理方法</span>
           <div>{availableModes.map((availableMode) => <button type="button"
             className={mode === availableMode ? "selected" : ""}
-            key={availableMode} onClick={() => changeMode(availableMode)} disabled={previewLoading}>
+            key={availableMode} onClick={() => changeMode(availableMode)} disabled={previewLoading || executionLocked}>
             {modeLabels[availableMode]}
           </button>)}</div>
         </div>}
 
         {showDifferenceAccount && <div className="receivable-difference-panel">
           <label>差額科目<select value={differenceAccount} onChange={(event) => chooseDifferenceAccount(event.target.value)}
-            disabled={previewLoading || mastersLoading || !masters || Boolean(mastersError)}>
+            disabled={previewLoading || mastersLoading || !masters || Boolean(mastersError) || executionLocked}>
             <option value="">差額科目を選択してください</option>
             {recommendations.length > 0 && <optgroup label="推奨候補">
               {recommendations.map((account) => <option value={account.name} key={`recommended-${account.code}`}>
@@ -446,12 +751,18 @@ export default function ReceivableWorkspace({
             </optgroup>
           </select></label>
           <label>差額摘要（任意）<input value={differenceSummary}
-            onChange={(event) => { setDifferenceSummary(event.target.value); setPreview(null); setPreviewError(null); }}
-            disabled={previewLoading} placeholder="空欄時はBackend既定値" /></label>
+            onChange={(event) => {
+              if (executionLocked) return;
+              setDifferenceSummary(event.target.value);
+              resetPreviewState(false);
+              setExecuteError(null);
+              setExecuteSuccess(null);
+            }}
+            disabled={previewLoading || executionLocked} placeholder="空欄時はBackend既定値" /></label>
           {recommendations.length > 0 && <div className="receivable-recommendations">
             <span>推奨（Backend順位）</span>
             {recommendations.map((account) => <button type="button" key={account.code}
-              onClick={() => chooseDifferenceAccount(account.name)} disabled={previewLoading}>
+              onClick={() => chooseDifferenceAccount(account.name)} disabled={previewLoading || executionLocked}>
               {account.name}<small>{account.code}</small>
             </button>)}
           </div>}
@@ -469,6 +780,11 @@ export default function ReceivableWorkspace({
             <div><span>元差額</span><strong>{formatAmount(preview.original_difference)}</strong></div>
             <div><span>消込対象額</span><strong>{formatAmount(preview.target_total)}</strong></div>
             <div><span>最終差額</span><strong>{formatAmount(preview.difference)}</strong></div>
+          </div>
+          <div className="receivable-execute-summary">
+            <span><small>入金日</small>{preview.settlement_date}</span>
+            <span><small>得意先</small>{preview.customer_name}</span>
+            <span><small>入金科目</small>{preview.receipt_account}</span>
           </div>
 
           <section className="receivable-result-section">
@@ -494,6 +810,12 @@ export default function ReceivableWorkspace({
                 <td className="table-amount">{formatAmount(row.amount)}</td><td title={row.summary}>{row.summary || "-"}</td>
               </tr>)}</tbody>
             </table></div>
+            <div className="receivable-execute-actions">
+              <p>表示中の消込対象と仕訳PreviewをBackendで再検証して確定します。</p>
+              <button type="button" onClick={startExecute} disabled={!canExecute}>
+                {executeLoading ? "消込確定中…" : "この内容で消込確定"}
+              </button>
+            </div>
           </section> : <p className="notice notice-warning">必要な差額科目を選択すると、仕訳Previewを確認できます。</p>}
           <p className="receivable-revision" title={preview.ledger_revision}>
             Preview revision: {preview.ledger_revision.slice(0, 12)}…
