@@ -16,6 +16,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 import api.receivable as receivable_api  # noqa: E402
 import receivable_persistence_service as persistence  # noqa: E402
+import receivable_receipt_service as receipt_service  # noqa: E402
 from receivable_account_validation_service import (  # noqa: E402
     ReceivableSettlementMasterValidationError,
 )
@@ -23,6 +24,9 @@ from api.journal import app  # noqa: E402
 from receivable_preview_application_service import (  # noqa: E402
     ReceivablePreviewCustomerNotFoundError,
     ReceivablePreviewValidationError,
+)
+from receivable_registration_handoff_service import (  # noqa: E402
+    ReceivableRegistrationHandoffValidationError,
 )
 from receivable_engine import (  # noqa: E402
     CURRENT_RECEIVABLE_COLUMNS,
@@ -73,7 +77,11 @@ class ReceivableApiTest(unittest.TestCase):
                 {"code": "751", "name": "支払手数料", "category": "費用"},
                 {"code": "251", "name": "仮受金", "category": "負債"},
                 {"code": "999", "name": "未収運賃", "category": "資産"},
-            ]
+            ],
+            "departments": [
+                {"code": "10", "name": "営業部"},
+            ],
+            "sub_account_relations": [],
         }
         self.payment_accounts_path = self.directory / "payment_accounts.csv"
         self.write_payment_accounts(["普通預金", "当座預金"])
@@ -158,6 +166,63 @@ class ReceivableApiTest(unittest.TestCase):
             "/api/receivables/execute-settlement",
             json=self.execute_payload(**overrides),
         )
+
+    def post_prepare_registration(
+        self,
+        settlement_id,
+        receipt_ref,
+        **extra,
+    ):
+        return self.client.post(
+            "/api/receivables/settlements/"
+            f"{settlement_id}/prepare-registration",
+            json={"receipt_ref": receipt_ref, **extra},
+        )
+
+    def save_handoff_receipt(self, rows, settlement_id="handoff-001"):
+        receipt_ref = persistence.calculate_idempotency_key_hash(
+            f"receipt-{settlement_id}"
+        )
+        settlement = {
+            "settlement_id": settlement_id,
+            "settlement_date": "2026-08-30",
+            "customer_name": "A商事",
+            "payment_amount": 1000,
+            "target_total": 1000,
+            "difference": 0,
+            "source_candidates": [{
+                "コード": "C001",
+                "未収ID": "R001",
+                "請求日": "2026-08-01",
+                "請求額": 1000,
+                "残高": 1000,
+                "消込予定": 1000,
+                "未収科目": "未収運賃",
+                "未収補助": "",
+                "部門": "営業部",
+                "取引先": "A商事",
+                "摘要": "8月分",
+            }],
+            "rows": rows,
+            "created_at": "2026-08-30T12:00:00+00:00",
+        }
+        receipt = {
+            "schema_version": 1,
+            "idempotency_key_hash": receipt_ref,
+            "request_hash": "a" * 64,
+            "transaction_id": settlement_id,
+            "settlement_id": settlement_id,
+            "settlement": settlement,
+            "current_after_hash": "b" * 64,
+            "history_after_hash": "c" * 64,
+            "committed_at": "2026-08-30T12:00:01+00:00",
+        }
+        receipt_path = persistence.resolve_settlement_receipt_path(
+            self.directory,
+            receipt_ref,
+        )
+        persistence.save_settlement_receipt(receipt_path, receipt)
+        return settlement_id, receipt_ref, receipt_path
 
     def ledger_bytes(self):
         return (
@@ -750,6 +815,7 @@ class ReceivableApiTest(unittest.TestCase):
         self.assertFalse(body["replayed"])
         self.assertEqual(body["message"], "未収消込が完了しました")
         self.assertEqual(body["settlement_id"], body["transaction_id"])
+        self.assertRegex(body["receipt_ref"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             body["ledger_revision"],
             hashlib.sha256(self.paths.current_path.read_bytes()).hexdigest(),
@@ -846,7 +912,9 @@ class ReceivableApiTest(unittest.TestCase):
         self.assertEqual(replay.status_code, 200)
         self.assertFalse(first.json()["replayed"])
         self.assertTrue(replay.json()["replayed"])
-        for field in ("settlement_id", "transaction_id", "settlement"):
+        for field in (
+            "settlement_id", "receipt_ref", "transaction_id", "settlement"
+        ):
             self.assertEqual(replay.json()[field], first.json()[field])
         self.assertEqual(self.ledger_bytes(), after_first)
         self.assertEqual(
@@ -1032,6 +1100,7 @@ class ReceivableApiTest(unittest.TestCase):
         result = SimpleNamespace(
             replayed=False,
             settlement_id="settlement-1",
+            receipt_ref="c" * 64,
             transaction_id="transaction-1",
             current_after_hash="a" * 64,
             history_after_hash="b" * 64,
@@ -1110,10 +1179,341 @@ class ReceivableApiTest(unittest.TestCase):
         self.assertEqual(failed.status_code, 503)
         self.assertEqual(retry.status_code, 200)
         self.assertTrue(retry.json()["replayed"])
+        self.assertEqual(
+            retry.json()["receipt_ref"],
+            persistence.calculate_idempotency_key_hash(
+                "execute-operation-001"
+            ),
+        )
         current = persistence.load_current_receivables_read_only(
             self.paths.current_path
         ).dataframe
         self.assertEqual(current.iloc[0]["残高"], "0")
+
+    def test_prepare_registration_valid_single_row_returns_formal_handoff(self):
+        executed = self.post_execute()
+        self.assertEqual(executed.status_code, 200)
+        execution = executed.json()
+
+        response = self.post_prepare_registration(
+            execution["settlement_id"],
+            execution["receipt_ref"],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["settlement_id"], execution["settlement_id"])
+        self.assertEqual(body["receipt_ref"], execution["receipt_ref"])
+        self.assertEqual(body["settlement_date"], "2026-08-30")
+        self.assertEqual(body["customer_name"], "A商事")
+        self.assertEqual(body["row_count"], 1)
+        item = body["items"][0]
+        self.assertEqual(item["source_type"], "receivable_settlement")
+        self.assertEqual(
+            item["epson_capability"], {"status": "needs_template"}
+        )
+        self.assertEqual(
+            item["provenance"]["receipt_ref"], execution["receipt_ref"]
+        )
+        self.assertNotIn("epson_base_row", item)
+        self.assertNotIn("epson_preview_row", item)
+        self.assertNotIn("registration_id", item)
+        serialized = json.dumps(body, ensure_ascii=False)
+        for private in (
+            "idempotency_key", "receipt_path", "workspace", "marker",
+            "request_hash", "current_after_hash", "history_after_hash",
+        ):
+            self.assertNotIn(private, serialized)
+
+    def test_prepare_registration_multi_row_preserves_receipt_order(self):
+        rows = [
+            {
+                "借方科目": "普通預金",
+                "貸方科目": "未収運賃",
+                "貸方補助": "",
+                "部門": "営業部",
+                "金額": 600,
+                "摘要": "first",
+            },
+            {
+                "借方科目": "当座預金",
+                "貸方科目": "未収運賃",
+                "貸方補助": "",
+                "部門": "営業部",
+                "金額": 400,
+                "摘要": "second",
+            },
+        ]
+        settlement_id, receipt_ref, _ = self.save_handoff_receipt(rows)
+
+        response = self.post_prepare_registration(settlement_id, receipt_ref)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["row_count"], 2)
+        self.assertEqual(
+            [item["prepared_journal"]["summary"] for item in body["items"]],
+            ["first", "second"],
+        )
+        self.assertEqual(
+            [item["provenance"]["row_index"] for item in body["items"]],
+            [0, 1],
+        )
+        self.assertEqual(
+            [item["provenance"]["row_count"] for item in body["items"]],
+            [2, 2],
+        )
+
+    def test_prepare_registration_request_forbids_bad_ref_and_extra_fields(self):
+        for payload in (
+            {"receipt_ref": "A" * 64},
+            {"receipt_ref": "a" * 63},
+            {"receipt_ref": "a" * 64, "rows": []},
+        ):
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/receivables/settlements/s1/prepare-registration",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422)
+
+    def test_prepare_registration_missing_receipt_is_404(self):
+        response = self.post_prepare_registration("missing", "d" * 64)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {
+            "detail": "指定した未収消込receiptがありません。"
+        })
+
+    def test_prepare_registration_settlement_mismatch_is_409(self):
+        settlement_id, receipt_ref, _ = self.save_handoff_receipt([{
+            "借方科目": "普通預金",
+            "貸方科目": "未収運賃",
+            "貸方補助": "",
+            "部門": "営業部",
+            "金額": 1000,
+            "摘要": "入金",
+        }])
+
+        response = self.post_prepare_registration(
+            settlement_id + "-different",
+            receipt_ref,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {
+            "detail": "指定した消込IDとreceiptが一致しません。"
+        })
+
+    def test_prepare_registration_corrupt_receipt_is_503(self):
+        receipt_ref = "e" * 64
+        path = persistence.resolve_settlement_receipt_path(
+            self.directory,
+            receipt_ref,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{corrupt", encoding="utf-8")
+
+        response = self.post_prepare_registration("settlement", receipt_ref)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn(str(path), response.text)
+
+    def test_prepare_registration_readiness_pending_and_required_are_503(self):
+        settlement_id, receipt_ref, _ = self.save_handoff_receipt([{
+            "借方科目": "普通預金",
+            "貸方科目": "未収運賃",
+            "貸方補助": "",
+            "部門": "営業部",
+            "金額": 1000,
+            "摘要": "入金",
+        }])
+        paths = self.create_pending_transaction()
+
+        pending = self.post_prepare_registration(settlement_id, receipt_ref)
+
+        self.assertEqual(pending.status_code, 503)
+        self.assertEqual(pending.json(), {
+            "detail": "未収台帳の復旧確認が必要です。"
+        })
+
+        persistence.mark_transaction_recovery_required(
+            paths.marker_path,
+            "manual inspection",
+        )
+        required = self.post_prepare_registration(settlement_id, receipt_ref)
+        self.assertEqual(required.status_code, 503)
+        self.assertEqual(required.json(), {
+            "detail": "未収台帳の復旧確認が必要です。"
+        })
+
+    def test_prepare_registration_account_validation_failure_is_422(self):
+        executed = self.post_execute().json()
+        self.account_master_snapshot["accounts"] = [
+            account
+            for account in self.account_master_snapshot["accounts"]
+            if account["name"] != "未収運賃"
+        ]
+
+        response = self.post_prepare_registration(
+            executed["settlement_id"],
+            executed["receipt_ref"],
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {
+            "detail": "現在のマスターで通常仕訳を準備できません。"
+        })
+
+    def test_prepare_registration_sub_relation_failure_is_422(self):
+        settlement_id, receipt_ref, _ = self.save_handoff_receipt([{
+            "借方科目": "普通預金",
+            "貸方科目": "未収運賃",
+            "貸方補助": "A商事",
+            "部門": "営業部",
+            "金額": 1000,
+            "摘要": "入金",
+        }])
+        self.account_master_snapshot["sub_account_relations"] = [{
+            "account_code": "251",
+            "sub_code": "01",
+            "sub_name": "A商事",
+        }]
+
+        response = self.post_prepare_registration(settlement_id, receipt_ref)
+
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("items", response.json())
+
+    def test_prepare_registration_department_failure_is_422(self):
+        executed = self.post_execute().json()
+        self.account_master_snapshot["departments"] = []
+
+        response = self.post_prepare_registration(
+            executed["settlement_id"],
+            executed["receipt_ref"],
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("items", response.json())
+
+    def test_prepare_registration_is_all_or_none(self):
+        rows = [
+            {
+                "借方科目": "普通預金",
+                "貸方科目": "未収運賃",
+                "貸方補助": "",
+                "部門": "営業部",
+                "金額": 500,
+                "摘要": "valid",
+            },
+            {
+                "借方科目": "普通預金",
+                "貸方科目": "不存在",
+                "貸方補助": "",
+                "部門": "営業部",
+                "金額": 500,
+                "摘要": "invalid",
+            },
+        ]
+        settlement_id, receipt_ref, _ = self.save_handoff_receipt(rows)
+
+        response = self.post_prepare_registration(settlement_id, receipt_ref)
+
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("items", response.json())
+
+    def test_prepare_registration_is_read_only(self):
+        settlement_id, receipt_ref, receipt_path = self.save_handoff_receipt([{
+            "借方科目": "普通預金",
+            "貸方科目": "未収運賃",
+            "貸方補助": "",
+            "部門": "営業部",
+            "金額": 1000,
+            "摘要": "入金",
+        }])
+        tracked = (
+            self.paths.current_path,
+            self.paths.history_path,
+            receipt_path,
+        )
+        before = {path: path.read_bytes() for path in tracked}
+
+        response = self.post_prepare_registration(settlement_id, receipt_ref)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({path: path.read_bytes() for path in tracked}, before)
+        self.assertFalse((self.directory / ".transactions").exists())
+        receipt_files = [
+            path for path in (self.directory / ".settlements").rglob("*")
+            if path.is_file()
+        ]
+        self.assertEqual(receipt_files, [receipt_path])
+
+    def test_prepare_registration_maps_lock_and_unexpected_without_leaks(self):
+        cases = (
+            (
+                persistence.ReceivableLedgerLockTimeout("C:/secret/lock"),
+                423,
+                "未収台帳をほかの処理が使用中です。",
+            ),
+            (
+                receipt_service.ReceivableReceiptValidationError(
+                    "C:/secret/receipt"
+                ),
+                503,
+                "未収消込receiptを安全に読み込めません。",
+            ),
+            (
+                ReceivableRegistrationHandoffValidationError(
+                    "secret master value"
+                ),
+                422,
+                "現在のマスターで通常仕訳を準備できません。",
+            ),
+            (
+                RuntimeError("C:/secret/internal"),
+                500,
+                "通常仕訳の準備中にエラーが発生しました。",
+            ),
+        )
+        for error, status, detail in cases:
+            with self.subTest(error=type(error).__name__), patch.object(
+                receivable_api,
+                "build_receivable_registration_handoff_application_result",
+                side_effect=error,
+            ):
+                response = self.post_prepare_registration("s1", "f" * 64)
+            self.assertEqual(response.status_code, status)
+            self.assertEqual(response.json(), {"detail": detail})
+            self.assertNotIn("secret", response.text)
+
+    def test_prepare_registration_openapi_contract_is_private_and_strict(self):
+        schema = self.client.get("/openapi.json").json()
+        path = "/api/receivables/settlements/{settlement_id}/prepare-registration"
+        self.assertIn(path, schema["paths"])
+        operation = schema["paths"][path]["post"]
+        request_schema = schema["components"]["schemas"][
+            "ReceivableRegistrationHandoffRequest"
+        ]
+        self.assertFalse(request_schema["additionalProperties"])
+        self.assertEqual(request_schema["required"], ["receipt_ref"])
+        self.assertEqual(
+            request_schema["properties"]["receipt_ref"]["pattern"],
+            "^[0-9a-f]{64}$",
+        )
+        response_ref = operation["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        self.assertTrue(response_ref.endswith(
+            "/ReceivableRegistrationHandoffResponse"
+        ))
+        serialized = json.dumps(operation, ensure_ascii=False)
+        for private in (
+            "idempotency_key", "receipt_path", "workspace", "marker",
+            "epson_base_row", "epson_preview_row", "registration_id",
+        ):
+            self.assertNotIn(private, serialized)
 
 
 if __name__ == "__main__":

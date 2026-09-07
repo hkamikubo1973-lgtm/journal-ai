@@ -29,6 +29,7 @@ from receivable_persistence_service import (
     ReceivableLedgerSchemaError,
     ReceivableLedgerSettlementUnavailableError,
     ReceivableLedgerWriteError,
+    ReceivableSettlementReceiptNotFoundError,
     read_receivable_current_snapshot_when_ready,
 )
 from receivable_preview_application_service import (
@@ -40,6 +41,17 @@ from receivable_query_service import (
     ReceivableCustomerNotFoundError,
     build_receivable_customer_detail,
     build_receivable_summary,
+)
+from receivable_receipt_service import (
+    ReceivableReceiptReferenceError,
+    ReceivableReceiptSettlementConflictError,
+    ReceivableReceiptValidationError,
+)
+from receivable_registration_handoff_application_service import (
+    build_receivable_registration_handoff_application_result,
+)
+from receivable_registration_handoff_service import (
+    ReceivableRegistrationHandoffValidationError,
 )
 from receivable_preview_service import (
     DIFFERENCE_ACCOUNT_MODE,
@@ -231,11 +243,74 @@ class ReceivableExecutedSettlement(BaseModel):
 class ReceivableSettlementExecuteResponse(BaseModel):
     replayed: bool
     settlement_id: str
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
     transaction_id: str
     ledger_revision: str
     history_revision: str
     settlement: ReceivableExecutedSettlement
     message: str
+
+
+class ReceivableRegistrationHandoffRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReceivablePreparedJournal(BaseModel):
+    voucher_date: str = Field(pattern=r"^\d{8}$")
+    voucher_no: str
+    voucher_summary: str
+    debit_account_code: str
+    debit_account_name: str
+    debit_sub_code: str
+    debit_sub_name: str
+    debit_dept_code: str
+    debit_dept_name: str
+    credit_account_code: str
+    credit_account_name: str
+    credit_sub_code: str
+    credit_sub_name: str
+    credit_dept_code: str
+    credit_dept_name: str
+    amount: int
+    summary: str
+    source_debit_amount: str
+    source_credit_amount: str
+
+
+class ReceivableRegistrationProvenance(BaseModel):
+    settlement_id: str
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    row_index: int = Field(ge=0)
+    row_count: int = Field(ge=1)
+    settlement_row_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReceivableRegistrationPrintMetadata(BaseModel):
+    print_category: str
+
+
+class ReceivableRegistrationEpsonCapability(BaseModel):
+    status: Literal["needs_template"]
+
+
+class ReceivableRegistrationHandoffItem(BaseModel):
+    source_type: Literal["receivable_settlement"]
+    prepared_journal: ReceivablePreparedJournal
+    provenance: ReceivableRegistrationProvenance
+    print_metadata: ReceivableRegistrationPrintMetadata
+    print_warnings: list[str]
+    epson_capability: ReceivableRegistrationEpsonCapability
+
+
+class ReceivableRegistrationHandoffResponse(BaseModel):
+    settlement_id: str
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    settlement_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    customer_name: str
+    row_count: int = Field(ge=1)
+    items: list[ReceivableRegistrationHandoffItem]
 
 
 def get_receivables_directory() -> Path:
@@ -508,6 +583,70 @@ def _settlement_response(settlement: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post(
+    "/settlements/{settlement_id}/prepare-registration",
+    response_model=ReceivableRegistrationHandoffResponse,
+)
+def post_receivable_prepare_registration(
+    settlement_id: str,
+    request: ReceivableRegistrationHandoffRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+    journal_master_snapshot: dict[str, Any] = Depends(
+        get_receivable_account_master_snapshot
+    ),
+):
+    try:
+        return build_receivable_registration_handoff_application_result(
+            receivables_directory,
+            settlement_id=settlement_id,
+            receipt_ref=request.receipt_ref,
+            journal_master_snapshot=journal_master_snapshot,
+        )
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableSettlementReceiptNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="指定した未収消込receiptがありません。",
+        ) from error
+    except ReceivableReceiptSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="指定した消込IDとreceiptが一致しません。",
+        ) from error
+    except ReceivableReceiptReferenceError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="receipt_refの形式を確認してください。",
+        ) from error
+    except ReceivableReceiptValidationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収消込receiptを安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except ReceivableRegistrationHandoffValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="現在のマスターで通常仕訳を準備できません。",
+        ) from error
+    except Exception as error:
+        logger.exception(
+            "Unexpected error during receivable registration handoff"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="通常仕訳の準備中にエラーが発生しました。",
+        ) from error
+
+
+@router.post(
     "/execute-settlement",
     response_model=ReceivableSettlementExecuteResponse,
 )
@@ -535,6 +674,7 @@ def post_receivable_execute_settlement(
         return {
             "replayed": result.replayed,
             "settlement_id": result.settlement_id,
+            "receipt_ref": result.receipt_ref,
             "transaction_id": result.transaction_id,
             "ledger_revision": result.current_after_hash,
             "history_revision": result.history_after_hash,
