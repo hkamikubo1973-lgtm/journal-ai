@@ -207,6 +207,33 @@ def build_registration_id(
     return sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def build_epson_edit_values(
+    prepared_journal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the shared PreparedJournal overlay for an EPSON base row."""
+
+    return {
+        "伝票日付": prepared_journal["voucher_date"],
+        "伝票摘要": prepared_journal["voucher_summary"],
+        "借方部門": prepared_journal["debit_dept_code"],
+        "借方部門名": prepared_journal["debit_dept_name"],
+        "借方科目": prepared_journal["debit_account_code"],
+        "借方科目名": prepared_journal["debit_account_name"],
+        "借方補助": prepared_journal["debit_sub_code"],
+        "借方補助科目名": prepared_journal["debit_sub_name"],
+        "借方金額": str(prepared_journal["amount"]),
+        "貸方部門": prepared_journal["credit_dept_code"],
+        "貸方部門名": prepared_journal["credit_dept_name"],
+        "貸方科目": prepared_journal["credit_account_code"],
+        "貸方科目名": prepared_journal["credit_account_name"],
+        "貸方補助": prepared_journal["credit_sub_code"],
+        "貸方補助科目名": prepared_journal["credit_sub_name"],
+        "貸方金額": str(prepared_journal["amount"]),
+        "摘要": prepared_journal["summary"],
+        "証番号": prepared_journal["voucher_no"],
+    }
+
+
 def _items_by_code(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -460,26 +487,7 @@ def prepare_registration(payload: dict) -> dict:
     normalized["amount"] = amount
     prepared_journal = normalized
 
-    epson_edit_values = {
-        "伝票日付": voucher_date,
-        "伝票摘要": normalized["voucher_summary"],
-        "借方部門": normalized["debit_dept_code"],
-        "借方部門名": normalized["debit_dept_name"],
-        "借方科目": debit_account_code,
-        "借方科目名": normalized["debit_account_name"],
-        "借方補助": normalized["debit_sub_code"],
-        "借方補助科目名": normalized["debit_sub_name"],
-        "借方金額": str(amount),
-        "貸方部門": normalized["credit_dept_code"],
-        "貸方部門名": normalized["credit_dept_name"],
-        "貸方科目": credit_account_code,
-        "貸方科目名": normalized["credit_account_name"],
-        "貸方補助": normalized["credit_sub_code"],
-        "貸方補助科目名": normalized["credit_sub_name"],
-        "貸方金額": str(amount),
-        "摘要": normalized["summary"],
-        "証番号": normalized["voucher_no"],
-    }
+    epson_edit_values = build_epson_edit_values(prepared_journal)
     epson_preview_row = dict(epson_edit_values)
 
     if epson_base_row is None:
