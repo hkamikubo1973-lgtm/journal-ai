@@ -3,6 +3,7 @@ import type {
   ReceivableOptionsResponse,
   ReceivablePreviewRequest,
   ReceivablePreviewResponse,
+  ReceivableRegistrationHandoffResponse,
   ReceivableSettlementExecuteRequest,
   ReceivableSettlementExecuteResponse,
   ReceivableSummaryResponse,
@@ -91,6 +92,20 @@ export function executeReceivableSettlement(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+    },
+  );
+}
+
+export function prepareReceivableRegistration(
+  settlementId: string,
+  receiptRef: string,
+): Promise<ReceivableRegistrationHandoffResponse> {
+  return requestReceivable<ReceivableRegistrationHandoffResponse>(
+    `/api/receivables/settlements/${encodeURIComponent(settlementId)}/prepare-registration`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ receipt_ref: receiptRef }),
     },
   );
 }

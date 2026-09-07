@@ -149,9 +149,19 @@ export type ReceivableExecutedSettlement = {
 export type ReceivableSettlementExecuteResponse = {
   replayed: boolean;
   settlement_id: string;
+  receipt_ref: string;
   transaction_id: string;
   ledger_revision: string;
   history_revision: string;
   settlement: ReceivableExecutedSettlement;
   message: string;
+};
+
+export type ReceivableRegistrationHandoffResponse = {
+  settlement_id: string;
+  receipt_ref: string;
+  settlement_date: string;
+  customer_name: string;
+  row_count: number;
+  items: import("./journal").ReceivableRegistrationHandoffItem[];
 };

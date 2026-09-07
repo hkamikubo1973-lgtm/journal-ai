@@ -5,9 +5,14 @@ import {
   fetchReceivableDetail,
   fetchReceivableOptions,
   fetchReceivableSummary,
+  prepareReceivableRegistration,
   previewReceivableSettlement,
 } from "../../api/receivable";
-import type { JournalMastersResponse } from "../../types/journal";
+import type {
+  JournalMastersResponse,
+  ReceivableRegistrationHandoffItem,
+} from "../../types/journal";
+import type { RegistrationCartBatchResult } from "../../registrationCart";
 import type {
   ReceivableCustomerDetailResponse,
   ReceivableOptionsResponse,
@@ -24,6 +29,9 @@ type ReceivableWorkspaceProps = {
   mastersLoading: boolean;
   mastersError: string | null;
   onExecutionLockChange?: (locked: boolean) => void;
+  onRegistrationHandoff: (
+    items: ReceivableRegistrationHandoffItem[],
+  ) => RegistrationCartBatchResult;
 };
 
 type ExecutionCandidate = Omit<ReceivableSettlementExecuteRequest, "idempotency_key">;
@@ -37,7 +45,13 @@ type StoredPendingExecuteOperation = PendingExecuteOperation & {
   version: 1;
 };
 
+type PendingRegistrationHandoff = {
+  settlementId: string;
+  receiptRef: string;
+};
+
 const pendingExecuteStorageKey = "journal-ai.receivable.pending-execute.v1";
+const pendingHandoffStorageKey = "journal-ai.receivable.pending-registration-handoff.v1";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -116,6 +130,44 @@ function storePendingOperation(operation: PendingExecuteOperation): boolean {
   }
 }
 
+function restorePendingRegistrationHandoff(): PendingRegistrationHandoff | null {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(pendingHandoffStorageKey) ?? "null") as unknown;
+    if (!isRecord(value)
+      || typeof value.settlementId !== "string"
+      || !value.settlementId
+      || typeof value.receiptRef !== "string"
+      || !/^[0-9a-f]{64}$/.test(value.receiptRef)) {
+      window.sessionStorage.removeItem(pendingHandoffStorageKey);
+      return null;
+    }
+    return { settlementId: value.settlementId, receiptRef: value.receiptRef };
+  } catch {
+    try {
+      window.sessionStorage.removeItem(pendingHandoffStorageKey);
+    } catch {
+      // Storageが利用できない環境でも画面を壊さない。
+    }
+    return null;
+  }
+}
+
+function storePendingRegistrationHandoff(target: PendingRegistrationHandoff): void {
+  try {
+    window.sessionStorage.setItem(pendingHandoffStorageKey, JSON.stringify(target));
+  } catch {
+    // 現在の画面stateには保持されるため、handoff自体は継続できる。
+  }
+}
+
+function clearPendingRegistrationHandoff(): void {
+  try {
+    window.sessionStorage.removeItem(pendingHandoffStorageKey);
+  } catch {
+    // Storageが利用できない環境でも画面を壊さない。
+  }
+}
+
 const patternLabels: Record<ReceivablePreviewPattern, string> = {
   exact_match: "完全一致",
   partial_settlement: "部分消込",
@@ -167,6 +219,7 @@ export default function ReceivableWorkspace({
   mastersLoading,
   mastersError,
   onExecutionLockChange,
+  onRegistrationHandoff,
 }: ReceivableWorkspaceProps) {
   const [summary, setSummary] = useState<ReceivableSummaryResponse | null>(null);
   const [options, setOptions] = useState<ReceivableOptionsResponse | null>(null);
@@ -198,9 +251,14 @@ export default function ReceivableWorkspace({
   const [executeLoading, setExecuteLoading] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeSuccess, setExecuteSuccess] = useState<string | null>(null);
+  const [pendingRegistrationHandoff, setPendingRegistrationHandoff] = useState<PendingRegistrationHandoff | null>(restorePendingRegistrationHandoff);
+  const [handoffLoading, setHandoffLoading] = useState(false);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [handoffSuccess, setHandoffSuccess] = useState<string | null>(null);
   const detailRequestId = useRef(0);
   const previewRequestId = useRef(0);
   const executeInFlight = useRef(false);
+  const handoffInFlight = useRef(false);
 
   useEffect(() => {
     void refreshWorkspace(false);
@@ -492,6 +550,32 @@ export default function ReceivableWorkspace({
     if (accountName) void runPreview("difference_account", accountName);
   }
 
+  async function runRegistrationHandoff(target: PendingRegistrationHandoff): Promise<void> {
+    if (handoffInFlight.current) return;
+    handoffInFlight.current = true;
+    setHandoffLoading(true);
+    setHandoffError(null);
+    setHandoffSuccess(null);
+    try {
+      const response = await prepareReceivableRegistration(target.settlementId, target.receiptRef);
+      const result = onRegistrationHandoff(response.items);
+      if (result === "partial_duplicate") {
+        setHandoffError("同じ未収消込の仕訳が一部だけカートにあるため、全件追加を中止しました。カートから同じ消込をまとめて削除して再試行してください。");
+        return;
+      }
+      clearPendingRegistrationHandoff();
+      setPendingRegistrationHandoff(null);
+      setHandoffSuccess(result === "already_added"
+        ? "通常仕訳カートへ追加済みです。"
+        : `通常仕訳カートへ${response.items.length}件追加しました。`);
+    } catch (error) {
+      setHandoffError(`${errorMessage(error, "通常仕訳カートの候補を取得できませんでした。")} 未収消込は完了しています。消込を再実行せず、カート追加だけを再試行してください。`);
+    } finally {
+      handoffInFlight.current = false;
+      setHandoffLoading(false);
+    }
+  }
+
   async function runExecute(operation: PendingExecuteOperation): Promise<void> {
     if (executeInFlight.current) return;
     executeInFlight.current = true;
@@ -506,6 +590,13 @@ export default function ReceivableWorkspace({
       setRestoredPending(false);
       resetPreviewState();
       setExecuteSuccess(response.message || "未収消込が完了しました");
+      const handoffTarget = {
+        settlementId: response.settlement_id,
+        receiptRef: response.receipt_ref,
+      };
+      storePendingRegistrationHandoff(handoffTarget);
+      setPendingRegistrationHandoff(handoffTarget);
+      await runRegistrationHandoff(handoffTarget);
       await refreshLedgerAfterOperation(operation.requestBody.customer_name);
     } catch (error) {
       if (!(error instanceof ReceivableApiError)) {
@@ -582,6 +673,11 @@ export default function ReceivableWorkspace({
     void runExecute(pendingOperation);
   }
 
+  function retryRegistrationHandoff(): void {
+    if (!pendingRegistrationHandoff || handoffInFlight.current) return;
+    void runRegistrationHandoff(pendingRegistrationHandoff);
+  }
+
   const recommendationCodes = new Set(recommendations.map((item) => item.code));
   const showDifferenceAccount = mode === "difference_account"
     || differenceAccountRequired;
@@ -591,7 +687,8 @@ export default function ReceivableWorkspace({
     && executionCandidate
     && settlementAvailable
     && !executeLoading
-    && !pendingOperation,
+    && !pendingOperation
+    && !pendingRegistrationHandoff,
   );
   const executionLocked = executeLoading || pendingOperation !== null;
 
@@ -702,6 +799,16 @@ export default function ReceivableWorkspace({
         </p>}
         {executeSuccess && <p className="notice notice-success" role="status">{executeSuccess}</p>}
         {executeError && <p className="error-message" role="alert">{executeError}</p>}
+        {handoffSuccess && <p className="notice notice-success" role="status">{handoffSuccess}</p>}
+        {handoffError && <p className="error-message" role="alert">{handoffError}</p>}
+        {handoffLoading && <p className="receivable-loading" role="status">通常仕訳カートの候補を取得中…</p>}
+        {pendingRegistrationHandoff && !handoffLoading && <div className="receivable-retry-panel">
+          <div>
+            <strong>未収消込は完了しています。</strong>
+            <p>消込処理は再実行せず、通常仕訳カートへの追加だけを再試行します。</p>
+          </div>
+          <button type="button" onClick={retryRegistrationHandoff}>カート追加を再試行</button>
+        </div>}
         {pendingOperation && !executeLoading && <div className="receivable-retry-panel">
           <div>
             <strong>{restoredPending

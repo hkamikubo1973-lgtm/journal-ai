@@ -16,10 +16,17 @@ import type {
   JournalSearchResponse,
   PrepareRegistrationRequest,
   PrepareRegistrationResponse,
+  ReceivableRegistrationHandoffItem,
   RegistrationCartItem,
   SubAccountRelation,
 } from "./types/journal";
 import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
+import {
+  addReceivableSettlementToCart,
+  getRegistrationCartItemIdentity,
+  removeRegistrationCartGroup,
+  type RegistrationCartBatchResult,
+} from "./registrationCart";
 
 type Workspace = "journal" | "receivable";
 
@@ -238,8 +245,24 @@ function getPreviewValue(row: Record<string, unknown> | null | undefined, key: s
 
 function getCartAmount(item: RegistrationCartItem): number {
   if (Number.isFinite(item.prepared_journal.amount)) return item.prepared_journal.amount;
-  const previewAmount = parseAmount(getPreviewValue(item.epson_preview_row, "借方金額"));
+  const previewAmount = item.source_type === "searched_journal"
+    ? parseAmount(getPreviewValue(item.epson_preview_row, "借方金額"))
+    : null;
   return previewAmount ?? 0;
+}
+
+function getCartDebugView(items: RegistrationCartItem[]): unknown[] {
+  return items.map((item) => item.source_type === "searched_journal" ? {
+    ...item,
+    registration_id: shortId(item.registration_id),
+  } : {
+    ...item,
+    provenance: {
+      ...item.provenance,
+      receipt_ref: shortId(item.provenance.receipt_ref),
+      settlement_row_id: shortId(item.provenance.settlement_row_id),
+    },
+  });
 }
 
 function formatAmountNumber(value: number): string {
@@ -964,6 +987,7 @@ export default function App() {
       ) {
         const cartItem: RegistrationCartItem = {
           ...response,
+          source_type: "searched_journal",
           registration_id: response.registration_id,
           prepared_journal: response.prepared_journal,
           epson_preview_row: response.epson_preview_row,
@@ -972,12 +996,13 @@ export default function App() {
           print_warnings: response.print_warnings,
           addedAt: new Date().toISOString(),
         };
-        if (registrationCart.some((item) => item.registration_id === response.registration_id)) {
+        const identity = getRegistrationCartItemIdentity(cartItem);
+        if (registrationCart.some((item) => getRegistrationCartItemIdentity(item) === identity)) {
           setPrepareStatusMessage("同じ内容の登録予定仕訳が既にカートにあります。");
         } else {
           setPrepareStatusMessage("登録予定へ追加しました（画面上の確認のみ）。");
           setCartStatusMessage("登録予定仕訳をカートへ追加しました。");
-          setRegistrationCart((current) => current.some((item) => item.registration_id === response.registration_id)
+          setRegistrationCart((current) => current.some((item) => getRegistrationCartItemIdentity(item) === identity)
             ? current : [...current, cartItem]);
         }
       }
@@ -989,9 +1014,25 @@ export default function App() {
     }
   }
 
-  function removeCartItem(registrationId: string) {
-    setRegistrationCart((current) => current.filter((item) => item.registration_id !== registrationId));
-    setCartStatusMessage("登録予定仕訳をカートから削除しました。");
+  function addReceivableHandoffItems(items: ReceivableRegistrationHandoffItem[]): RegistrationCartBatchResult {
+    const batch = addReceivableSettlementToCart(registrationCart, items);
+    if (batch.result === "added") {
+      setRegistrationCart(batch.items);
+      setCartStatusMessage(`未収由来の登録予定仕訳を${items.length}件追加しました。`);
+    } else if (batch.result === "already_added") {
+      setCartStatusMessage("この未収消込の仕訳は追加済みです。");
+    } else {
+      setCartStatusMessage("この未収消込の仕訳が一部だけ追加済みのため、全件追加を中止しました。");
+    }
+    return batch.result;
+  }
+
+  function removeCartItem(identity: string) {
+    const target = registrationCart.find((item) => getRegistrationCartItemIdentity(item) === identity);
+    setRegistrationCart((current) => removeRegistrationCartGroup(current, identity));
+    setCartStatusMessage(target?.source_type === "receivable_settlement"
+      ? "同じ未収消込の登録予定仕訳をまとめてカートから削除しました。"
+      : "登録予定仕訳をカートから削除しました。");
   }
 
   function clearRegistrationCart() {
@@ -1000,13 +1041,13 @@ export default function App() {
   }
 
   async function handleEpsonCsvDownload() {
-    if (registrationCart.length === 0 || epsonDownloadLoading) return;
+    if (registrationCart.length === 0 || epsonDownloadLoading || registrationCart.some((item) => item.source_type === "receivable_settlement")) return;
 
     setEpsonDownloadLoading(true);
     setCartStatusMessage(null);
     try {
       const downloaded = await downloadEpsonCsv({
-        items: registrationCart.map((item) => ({
+        items: registrationCart.filter((item) => item.source_type === "searched_journal").map((item) => ({
           registration_id: item.registration_id,
           prepared_journal: item.prepared_journal,
           epson_base_row: item.epson_base_row,
@@ -1032,13 +1073,13 @@ export default function App() {
   }
 
   async function handleEpsonCsvSave() {
-    if (registrationCart.length === 0 || epsonSaveLoading) return;
+    if (registrationCart.length === 0 || epsonSaveLoading || registrationCart.some((item) => item.source_type === "receivable_settlement")) return;
 
     setEpsonSaveLoading(true);
     setCartStatusMessage(null);
     try {
       const response = await saveEpsonCsv({
-        items: registrationCart.map((item) => ({
+        items: registrationCart.filter((item) => item.source_type === "searched_journal").map((item) => ({
           registration_id: item.registration_id,
           prepared_journal: item.prepared_journal,
           epson_base_row: item.epson_base_row,
@@ -1059,13 +1100,17 @@ export default function App() {
     setCartStatusMessage(null);
     try {
       const downloaded = await downloadInputExcel({
-        items: registrationCart.map((item) => ({
+        items: registrationCart.map((item) => item.source_type === "searched_journal" ? {
+          source_type: item.source_type,
           registration_id: item.registration_id,
           prepared_journal: item.prepared_journal,
           epson_base_row: item.epson_base_row,
           print_metadata: item.print_metadata,
           print_warnings: item.print_warnings,
-        })),
+        } : {
+          source_type: item.source_type,
+          provenance: item.provenance,
+        }),
       });
       const objectUrl = URL.createObjectURL(downloaded.blob);
       try {
@@ -1093,13 +1138,17 @@ export default function App() {
     setCartStatusMessage(null);
     try {
       const response = await saveInputExcel({
-        items: registrationCart.map((item) => ({
+        items: registrationCart.map((item) => item.source_type === "searched_journal" ? {
+          source_type: item.source_type,
           registration_id: item.registration_id,
           prepared_journal: item.prepared_journal,
           epson_base_row: item.epson_base_row,
           print_metadata: item.print_metadata,
           print_warnings: item.print_warnings,
-        })),
+        } : {
+          source_type: item.source_type,
+          provenance: item.provenance,
+        }),
       });
       setCartStatusMessage(`${response.message} 保存先：${response.saved_path}`);
     } catch (caughtError) {
@@ -1117,6 +1166,7 @@ export default function App() {
   const editFormChanged = isEditFormChanged(editForm, initialEditForm);
   const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
   const cartTotalAmount = registrationCart.reduce((total, item) => total + getCartAmount(item), 0);
+  const cartHasReceivableSettlement = registrationCart.some((item) => item.source_type === "receivable_settlement");
   const masterCheckMessages = checkEditFormMasters(editForm, masters);
   const masterCheckCounts = {
     ok: masterCheckMessages.filter((message) => message.level === "ok").length,
@@ -1141,7 +1191,8 @@ export default function App() {
           </div>
         </header>
         <ReceivableWorkspace masters={masters} mastersLoading={mastersLoading} mastersError={mastersError}
-          onExecutionLockChange={setReceivableExecutionLocked} />
+          onExecutionLockChange={setReceivableExecutionLocked}
+          onRegistrationHandoff={addReceivableHandoffItems} />
       </main>
     );
   }
@@ -1371,11 +1422,11 @@ export default function App() {
             <p className="registration-panel-note">画面上の一時保持です。リロードすると消え、CSVダウンロードしても検索DBへは保存されません。</p>
             <div className="cart-actions">
               <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleEpsonCsvDownload}
-                disabled={registrationCart.length === 0 || epsonDownloadLoading}>
+                disabled={registrationCart.length === 0 || epsonDownloadLoading || cartHasReceivableSettlement}>
                 {epsonDownloadLoading ? "ダウンロード準備中…" : "EPSON CSVダウンロード"}
               </button>
               <button type="button" className="epson-save-button" data-cart-tab="" onClick={handleEpsonCsvSave}
-                disabled={registrationCart.length === 0 || epsonSaveLoading}>
+                disabled={registrationCart.length === 0 || epsonSaveLoading || cartHasReceivableSettlement}>
                 {epsonSaveLoading ? "保存・DB登録中…" : "保存先へ保存"}
               </button>
               <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleInputExcelDownload}
@@ -1390,13 +1441,25 @@ export default function App() {
             </div>
           </div>
           <p className="cart-save-note">保存先へ保存すると検索DBへ登録します。</p>
+          {cartHasReceivableSettlement && <p className="cart-save-note cart-source-warning" role="status">
+            未収由来仕訳のEPSON変換は未準備です。未収由来仕訳を含む間はEPSON出力を利用できません。
+          </p>}
           <p className="cart-save-note">入力用Excelは簡易仕訳帳・印刷用です。保存・ダウンロードしても検索DBには登録しません。</p>
           <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
           {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">
-            {registrationCart.map((item, index) => <article className="cart-item" key={item.registration_id}>
+            {registrationCart.map((item, index) => {
+              const identity = getRegistrationCartItemIdentity(item);
+              const displayId = item.source_type === "searched_journal"
+                ? item.registration_id
+                : item.provenance.settlement_row_id;
+              return <article className="cart-item" key={identity}>
               <div className="cart-item-header">
-                <div><span className="cart-number">No. {index + 1}</span><span className="cart-id" title={item.registration_id}>ID {shortId(item.registration_id)}</span></div>
-                <button type="button" className="remove-cart-button" onClick={() => removeCartItem(item.registration_id)}>カートから削除</button>
+                <div><span className="cart-number">No. {index + 1}</span><span className="cart-source-label">
+                  {item.source_type === "searched_journal" ? "検索仕訳" : "未収消込"}
+                </span><span className="cart-id">ID {shortId(displayId)}</span></div>
+                <button type="button" className="remove-cart-button" onClick={() => removeCartItem(identity)}>
+                  {item.source_type === "receivable_settlement" ? "この消込をまとめて削除" : "カートから削除"}
+                </button>
               </div>
               <div className="cart-item-main">
                 <div><span>伝票日付</span><strong>{item.prepared_journal.voucher_date || "-"}</strong></div>
@@ -1408,12 +1471,12 @@ export default function App() {
                 <div className="cart-item-amount"><span>金額</span><strong>{formatAmountNumber(getCartAmount(item))}</strong></div>
                 <div className="cart-item-summary"><span>摘要</span><p>{item.prepared_journal.summary || "-"}</p></div>
               </div>
-              <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
+              {item.source_type === "searched_journal" && <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
                 <div className="preview-table-wrap"><table className="preview-table"><tbody>
                   {epsonPreviewFields.map((field) => <tr key={field}><th>{field}</th><td>{getPreviewValue(item.epson_preview_row, field)}</td></tr>)}
                 </tbody></table></div>
-              </details>
-            </article>)}
+              </details>}
+            </article>})}
           </div>}
           <p className="clear-cart-note">画面上のカートだけを空にします。保存済みデータはありません。</p>
         </div>
@@ -1425,7 +1488,7 @@ export default function App() {
           <details><summary>APIレスポンスJSONを表示</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
           <details><summary>編集フォームstateを表示</summary><pre>{JSON.stringify(editForm, null, 2)}</pre></details>
           <details><summary>登録準備APIレスポンスを表示</summary><pre>{JSON.stringify(prepareResponse, null, 2)}</pre></details>
-          <details><summary>出力待ちカートJSONを表示</summary><pre>{JSON.stringify(registrationCart, null, 2)}</pre></details>
+          <details><summary>出力待ちカートJSONを表示</summary><pre>{JSON.stringify(getCartDebugView(registrationCart), null, 2)}</pre></details>
         </div>
       </details>
     </main>

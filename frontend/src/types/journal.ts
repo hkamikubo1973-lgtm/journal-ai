@@ -130,7 +130,7 @@ export type PrepareRegistrationResponse = {
   print_warnings: string[] | null;
 };
 
-export type RegistrationCartItem = Omit<
+export type SearchedJournalRegistrationCartItem = Omit<
   PrepareRegistrationResponse,
   | "registration_id"
   | "prepared_journal"
@@ -139,6 +139,7 @@ export type RegistrationCartItem = Omit<
   | "print_metadata"
   | "print_warnings"
 > & {
+  source_type: "searched_journal";
   registration_id: string;
   prepared_journal: PreparedJournal;
   epson_preview_row: EpsonPreviewRow;
@@ -147,6 +148,33 @@ export type RegistrationCartItem = Omit<
   print_warnings: string[];
   addedAt: string;
 };
+
+export type ReceivableSettlementProvenance = {
+  settlement_id: string;
+  receipt_ref: string;
+  row_index: number;
+  row_count: number;
+  settlement_row_id: string;
+};
+
+export type ReceivableRegistrationHandoffItem = {
+  source_type: "receivable_settlement";
+  prepared_journal: PreparedJournal;
+  provenance: ReceivableSettlementProvenance;
+  print_metadata: JournalPrintMetadata;
+  print_warnings: string[];
+  epson_capability: {
+    status: "needs_template";
+  };
+};
+
+export type ReceivableSettlementRegistrationCartItem = ReceivableRegistrationHandoffItem & {
+  addedAt: string;
+};
+
+export type RegistrationCartItem =
+  | SearchedJournalRegistrationCartItem
+  | ReceivableSettlementRegistrationCartItem;
 
 export type EpsonExportCsvRequest = {
   items: Array<{
@@ -170,11 +198,15 @@ export type EpsonSaveCsvResponse = {
 
 export type InputExcelRequest = {
   items: Array<{
+    source_type: "searched_journal";
     registration_id: string;
     prepared_journal: PreparedJournal;
     epson_base_row: EpsonBaseRow;
     print_metadata: JournalPrintMetadata;
     print_warnings: string[];
+  } | {
+    source_type: "receivable_settlement";
+    provenance: ReceivableSettlementProvenance;
   }>;
 };
 
