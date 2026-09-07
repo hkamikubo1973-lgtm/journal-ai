@@ -38,6 +38,7 @@ from input_excel_service import (  # noqa: E402
     build_input_excel_rows,
     build_input_journal_excel,
     export_input_excel,
+    validate_input_excel_items,
 )
 from journal_registration_service import (  # noqa: E402
     EDIT_FORM_FIELDS,
@@ -170,6 +171,26 @@ class InputExcelServiceTest(unittest.TestCase):
         with self.assertRaises(InputExcelValidationError):
             export_input_excel([item], export_datetime=FIXED_DATETIME)
 
+    def test_tampered_prepared_journal_is_rejected(self):
+        item = self._item("A")
+        item["prepared_journal"]["summary"] = "改ざん"
+
+        with self.assertRaisesRegex(
+            InputExcelValidationError,
+            "registration_idが内容と一致しません",
+        ):
+            validate_input_excel_items([item])
+
+    def test_tampered_epson_base_row_is_rejected_by_integrity(self):
+        item = self._item("A")
+        item["epson_base_row"]["入力アプリ"] = "改ざん"
+
+        with self.assertRaisesRegex(
+            InputExcelValidationError,
+            "registration_idが内容と一致しません",
+        ):
+            validate_input_excel_items([item])
+
     def test_missing_base_column_is_rejected(self):
         item = self._item("A")
         del item["epson_base_row"]["借方消費税コード"]
@@ -189,6 +210,16 @@ class InputExcelServiceTest(unittest.TestCase):
             with self.subTest(marker=item["prepared_journal"]["summary"]):
                 with self.assertRaises(InputExcelValidationError):
                     build_input_excel_rows([item])
+
+    def test_multiple_items_are_blocked_before_partial_workbook_generation(self):
+        items = [self._item("A"), self._item("B"), self._item("C")]
+        items[1]["registration_id"] = "tampered"
+
+        with patch("input_excel_service.build_input_journal_excel") as builder:
+            with self.assertRaises(InputExcelValidationError):
+                export_input_excel(items, export_datetime=FIXED_DATETIME)
+
+        builder.assert_not_called()
 
     def test_download_route_returns_raw_xlsx_and_filename(self):
         request = InputExcelRequest(items=[self._item("A")])
@@ -328,6 +359,12 @@ class InputExcelServiceTest(unittest.TestCase):
                 "transactions.csv",
             ):
                 self.assertNotIn(forbidden_name, source)
+
+    def test_input_excel_service_does_not_depend_on_epson_validator(self):
+        source = inspect.getsource(input_excel_service)
+
+        self.assertNotIn("validate_epson_export_items", source)
+        self.assertNotIn("journal_export_service", source)
 
     @staticmethod
     def _worksheet(content):

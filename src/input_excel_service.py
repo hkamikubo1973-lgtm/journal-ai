@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from hmac import compare_digest
 import io
 from typing import Any
 
@@ -22,9 +23,10 @@ from columns import (
     COL_DEBIT_SUB,
     COL_SUMMARY,
 )
-from journal_export_service import (
-    EpsonExportValidationError,
-    validate_epson_export_items,
+from journal_registration_service import (
+    EDIT_FORM_FIELDS,
+    build_registration_id,
+    extract_epson_source_row,
 )
 
 
@@ -306,28 +308,99 @@ def _validated_print_fields(
     return print_category, list(print_warnings)
 
 
-def build_input_excel_rows(
+def _validated_prepared_journal(
+    value: Any,
+    item_number: int,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise InputExcelValidationError(
+            f"{item_number}件目のprepared_journalがありません。"
+        )
+
+    missing_fields = [
+        field for field in EDIT_FORM_FIELDS if field not in value
+    ]
+    if missing_fields:
+        raise InputExcelValidationError(
+            f"{item_number}件目のprepared_journalに必要な項目が不足しています: "
+            + "、".join(missing_fields)
+        )
+
+    return {
+        field: value[field]
+        for field in EDIT_FORM_FIELDS
+    }
+
+
+def validate_input_excel_items(
     items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """検証済みカートを順序どおり12列の印刷行へ変換する。"""
+    """searched journalのintegrityと印刷項目を全件検証する。"""
 
     if not items:
         raise InputExcelValidationError(
             "入力用Excelの出力対象がありません。"
         )
 
-    try:
-        validate_epson_export_items(items)
-    except EpsonExportValidationError as error:
-        raise InputExcelValidationError(str(error)) from error
-
-    rows = []
+    validated_items: list[dict[str, Any]] = []
     for item_number, item in enumerate(items, start=1):
-        prepared = item["prepared_journal"]
+        if not isinstance(item, Mapping):
+            raise InputExcelValidationError(
+                f"{item_number}件目の登録予定が不正です。"
+            )
+
+        prepared_journal = _validated_prepared_journal(
+            item.get("prepared_journal"),
+            item_number,
+        )
+        epson_base_row, source_error = extract_epson_source_row(
+            item.get("epson_base_row")
+        )
+        if source_error or epson_base_row is None:
+            raise InputExcelValidationError(
+                f"{item_number}件目: {source_error or 'EPSON45列を確認できません。'}"
+            )
+
+        registration_id = item.get("registration_id")
+        if not isinstance(registration_id, str) or not registration_id:
+            raise InputExcelValidationError(
+                f"{item_number}件目のregistration_idがありません。"
+            )
+
+        expected_id = build_registration_id(
+            prepared_journal,
+            epson_base_row,
+        )
+        if not compare_digest(registration_id, expected_id):
+            raise InputExcelValidationError(
+                f"{item_number}件目のregistration_idが内容と一致しません。"
+            )
+
         print_category, print_warnings = _validated_print_fields(
             item,
             item_number,
         )
+        validated_items.append({
+            "prepared_journal": prepared_journal,
+            "print_category": print_category,
+            "print_warnings": print_warnings,
+        })
+
+    return validated_items
+
+
+def build_input_excel_rows(
+    items: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """検証済みカートを順序どおり12列の印刷行へ変換する。"""
+
+    validated_items = validate_input_excel_items(items)
+
+    rows = []
+    for item_number, item in enumerate(validated_items, start=1):
+        prepared = item["prepared_journal"]
+        print_category = item["print_category"]
+        print_warnings = item["print_warnings"]
         rows.append({
             "No": item_number,
             "伝票日付": prepared["voucher_date"],
