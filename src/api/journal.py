@@ -1,12 +1,21 @@
 """通常仕訳検索API。"""
 
+from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field, StrictStr
+from fastapi import Depends, FastAPI, HTTPException, Response
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
-from api.receivable import router as receivable_router
+from api.receivable import (
+    get_receivable_account_master_snapshot,
+    get_receivables_directory,
+    router as receivable_router,
+)
 from engine import load_data
+from input_excel_application_service import (
+    export_input_excel_application_result,
+    save_input_excel_application_result,
+)
 from input_excel_save_service import (
     InputExcelSaveError,
     save_input_excel,
@@ -23,6 +32,16 @@ from journal_master_service import load_journal_masters
 from journal_registration_service import prepare_registration
 from journal_save_service import EpsonSaveError, save_and_register_epson_csv
 from journal_search_service import search_journals
+from receivable_persistence_service import (
+    ReceivableLedgerLockTimeout,
+    ReceivableLedgerRecoveryRequired,
+    ReceivableSettlementReceiptNotFoundError,
+)
+from receivable_receipt_service import (
+    ReceivableReceiptReferenceError,
+    ReceivableReceiptSettlementConflictError,
+    ReceivableReceiptValidationError,
+)
 
 
 class JournalSearchRequest(BaseModel):
@@ -144,12 +163,34 @@ class InputExcelPrintMetadataRequest(BaseModel):
     print_category: StrictStr
 
 
-class InputExcelItemRequest(BaseModel):
+class SearchedJournalInputExcelItemRequest(BaseModel):
+    source_type: Literal["searched_journal"] = "searched_journal"
     registration_id: str
     prepared_journal: dict[str, Any]
     epson_base_row: dict[str, Any]
     print_metadata: InputExcelPrintMetadataRequest
     print_warnings: list[StrictStr]
+
+
+class ReceivableInputExcelProvenanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    settlement_id: str
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    row_index: int = Field(ge=0, strict=True)
+    row_count: int = Field(ge=1, strict=True)
+    settlement_row_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReceivableSettlementInputExcelItemRequest(BaseModel):
+    source_type: Literal["receivable_settlement"]
+    provenance: ReceivableInputExcelProvenanceRequest
+
+
+InputExcelItemRequest = (
+    SearchedJournalInputExcelItemRequest
+    | ReceivableSettlementInputExcelItemRequest
+)
 
 
 class InputExcelRequest(BaseModel):
@@ -367,10 +408,50 @@ def post_save_epson_csv(request: EpsonExportCsvRequest):
 
 
 @app.post("/api/journal/export-input-excel")
-def post_export_input_excel(request: InputExcelRequest):
+def post_export_input_excel(
+    request: InputExcelRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+    journal_master_snapshot: dict[str, Any] = Depends(
+        get_receivable_account_master_snapshot
+    ),
+):
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     try:
-        result = export_input_excel(payload["items"])
+        result = export_input_excel_application_result(
+            payload["items"],
+            receivables_directory=receivables_directory,
+            journal_master_snapshot=journal_master_snapshot,
+        )
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableSettlementReceiptNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="指定した未収消込receiptがありません。",
+        ) from error
+    except ReceivableReceiptSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="指定した消込IDとreceiptが一致しません。",
+        ) from error
+    except ReceivableReceiptReferenceError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="receipt_refの形式を確認してください。",
+        ) from error
+    except ReceivableReceiptValidationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収消込receiptを安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
     except InputExcelValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
@@ -397,10 +478,50 @@ def post_export_input_excel(request: InputExcelRequest):
     "/api/journal/save-input-excel",
     response_model=InputExcelSaveResponse,
 )
-def post_save_input_excel(request: InputExcelRequest):
+def post_save_input_excel(
+    request: InputExcelRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+    journal_master_snapshot: dict[str, Any] = Depends(
+        get_receivable_account_master_snapshot
+    ),
+):
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     try:
-        result = save_input_excel(payload["items"])
+        result = save_input_excel_application_result(
+            payload["items"],
+            receivables_directory=receivables_directory,
+            journal_master_snapshot=journal_master_snapshot,
+        )
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableSettlementReceiptNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="指定した未収消込receiptがありません。",
+        ) from error
+    except ReceivableReceiptSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="指定した消込IDとreceiptが一致しません。",
+        ) from error
+    except ReceivableReceiptReferenceError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="receipt_refの形式を確認してください。",
+        ) from error
+    except ReceivableReceiptValidationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収消込receiptを安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
     except InputExcelValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except InputExcelSaveError as error:

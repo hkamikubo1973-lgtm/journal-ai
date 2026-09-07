@@ -228,8 +228,15 @@ class InputExcelServiceTest(unittest.TestCase):
             filename="input_journal_print_20260821_1234.xlsx",
         )
 
-        with patch("api.journal.export_input_excel", return_value=expected):
-            response = post_export_input_excel(request)
+        with patch(
+            "api.journal.export_input_excel_application_result",
+            return_value=expected,
+        ):
+            response = post_export_input_excel(
+                request,
+                receivables_directory=Path("unused"),
+                journal_master_snapshot={},
+            )
 
         self.assertEqual(response.body, expected.content)
         self.assertEqual(
@@ -248,7 +255,11 @@ class InputExcelServiceTest(unittest.TestCase):
                 for route in (post_export_input_excel, post_save_input_excel):
                     with self.subTest(route=route.__name__):
                         with self.assertRaises(HTTPException) as raised:
-                            route(request)
+                            route(
+                                request,
+                                receivables_directory=Path("unused"),
+                                journal_master_snapshot={},
+                            )
                         self.assertEqual(raised.exception.status_code, 422)
 
     def test_save_creates_02_subdir_and_writes_download_bytes(self):
@@ -309,8 +320,15 @@ class InputExcelServiceTest(unittest.TestCase):
             message="入力用Excelを保存しました。検索DBは更新していません。",
         )
 
-        with patch("api.journal.save_input_excel", return_value=expected):
-            response = post_save_input_excel(request)
+        with patch(
+            "api.journal.save_input_excel_application_result",
+            return_value=expected,
+        ):
+            response = post_save_input_excel(
+                request,
+                receivables_directory=Path("unused"),
+                journal_master_snapshot={},
+            )
 
         self.assertEqual(response, expected.to_dict())
 

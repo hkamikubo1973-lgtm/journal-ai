@@ -396,6 +396,14 @@ def build_input_excel_rows(
 
     validated_items = validate_input_excel_items(items)
 
+    return build_input_excel_rows_from_validated_items(validated_items)
+
+
+def build_input_excel_rows_from_validated_items(
+    validated_items: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """信頼境界で検証済みの印刷項目を順序どおり12列へ変換する。"""
+
     rows = []
     for item_number, item in enumerate(validated_items, start=1):
         prepared = item["prepared_journal"]
@@ -431,14 +439,14 @@ def build_input_excel_rows(
     return rows
 
 
-def export_input_excel(
-    items: Sequence[Mapping[str, Any]],
+def export_validated_input_excel(
+    validated_items: Sequence[Mapping[str, Any]],
     *,
     export_datetime: datetime | None = None,
 ) -> InputExcelExport:
-    """カートを検証し、保存やDB更新をせずxlsx bytesを返す。"""
+    """application層で全件検証済みの項目からxlsx bytesを返す。"""
 
-    rows = build_input_excel_rows(items)
+    rows = build_input_excel_rows_from_validated_items(validated_items)
     content = build_input_journal_excel(rows)
     current_datetime = export_datetime or datetime.now()
     filename = (
@@ -449,4 +457,18 @@ def export_input_excel(
         content=content,
         filename=filename,
         rows=tuple(rows),
+    )
+
+
+def export_input_excel(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    export_datetime: datetime | None = None,
+) -> InputExcelExport:
+    """カートを検証し、保存やDB更新をせずxlsx bytesを返す。"""
+
+    validated_items = validate_input_excel_items(items)
+    return export_validated_input_excel(
+        validated_items,
+        export_datetime=export_datetime,
     )
