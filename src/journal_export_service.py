@@ -102,8 +102,13 @@ def validate_epson_export_items(
     return validated_rows
 
 
-def _load_export_context() -> tuple[dict[str, str], dict[str, str], str]:
-    masters = load_journal_masters()
+def _load_export_context(
+    journal_master_snapshot: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, str], dict[str, str], str]:
+    masters = (
+        load_journal_masters()
+        if journal_master_snapshot is None else journal_master_snapshot
+    )
     account_master = {
         str(item.get("name", "")).strip(): str(item.get("code", "")).strip()
         for item in masters.get("accounts", [])
@@ -130,13 +135,17 @@ def export_epson_csv(
     machine_name: str | None = None,
     user_name: str | None = None,
     input_date: str | None = None,
+    journal_master_snapshot: Mapping[str, Any] | None = None,
 ) -> EpsonCsvExport:
     """登録予定を全件検証し、保存やDB更新をせずCSV bytesを返す。"""
 
     epson_base_rows = validate_epson_export_items(items)
 
     if account_master is None or sub_master is None or company_name is None:
-        loaded_accounts, loaded_subs, loaded_company = _load_export_context()
+        loaded_accounts, loaded_subs, loaded_company = (
+            _load_export_context() if journal_master_snapshot is None
+            else _load_export_context(journal_master_snapshot)
+        )
         if account_master is None:
             account_master = loaded_accounts
         if sub_master is None:

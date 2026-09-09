@@ -12,6 +12,11 @@ from api.receivable import (
     router as receivable_router,
 )
 from engine import load_data
+from epson_export_application_service import (
+    EpsonExportApplicationValidationError,
+    export_epson_csv_application_result,
+    save_epson_csv_application_result,
+)
 from input_excel_application_service import (
     export_input_excel_application_result,
     save_input_excel_application_result,
@@ -36,6 +41,13 @@ from receivable_persistence_service import (
     ReceivableLedgerLockTimeout,
     ReceivableLedgerRecoveryRequired,
     ReceivableSettlementReceiptNotFoundError,
+)
+from receivable_epson_materialization_service import (
+    PREPARED_JOURNAL_INVALID,
+    TEMPLATE_AMBIGUOUS,
+    TEMPLATE_INVALID,
+    TEMPLATE_NOT_FOUND,
+    ReceivableEpsonMaterializationError,
 )
 from receivable_receipt_service import (
     ReceivableReceiptReferenceError,
@@ -138,13 +150,34 @@ class PrepareRegistrationResponse(BaseModel):
 
 
 class EpsonExportItemRequest(BaseModel):
+    source_type: Literal["searched_journal"] = "searched_journal"
     registration_id: str
     prepared_journal: dict[str, Any]
     epson_base_row: dict[str, Any]
 
 
+class ReceivableEpsonProvenanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    settlement_id: str
+    receipt_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    row_index: int = Field(ge=0, strict=True)
+    row_count: int = Field(ge=1, strict=True)
+    settlement_row_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReceivableSettlementEpsonExportItemRequest(BaseModel):
+    source_type: Literal["receivable_settlement"]
+    provenance: ReceivableEpsonProvenanceRequest
+
+
+EpsonExportUnionItemRequest = (
+    EpsonExportItemRequest | ReceivableSettlementEpsonExportItemRequest
+)
+
+
 class EpsonExportCsvRequest(BaseModel):
-    items: list[EpsonExportItemRequest]
+    items: list[EpsonExportUnionItemRequest]
 
 
 class EpsonSaveCsvResponse(BaseModel):
@@ -353,11 +386,81 @@ def post_prepare_registration(request: PrepareRegistrationRequest):
     return prepare_registration(payload)
 
 
+_EPSON_MATERIALIZATION_MESSAGES = {
+    TEMPLATE_NOT_FOUND: "一致するEPSON templateがありません。",
+    TEMPLATE_AMBIGUOUS: "一致するEPSON templateを一意に決定できません。",
+    TEMPLATE_INVALID: "EPSON templateの45列データが不正です。",
+    PREPARED_JOURNAL_INVALID: "未収仕訳をEPSON出力用に準備できません。",
+}
+
+
+def _epson_materialization_detail(
+    error: ReceivableEpsonMaterializationError,
+) -> dict[str, str]:
+    return {
+        "code": error.reason_code,
+        "message": _EPSON_MATERIALIZATION_MESSAGES.get(
+            error.reason_code,
+            "未収仕訳のEPSON templateを解決できません。",
+        ),
+    }
+
+
 @app.post("/api/journal/export-epson-csv")
-def post_export_epson_csv(request: EpsonExportCsvRequest):
+def post_export_epson_csv(
+    request: EpsonExportCsvRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     try:
-        result = export_epson_csv(payload["items"])
+        result = export_epson_csv_application_result(
+            payload["items"],
+            receivables_directory=receivables_directory,
+            export_builder=export_epson_csv,
+        )
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableSettlementReceiptNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="指定した未収消込receiptがありません。",
+        ) from error
+    except ReceivableReceiptSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="指定した消込IDとreceiptが一致しません。",
+        ) from error
+    except ReceivableReceiptReferenceError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="receipt_refの形式を確認してください。",
+        ) from error
+    except ReceivableReceiptValidationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収消込receiptを安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except ReceivableEpsonMaterializationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=_epson_materialization_detail(error),
+        ) from error
+    except EpsonExportApplicationValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": error.reason_code,
+                "message": str(error),
+            },
+        ) from error
     except EpsonExportValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except UnicodeEncodeError as error:
@@ -386,10 +489,60 @@ def post_export_epson_csv(request: EpsonExportCsvRequest):
     "/api/journal/save-epson-csv",
     response_model=EpsonSaveCsvResponse,
 )
-def post_save_epson_csv(request: EpsonExportCsvRequest):
+def post_save_epson_csv(
+    request: EpsonExportCsvRequest,
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     try:
-        result = save_and_register_epson_csv(payload["items"])
+        result = save_epson_csv_application_result(
+            payload["items"],
+            receivables_directory=receivables_directory,
+            save_builder=save_and_register_epson_csv,
+        )
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。",
+        ) from error
+    except ReceivableSettlementReceiptNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="指定した未収消込receiptがありません。",
+        ) from error
+    except ReceivableReceiptSettlementConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="指定した消込IDとreceiptが一致しません。",
+        ) from error
+    except ReceivableReceiptReferenceError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="receipt_refの形式を確認してください。",
+        ) from error
+    except ReceivableReceiptValidationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収消込receiptを安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except ReceivableEpsonMaterializationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=_epson_materialization_detail(error),
+        ) from error
+    except EpsonExportApplicationValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": error.reason_code,
+                "message": str(error),
+            },
+        ) from error
     except EpsonExportValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except UnicodeEncodeError as error:
@@ -398,13 +551,19 @@ def post_save_epson_csv(request: EpsonExportCsvRequest):
             detail="EPSON CSVをCP932へ変換できない文字が含まれています。",
         ) from error
     except EpsonSaveError as error:
-        raise HTTPException(status_code=500, detail=str(error)) from error
+        raise HTTPException(
+            status_code=500,
+            detail="EPSON CSVの保存処理に失敗しました。検索DBを確認してください。",
+        ) from error
     except Exception as error:
         raise HTTPException(
             status_code=500,
             detail="EPSON CSVの正式保存処理に失敗しました。検索DBを確認してください。",
         ) from error
-    return result.to_dict()
+    response = result.to_dict()
+    if result.partial_failure:
+        response["message"] = "EPSON CSVは保存しましたが、検索DB登録に失敗しました。検索DBを確認してください。"
+    return response
 
 
 @app.post("/api/journal/export-input-excel")

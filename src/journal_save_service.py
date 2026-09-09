@@ -54,6 +54,7 @@ def save_and_register_epson_csv(
     csv_saver: Callable[..., Path] | None = None,
     duplicate_checker: Callable[..., bool] | None = None,
     db_registrar: Callable[..., tuple[bool, int | str]] | None = None,
+    journal_master_snapshot: Mapping[str, Any] | None = None,
 ) -> EpsonSaveResult:
     """全件検証・CSV保存成功後にだけ、base rowを検索DBへ登録する。"""
 
@@ -62,7 +63,10 @@ def save_and_register_epson_csv(
     checker = duplicate_checker or is_normal_journal_batch_in_transactions
     registrar = db_registrar or register_epson_rows_to_search_db
 
-    generated = builder(items)
+    generated = (
+        builder(items) if journal_master_snapshot is None
+        else builder(items, journal_master_snapshot=journal_master_snapshot)
+    )
     epson_base_rows = [dict(row) for row in generated.epson_base_rows]
     if not epson_base_rows:
         raise EpsonSaveError(
