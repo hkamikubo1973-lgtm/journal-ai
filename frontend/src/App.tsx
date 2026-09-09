@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import {
+  buildEpsonExportRequest,
   downloadEpsonCsv,
   downloadInputExcel,
   fetchJournalMasters,
@@ -1041,18 +1042,12 @@ export default function App() {
   }
 
   async function handleEpsonCsvDownload() {
-    if (registrationCart.length === 0 || epsonDownloadLoading || registrationCart.some((item) => item.source_type === "receivable_settlement")) return;
+    if (registrationCart.length === 0 || epsonDownloadLoading) return;
 
     setEpsonDownloadLoading(true);
     setCartStatusMessage(null);
     try {
-      const downloaded = await downloadEpsonCsv({
-        items: registrationCart.filter((item) => item.source_type === "searched_journal").map((item) => ({
-          registration_id: item.registration_id,
-          prepared_journal: item.prepared_journal,
-          epson_base_row: item.epson_base_row,
-        })),
-      });
+      const downloaded = await downloadEpsonCsv(buildEpsonExportRequest(registrationCart));
       const objectUrl = URL.createObjectURL(downloaded.blob);
       try {
         const link = document.createElement("a");
@@ -1073,18 +1068,12 @@ export default function App() {
   }
 
   async function handleEpsonCsvSave() {
-    if (registrationCart.length === 0 || epsonSaveLoading || registrationCart.some((item) => item.source_type === "receivable_settlement")) return;
+    if (registrationCart.length === 0 || epsonSaveLoading) return;
 
     setEpsonSaveLoading(true);
     setCartStatusMessage(null);
     try {
-      const response = await saveEpsonCsv({
-        items: registrationCart.filter((item) => item.source_type === "searched_journal").map((item) => ({
-          registration_id: item.registration_id,
-          prepared_journal: item.prepared_journal,
-          epson_base_row: item.epson_base_row,
-        })),
-      });
+      const response = await saveEpsonCsv(buildEpsonExportRequest(registrationCart));
       setCartStatusMessage(`${response.message} 保存先：${response.save_path}`);
     } catch (caughtError) {
       setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "EPSON CSVを正式保存できませんでした。検索DBは更新していません。");
@@ -1166,7 +1155,6 @@ export default function App() {
   const editFormChanged = isEditFormChanged(editForm, initialEditForm);
   const selectedSummary = selectedCandidate ? getCandidateSummary(selectedCandidate) : null;
   const cartTotalAmount = registrationCart.reduce((total, item) => total + getCartAmount(item), 0);
-  const cartHasReceivableSettlement = registrationCart.some((item) => item.source_type === "receivable_settlement");
   const masterCheckMessages = checkEditFormMasters(editForm, masters);
   const masterCheckCounts = {
     ok: masterCheckMessages.filter((message) => message.level === "ok").length,
@@ -1422,11 +1410,11 @@ export default function App() {
             <p className="registration-panel-note">画面上の一時保持です。リロードすると消え、CSVダウンロードしても検索DBへは保存されません。</p>
             <div className="cart-actions">
               <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleEpsonCsvDownload}
-                disabled={registrationCart.length === 0 || epsonDownloadLoading || cartHasReceivableSettlement}>
+                disabled={registrationCart.length === 0 || epsonDownloadLoading}>
                 {epsonDownloadLoading ? "ダウンロード準備中…" : "EPSON CSVダウンロード"}
               </button>
               <button type="button" className="epson-save-button" data-cart-tab="" onClick={handleEpsonCsvSave}
-                disabled={registrationCart.length === 0 || epsonSaveLoading || cartHasReceivableSettlement}>
+                disabled={registrationCart.length === 0 || epsonSaveLoading}>
                 {epsonSaveLoading ? "保存・DB登録中…" : "保存先へ保存"}
               </button>
               <button type="button" className="epson-download-button" data-cart-tab="" onClick={handleInputExcelDownload}
@@ -1441,9 +1429,6 @@ export default function App() {
             </div>
           </div>
           <p className="cart-save-note">保存先へ保存すると検索DBへ登録します。</p>
-          {cartHasReceivableSettlement && <p className="cart-save-note cart-source-warning" role="status">
-            未収由来仕訳のEPSON変換は未準備です。未収由来仕訳を含む間はEPSON出力を利用できません。
-          </p>}
           <p className="cart-save-note">入力用Excelは簡易仕訳帳・印刷用です。保存・ダウンロードしても検索DBには登録しません。</p>
           <p className="cart-total-note">合計金額は画面表示用の単純合計であり、会計ロジックではありません。</p>
           {registrationCart.length === 0 ? <p className="cart-empty">登録予定はまだありません。</p> : <div className="cart-list">

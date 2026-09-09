@@ -178,9 +178,13 @@ export type RegistrationCartItem =
 
 export type EpsonExportCsvRequest = {
   items: Array<{
+    source_type?: "searched_journal";
     registration_id: string;
     prepared_journal: PreparedJournal;
     epson_base_row: EpsonBaseRow;
+  } | {
+    source_type: "receivable_settlement";
+    provenance: ReceivableSettlementProvenance;
   }>;
 };
 
