@@ -12,6 +12,7 @@ from api.receivable import (
     router as receivable_router,
 )
 from engine import load_data
+from api.journal_import import router as journal_import_router
 from epson_export_application_service import (
     EpsonExportApplicationValidationError,
     export_epson_csv_application_result,
@@ -329,6 +330,7 @@ class JournalMastersResponse(BaseModel):
 
 
 app = FastAPI(title="journal-ai API")
+app.include_router(journal_import_router)
 app.include_router(receivable_router)
 
 

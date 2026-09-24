@@ -544,3 +544,13 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   align-items: flex-start;
   gap: .5rem;
 }
+.journal-import { min-width: 0; margin-top: 12px; overflow-wrap: anywhere; }
+.left-pane:has(.journal-import[open]) { grid-template-rows: minmax(0, 1fr) minmax(150px, 1fr); }
+.search-panel:has(.journal-import) { min-width: 0; }
+.search-panel:has(.journal-import[open]) { overflow-y: auto; }
+.journal-import input[type="file"] { display: block; width: 100%; min-width: 0; max-width: 100%; overflow: hidden; }
+.journal-import-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.journal-import-summary dd { margin: 0; }
+.journal-import-table { max-width: 100%; max-height: 280px; overflow: auto; margin: 8px 0; }
+.journal-import-table table { border-collapse: collapse; width: max-content; min-width: 100%; }
+.journal-import-table th, .journal-import-table td { padding: 6px; border-bottom: 1px solid #ddd; text-align: left; max-width: 240px; overflow-wrap: anywhere; }

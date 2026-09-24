@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import JournalImport from "./components/JournalImport";
 import {
   buildEpsonExportRequest,
   downloadEpsonCsv,
@@ -1235,6 +1236,7 @@ export default function App() {
             </details>
             {error && <p className="error-message">{error}</p>}
             {statusMessage && <p className="status-message">{statusMessage}</p>}
+            <JournalImport />
           </div>
 
           <div className="candidate-panel" aria-live="polite">
