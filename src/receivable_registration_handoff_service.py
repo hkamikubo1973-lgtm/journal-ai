@@ -74,42 +74,16 @@ def _build_name_code_index(
     }
 
 
-def _build_sub_account_indexes(
+def _build_sub_account_index(
     snapshot: Any,
-) -> tuple[
-    dict[tuple[str, str], frozenset[str]],
-    dict[str, frozenset[str]],
-]:
-    codes_by_parent_and_name: dict[tuple[str, str], set[str]] = {}
-    parents_by_name: dict[str, set[str]] = {}
-    for row in _snapshot_rows(
-        snapshot,
-        collection_key="sub_account_relations",
-        label="sub-account relation",
-    ):
-        account_code = _text(row.get("account_code"))
-        sub_code = _text(row.get("sub_code"))
-        sub_name = _text(row.get("sub_name"))
-        if not account_code or not sub_code or not sub_name:
-            raise ReceivableRegistrationHandoffValidationError(
-                "sub-account relation row requires account_code, sub_code, "
-                "and sub_name"
-            )
-        codes_by_parent_and_name.setdefault(
-            (account_code, sub_name), set()
-        ).add(sub_code)
-        parents_by_name.setdefault(sub_name, set()).add(account_code)
-
-    return (
-        {
-            key: frozenset(codes)
-            for key, codes in codes_by_parent_and_name.items()
-        },
-        {
-            name: frozenset(parent_codes)
-            for name, parent_codes in parents_by_name.items()
-        },
-    )
+) -> dict[str, str]:
+    """Match Streamlit's SUB_MASTER name lookup, including last-row wins."""
+    return {
+        str(row["name"]): str(row["code"])
+        for row in _snapshot_rows(
+            snapshot, collection_key="sub_accounts", label="sub-account master",
+        )
+    }
 
 
 def _resolve_account(
@@ -159,35 +133,12 @@ def _resolve_department(
 
 
 def _resolve_credit_sub_account(
-    codes_by_parent_and_name: Mapping[
-        tuple[str, str], frozenset[str]
-    ],
-    parents_by_name: Mapping[str, frozenset[str]],
+    codes_by_name: Mapping[str, str],
     value: Any,
-    *,
-    credit_account_code: str,
-    row_number: int,
 ) -> dict[str, str]:
-    name = _text(value)
-    if not name:
-        return {"code": "", "name": ""}
-
-    codes = codes_by_parent_and_name.get(
-        (credit_account_code, name), frozenset()
-    )
-    if len(codes) == 1:
-        return {"code": next(iter(codes)), "name": name}
-    if len(codes) > 1:
-        reason = f"is ambiguous for account {credit_account_code}: {name}"
-    elif name in parents_by_name:
-        reason = (
-            f"does not belong to account {credit_account_code}: {name}"
-        )
-    else:
-        reason = f"does not exist in the relation master: {name}"
-    raise ReceivableRegistrationHandoffValidationError(
-        f"row {row_number} credit sub-account {reason}"
-    )
+    name = str(value or "")
+    code = codes_by_name.get(name, "") if name else ""
+    return {"code": code, "name": name if code else ""}
 
 
 def build_settlement_row_id(
@@ -223,10 +174,7 @@ def _build_handoff_item(
     receipt_ref: str,
     account_codes_by_name: Mapping[str, frozenset[str]],
     department_codes_by_name: Mapping[str, frozenset[str]],
-    sub_codes_by_parent_and_name: Mapping[
-        tuple[str, str], frozenset[str]
-    ],
-    sub_parents_by_name: Mapping[str, frozenset[str]],
+    sub_codes_by_name: Mapping[str, str],
 ) -> dict[str, Any]:
     row_number = row_index + 1
     required_fields = {
@@ -263,11 +211,8 @@ def _build_handoff_item(
         side="credit",
     )
     credit_sub = _resolve_credit_sub_account(
-        sub_codes_by_parent_and_name,
-        sub_parents_by_name,
+        sub_codes_by_name,
         row.get("貸方補助"),
-        credit_account_code=credit_account["code"],
-        row_number=row_number,
     )
     credit_department = _resolve_department(
         department_codes_by_name,
@@ -320,7 +265,7 @@ def build_receivable_registration_handoff_items(
     settlement: Mapping[str, Any],
     receipt_ref: str,
     account_master_snapshot: Any,
-    sub_account_relation_snapshot: Any,
+    sub_account_master_snapshot: Any,
     department_master_snapshot: Any,
 ) -> list[dict[str, Any]]:
     """Convert every receipt row in order, returning only after all validate."""
@@ -376,10 +321,7 @@ def build_receivable_registration_handoff_items(
         collection_key="departments",
         label="department master",
     )
-    (
-        sub_codes_by_parent_and_name,
-        sub_parents_by_name,
-    ) = _build_sub_account_indexes(sub_account_relation_snapshot)
+    sub_codes_by_name = _build_sub_account_index(sub_account_master_snapshot)
 
     row_count = len(rows)
     items = [
@@ -392,8 +334,7 @@ def build_receivable_registration_handoff_items(
             receipt_ref=receipt_ref,
             account_codes_by_name=account_codes_by_name,
             department_codes_by_name=department_codes_by_name,
-            sub_codes_by_parent_and_name=sub_codes_by_parent_and_name,
-            sub_parents_by_name=sub_parents_by_name,
+            sub_codes_by_name=sub_codes_by_name,
         )
         for row_index, row in enumerate(rows)
     ]

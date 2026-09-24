@@ -33,6 +33,10 @@ class ReceivableRegistrationHandoffServiceTest(unittest.TestCase):
             ]
         }
         self.relations = {
+            "sub_accounts": [
+                {"code": "01", "name": "A商事"},
+                {"code": "02", "name": "B商事"},
+            ],
             "sub_account_relations": [
                 {
                     "account_code": "200",
@@ -71,7 +75,7 @@ class ReceivableRegistrationHandoffServiceTest(unittest.TestCase):
             "settlement": self.settlement,
             "receipt_ref": self.receipt_ref,
             "account_master_snapshot": self.accounts,
-            "sub_account_relation_snapshot": self.relations,
+            "sub_account_master_snapshot": self.relations,
             "department_master_snapshot": self.departments,
         }
         arguments.update(overrides)
@@ -209,27 +213,51 @@ class ReceivableRegistrationHandoffServiceTest(unittest.TestCase):
         ):
             self.build()
 
-    def test_credit_sub_account_parent_mismatch_fails(self):
+    def test_credit_sub_account_parent_mismatch_is_ignored(self):
         self.relations["sub_account_relations"][0]["account_code"] = "201"
 
-        with self.assertRaisesRegex(
-            ReceivableRegistrationHandoffValidationError,
-            "does not belong to account 200",
-        ):
-            self.build()
+        self.assertEqual(self.build()[0]["prepared_journal"]["credit_sub_code"], "01")
 
-    def test_ambiguous_credit_sub_account_name_fails(self):
+    def test_ambiguous_relation_is_ignored(self):
         self.relations["sub_account_relations"].append({
             "account_code": "200",
             "sub_code": "09",
             "sub_name": "A商事",
         })
 
-        with self.assertRaisesRegex(
-            ReceivableRegistrationHandoffValidationError,
-            "ambiguous for account 200",
-        ):
-            self.build()
+        self.assertEqual(self.build()[0]["prepared_journal"]["credit_sub_code"], "01")
+
+    def test_sub_master_without_relation_succeeds(self):
+        del self.relations["sub_account_relations"]
+        journal = self.build()[0]["prepared_journal"]
+        self.assertEqual((journal["credit_sub_code"], journal["credit_sub_name"]), ("01", "A商事"))
+
+    def test_relation_does_not_supply_missing_sub_master_entry(self):
+        self.relations["sub_accounts"] = []
+        journal = self.build()[0]["prepared_journal"]
+        self.assertEqual((journal["credit_sub_code"], journal["credit_sub_name"]), ("", ""))
+
+    def test_duplicate_sub_names_follow_legacy_last_row_wins(self):
+        self.relations["sub_accounts"].append({"code": "09", "name": "A商事"})
+        self.assertEqual(self.build()[0]["prepared_journal"]["credit_sub_code"], "09")
+
+    def test_actual_customer_and_difference_both_succeed(self):
+        self.accounts["accounts"] += [
+            {"code": "131", "name": "未収運賃"},
+            {"code": "604", "name": "雑収入"},
+        ]
+        self.settlement["rows"] = [
+            self.row(貸方科目="未収運賃", 貸方補助="全国ベーチェット協会", 部門="", 金額=16800),
+            self.row(貸方科目="雑収入", 貸方補助="", 部門="", 金額=200, 摘要="チケット代"),
+        ]
+        items = self.build()
+        self.assertEqual(len(items), 2)
+        self.assertEqual([item["prepared_journal"]["amount"] for item in items], [16800, 200])
+        for item in items:
+            self.assertEqual(item["prepared_journal"]["credit_sub_code"], "")
+            self.assertEqual(item["prepared_journal"]["credit_sub_name"], "")
+        self.assertEqual(items[1]["prepared_journal"]["credit_account_code"], "604")
+        self.assertEqual(items[1]["prepared_journal"]["summary"], "チケット代")
 
     def test_missing_department_fails(self):
         self.settlement["rows"] = [self.row(部門="不存在")]

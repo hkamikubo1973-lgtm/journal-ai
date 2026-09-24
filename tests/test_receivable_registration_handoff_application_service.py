@@ -78,7 +78,7 @@ class ReceivableRegistrationHandoffApplicationServiceTest(unittest.TestCase):
             self.settlement,
             self.receipt_ref,
             account_master_snapshot=self.masters,
-            sub_account_relation_snapshot=self.masters,
+            sub_account_master_snapshot=self.masters,
             department_master_snapshot=self.masters,
         )
 

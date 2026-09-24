@@ -29,7 +29,7 @@ def build_receivable_registration_handoff_application_result(
         receipt.settlement,
         receipt.receipt_ref,
         account_master_snapshot=journal_master_snapshot,
-        sub_account_relation_snapshot=journal_master_snapshot,
+        sub_account_master_snapshot=journal_master_snapshot,
         department_master_snapshot=journal_master_snapshot,
     )
     return {

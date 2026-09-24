@@ -49,6 +49,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
         self.history_path.write_bytes(b"history-fixture\r\n")
         self.transactions_path.write_bytes(b"transactions-fixture\r\n")
         self.masters = {
+            "sub_accounts": [{"code": "01", "name": "A商事"}],
             "accounts": [
                 {"code": "100", "name": "普通預金"},
                 {"code": "101", "name": "当座預金"},

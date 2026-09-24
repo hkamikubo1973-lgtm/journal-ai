@@ -71,6 +71,7 @@ class ReceivableApiTest(unittest.TestCase):
             self.paths.current_path.read_bytes()
         )
         self.account_master_snapshot = {
+            "sub_accounts": [],
             "accounts": [
                 {"code": "114", "name": "普通預金", "category": "資産"},
                 {"code": "115", "name": "当座預金", "category": "資産"},
@@ -1365,7 +1366,7 @@ class ReceivableApiTest(unittest.TestCase):
             "detail": "現在のマスターで通常仕訳を準備できません。"
         })
 
-    def test_prepare_registration_sub_relation_failure_is_422(self):
+    def test_prepare_registration_missing_sub_master_succeeds_despite_relation(self):
         settlement_id, receipt_ref, _ = self.save_handoff_receipt([{
             "借方科目": "普通預金",
             "貸方科目": "未収運賃",
@@ -1382,8 +1383,9 @@ class ReceivableApiTest(unittest.TestCase):
 
         response = self.post_prepare_registration(settlement_id, receipt_ref)
 
-        self.assertEqual(response.status_code, 422)
-        self.assertNotIn("items", response.json())
+        self.assertEqual(response.status_code, 200)
+        journal = response.json()["items"][0]["prepared_journal"]
+        self.assertEqual((journal["credit_sub_code"], journal["credit_sub_name"]), ("", ""))
 
     def test_prepare_registration_department_failure_is_422(self):
         executed = self.post_execute().json()
