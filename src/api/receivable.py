@@ -7,10 +7,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from journal_master_service import load_journal_masters
+from receivable_import_application_service import (
+    execute_receivable_import,
+    preview_receivable_import,
+)
 from receivable_account_validation_service import (
     ReceivableSettlementMasterValidationError,
 )
@@ -317,6 +321,49 @@ def get_receivables_directory() -> Path:
     """Small dependency overridden by tests; resolving it writes nothing."""
 
     return DEFAULT_RECEIVABLES_DIRECTORY
+
+
+def _run_excel_import(operation, file, invoice_date, default_account, department, payment_due_date, directory):
+    if Path(file.filename or "").suffix.lower() not in {".xlsx", ".xls"}:
+        raise HTTPException(status_code=422, detail="請求一覧Excel（.xlsx / .xls）を選択してください。")
+    try:
+        return operation(
+            file.file.read(), invoice_date=invoice_date, default_account=default_account,
+            department=department, payment_due_date=payment_due_date,
+            receivables_directory=directory,
+        )
+    except ImportError as error:
+        raise HTTPException(status_code=503, detail="このExcel形式の読み込みに必要なライブラリがありません。管理者に確認してください。") from error
+    except ValueError as error:
+        message = "見出し行にコード・得意先名１・繰越しがありません"
+        raise HTTPException(status_code=422, detail=message if str(error) == message else "Excelファイルまたは入力条件を確認してください。") from error
+    except Exception as error:
+        logger.exception("Receivable Excel import failed")
+        raise HTTPException(status_code=500, detail="未収Excelの処理に失敗しました。未収一覧を再読込して確認してください。") from error
+
+
+@router.post("/import/preview")
+def post_receivable_import_preview(
+    file: UploadFile = File(...),
+    invoice_date: date = Form(...),
+    default_account: str = Form(...),
+    department: str = Form(""),
+    payment_due_date: date | None = Form(None),
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
+    return _run_excel_import(preview_receivable_import, file, invoice_date, default_account, department, payment_due_date, receivables_directory)
+
+
+@router.post("/import/execute")
+def post_receivable_import_execute(
+    file: UploadFile = File(...),
+    invoice_date: date = Form(...),
+    default_account: str = Form(...),
+    department: str = Form(""),
+    payment_due_date: date | None = Form(None),
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
+    return _run_excel_import(execute_receivable_import, file, invoice_date, default_account, department, payment_due_date, receivables_directory)
 
 
 def get_receivable_account_master_snapshot() -> dict[str, Any]:

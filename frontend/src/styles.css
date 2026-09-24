@@ -448,3 +448,99 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   .receivable-recommendations { grid-column: auto; }
   .receivable-pattern-heading { grid-template-columns: 1fr; }
 }
+.receivable-import {
+  margin-bottom: 1rem;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  max-height: min(50vh, 28rem);
+  overflow: auto;
+  scrollbar-gutter: stable;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.receivable-summary-panel > div:has(> .receivable-import) {
+  min-width: 0;
+}
+
+.receivable-import p,
+.receivable-import li,
+.receivable-import label,
+.receivable-import button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.receivable-import ul { padding-inline-start: 1.25rem; }
+.receivable-import li + li { margin-top: .5rem; }
+
+.receivable-import input[type="file"] {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receivable-import-summary { display: grid; gap: .4rem; }
+.receivable-import-summary > div { display: grid; grid-template-columns: minmax(0, 1fr); gap: .15rem; }
+.receivable-import-summary dt { font-weight: 700; }
+.receivable-import-summary dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+.receivable-import .receivable-import-table {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.receivable-import-table th,
+.receivable-import-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 6rem;
+  max-width: 12rem;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.receivable-import > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.receivable-import fieldset {
+  display: grid;
+  gap: .75rem;
+  border: 0;
+  padding: .75rem 0;
+  min-width: 0;
+}
+
+.receivable-import label {
+  display: grid;
+  gap: .25rem;
+}
+
+.receivable-import input,
+.receivable-import select {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.receivable-import input[type="checkbox"] {
+  width: auto;
+  min-height: auto;
+  justify-self: start;
+  flex: 0 0 auto;
+  margin: .15rem 0 0;
+}
+
+.receivable-import .receivable-import-due-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: .5rem;
+}

@@ -165,3 +165,31 @@ export type ReceivableRegistrationHandoffResponse = {
   row_count: number;
   items: import("./journal").ReceivableRegistrationHandoffItem[];
 };
+export type ReceivableImportInput = {
+  file: File;
+  invoice_date: string;
+  default_account: string;
+  department: string;
+  payment_due_date?: string;
+};
+
+export type ReceivableImportPreview = {
+  sheet_name: string;
+  valid_rows: Record<string, string>[];
+  importable_count: number;
+  excluded_count: number;
+  duplicate_count: number;
+  exclusions: {
+    source_row: number | null;
+    source_row_label: string | null;
+    reason: string;
+    values: Record<string, unknown>;
+  }[];
+};
+
+export type ReceivableImportResult = {
+  imported_count: number;
+  excluded_count: number;
+  duplicate_count: number;
+  message: string;
+};

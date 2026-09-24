@@ -1,4 +1,7 @@
 import type {
+  ReceivableImportInput,
+  ReceivableImportPreview,
+  ReceivableImportResult,
   ReceivableCustomerDetailResponse,
   ReceivableOptionsResponse,
   ReceivablePreviewRequest,
@@ -8,6 +11,24 @@ import type {
   ReceivableSettlementExecuteResponse,
   ReceivableSummaryResponse,
 } from "../types/receivable";
+
+function importForm(input: ReceivableImportInput): FormData {
+  const form = new FormData();
+  form.append("file", input.file);
+  form.append("invoice_date", input.invoice_date);
+  form.append("default_account", input.default_account);
+  form.append("department", input.department);
+  if (input.payment_due_date) form.append("payment_due_date", input.payment_due_date);
+  return form;
+}
+
+export function previewReceivableImport(input: ReceivableImportInput): Promise<ReceivableImportPreview> {
+  return requestReceivable("/api/receivables/import/preview", { method: "POST", body: importForm(input) });
+}
+
+export function executeReceivableImport(input: ReceivableImportInput): Promise<ReceivableImportResult> {
+  return requestReceivable("/api/receivables/import/execute", { method: "POST", body: importForm(input) });
+}
 
 const statusFallbacks: Record<number, string> = {
   404: "指定した取引先の未収データがありません。再読込してください。",

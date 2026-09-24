@@ -79,9 +79,9 @@ def remove_empty_receivable_rows(df):
 # =========================================
 # 未収CSV読み込み
 # =========================================
-def load_receivables():
+def load_receivables(current_path="data/receivables/current.csv"):
 
-    path = "data/receivables/current.csv"
+    path = current_path
 
     try:
 
@@ -610,10 +610,12 @@ def convert_company_billing_excel(
 # =========================================
 def exclude_duplicate_receivables(
     standard_df,
-    duplicate_columns
+    duplicate_columns,
+    *,
+    current_path="data/receivables/current.csv",
 ):
 
-    current_df = load_receivables()
+    current_df = load_receivables(current_path)
 
     def row_key(row):
 
@@ -688,11 +690,12 @@ def exclude_duplicate_receivables(
 
 def append_standard_receivables(
     standard_df,
-    duplicate_columns=None
+    duplicate_columns=None,
+    *,
+    current_path="data/receivables/current.csv",
 ):
 
-    current_path = "data/receivables/current.csv"
-    current_df = load_receivables()
+    current_df = load_receivables(current_path)
 
     if duplicate_columns is None:
         duplicate_columns = [
@@ -709,7 +712,8 @@ def append_standard_receivables(
 
     append_df, duplicate_df = exclude_duplicate_receivables(
         standard_df,
-        duplicate_columns
+        duplicate_columns,
+        current_path=current_path,
     )
     duplicate_count = len(duplicate_df)
 

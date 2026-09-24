@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import ReceivableImport from "./ReceivableImport";
 import {
   ReceivableApiError,
   executeReceivableSettlement,
@@ -695,12 +696,16 @@ export default function ReceivableWorkspace({
   return (
     <section className="receivable-workspace" aria-label="未収消込">
       <aside className="receivable-panel receivable-summary-panel">
+        <div>
+        <ReceivableImport masters={masters} disabled={executionLocked || handoffLoading || pendingRegistrationHandoff !== null}
+          onImported={() => refreshWorkspace()} />
         <div className="receivable-panel-heading">
           <div><p className="eyebrow">Receivables</p><h2>未収一覧</h2></div>
           <button type="button" className="receivable-refresh" onClick={() => void refreshWorkspace()}
             disabled={summaryLoading || optionsLoading || detailLoading || previewLoading || executionLocked}>
             再読込
           </button>
+        </div>
         </div>
         {summaryLoading && <p className="receivable-loading" role="status">未収集計を読み込み中…</p>}
         {summaryError && <p className="error-message" role="alert">{summaryError}</p>}
