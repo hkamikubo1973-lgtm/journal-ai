@@ -545,6 +545,12 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   gap: .5rem;
 }
 .journal-import { min-width: 0; margin-top: 12px; overflow-wrap: anywhere; }
+.master-management details { margin-top: 16px; }
+.master-management form, .master-update-actions { display: grid; gap: 8px; }
+.master-update-actions button.master-update-pending { opacity: 0.7; cursor: wait; outline: 2px solid #8bbdb1; }
+.master-payment-toggle { display: flex; align-items: center; }
+.master-payment-toggle input { width: auto; min-height: 0; }
+.master-change-list { max-height: 200px; overflow: auto; }
 .left-pane:has(.journal-import[open]) { grid-template-rows: minmax(0, 1fr) minmax(150px, 1fr); }
 .search-panel:has(.journal-import) { min-width: 0; }
 .search-panel:has(.journal-import[open]) { overflow-y: auto; }

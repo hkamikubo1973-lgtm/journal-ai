@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { importJournalCsv, type JournalImportResult } from "../api/journalImport";
+import type { ReactNode } from "react";
 
 const columns = ["伝票日付", "借方科目", "借方科目名", "貸方科目", "貸方科目名", "借方金額", "摘要"];
 
@@ -30,7 +31,7 @@ export function ImportPreview({ result, busy, onExecute }: {
   </>;
 }
 
-export default function JournalImport() {
+export default function JournalImport({ children }: { children?: ReactNode } = {}) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<JournalImportResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -91,5 +92,6 @@ export default function JournalImport() {
     {error && <p role="alert" className="error-message">{error}</p>}
     {message && <p role="status">{message}</p>}
     {preview && <ImportPreview result={preview} busy={loading || executing} onExecute={() => void execute()} />}
+    {children}
   </details>;
 }

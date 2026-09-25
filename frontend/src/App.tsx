@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import JournalImport from "./components/JournalImport";
+import MasterManagement from "./components/MasterManagement";
 import {
   buildEpsonExportRequest,
   downloadEpsonCsv,
@@ -1236,7 +1237,14 @@ export default function App() {
             </details>
             {error && <p className="error-message">{error}</p>}
             {statusMessage && <p className="status-message">{statusMessage}</p>}
-            <JournalImport />
+            <JournalImport><MasterManagement onUpdated={async () => {
+              try {
+                setMasters(await fetchJournalMasters());
+                setMastersError(null);
+              } catch {
+                throw new Error("保存は完了しましたがマスターを再取得できませんでした。画面を再読み込みしてください。");
+              }
+            }} /></JournalImport>
           </div>
 
           <div className="candidate-panel" aria-live="polite">

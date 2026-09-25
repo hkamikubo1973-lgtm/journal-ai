@@ -10,6 +10,7 @@ from typing import Any
 
 from fiscal_year import build_fiscal_year_info
 from system_settings import load_system_settings
+from journal_master_update_service import MASTER_LOCK
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -212,6 +213,12 @@ def _duplicate_sub_codes(
 
 
 def load_journal_masters() -> dict:
+    # Do not expose a half-completed multi-file update to API readers.
+    with MASTER_LOCK:
+        return _load_journal_masters_unlocked()
+
+
+def _load_journal_masters_unlocked() -> dict:
     """マスターと診断情報を返す。ファイルへの書き込みは行わない。"""
 
     account_rows, skipped_accounts = _read_master_rows(
