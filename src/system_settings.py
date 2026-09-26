@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from fiscal_year import validate_fiscal_year_start_month
@@ -88,3 +91,56 @@ def save_system_settings(
         return False, f"システム設定を保存できませんでした: {error}"
 
     return True, ""
+
+
+class OutputFolderSettingsError(ValueError):
+    """The output folder is invalid or its settings cannot be updated."""
+
+
+class OutputFolderPersistenceError(OutputFolderSettingsError):
+    """The existing settings file could not be read or written."""
+
+
+def save_output_folder(value: Any) -> str:
+    """Update only the existing csv_export_dir setting.
+
+    The base folder is checked for existence by the existing export services at
+    save time, just as it is for the Streamlit setting.
+    """
+    if not isinstance(value, str):
+        raise OutputFolderSettingsError("保存先フォルダを入力してください。")
+    folder = value.strip()
+    if not folder or any(ord(char) < 32 for char in folder):
+        raise OutputFolderSettingsError("保存先フォルダを確認してください。")
+    if os.name == "nt":
+        drive, tail = ntpath.splitdrive(folder)
+        if any(char in '<>"|?*' for char in folder) or ":" in tail:
+            raise OutputFolderSettingsError("保存先フォルダを確認してください。")
+
+    try:
+        with SETTINGS_PATH.open("r", encoding="utf-8") as source:
+            settings = json.load(source)
+    except FileNotFoundError:
+        settings = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise OutputFolderPersistenceError("設定を読み込めませんでした。") from error
+    if not isinstance(settings, dict):
+        raise OutputFolderPersistenceError("設定を読み込めませんでした。")
+
+    settings["csv_export_dir"] = folder
+    temporary_path: Path | None = None
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=SETTINGS_PATH.parent,
+            prefix=".settings-", suffix=".tmp", delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(settings, temporary, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, SETTINGS_PATH)
+    except OSError as error:
+        raise OutputFolderPersistenceError("保存先フォルダの設定を保存できませんでした。") from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return folder

@@ -22,7 +22,7 @@ try {
   apiCode = await readFile(join(compiled, "api/journalImport.js"), "utf8");
   uiCode = await readFile(join(compiled, "components/JournalImport.js"), "utf8");
 } finally {
-  for (const file of ["api/journalImport.js", "components/JournalImport.js"]) await unlink(join(compiled, file)).catch(() => {});
+  for (const file of ["api/journalImport.js", "api/outputSettings.js", "components/JournalImport.js", "components/OutputSettings.js"]) await unlink(join(compiled, file)).catch(() => {});
   for (const directory of ["api", "components"]) await rmdir(join(compiled, directory)).catch(() => {});
   await rmdir(compiled);
 }
@@ -31,7 +31,8 @@ const api = await import(apiUrl);
 const componentCode = uiCode
   .replaceAll('"react/jsx-runtime"', JSON.stringify(pathToFileURL(require.resolve("react/jsx-runtime")).href))
   .replaceAll('"react"', JSON.stringify(pathToFileURL(require.resolve("react")).href))
-  .replaceAll('"../api/journalImport"', JSON.stringify(apiUrl));
+  .replaceAll('"../api/journalImport"', JSON.stringify(apiUrl))
+  .replaceAll('"./OutputSettings"', JSON.stringify(dataUrl("export default function OutputSettings() { return null; }")));
 const { ImportPreview, default: JournalImport } = await import(dataUrl(componentCode));
 const result = { detected_encoding: "cp932", column_count: 45, uploaded_count: 2, new_count: 1,
   duplicate_count: 1, preview_rows: [{ 伝票日付: "20250101", 摘要: "過去仕訳" }], errors: [], imported_count: 0 };

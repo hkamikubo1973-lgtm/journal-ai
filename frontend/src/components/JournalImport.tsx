@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { importJournalCsv, type JournalImportResult } from "../api/journalImport";
 import type { ReactNode } from "react";
+import OutputSettings from "./OutputSettings";
 
 const columns = ["伝票日付", "借方科目", "借方科目名", "貸方科目", "貸方科目名", "借方金額", "摘要"];
 
@@ -80,6 +81,7 @@ export default function JournalImport({ children }: { children?: ReactNode } = {
 
   return <details className="journal-import">
     <summary>データ管理</summary>
+    <OutputSettings />
     <h3>EPSON仕訳帳CSV取込</h3>
     <p>初回設定または過去DB更新時に使用します。過去仕訳は検索DBの末尾へ追加します。</p>
     <label>エプソン仕訳CSVアップロード

@@ -545,6 +545,10 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   gap: .5rem;
 }
 .journal-import { min-width: 0; margin-top: 12px; overflow-wrap: anywhere; }
+.output-settings { display: grid; gap: 8px; min-width: 0; margin: 12px 0 20px; padding: 12px; border: 1px solid #cbd8d4; border-radius: 8px; }
+.output-settings h3, .output-settings p { margin: 0; }
+.output-settings input { width: 100%; min-width: 0; box-sizing: border-box; }
+.output-settings button { justify-self: start; }
 .master-management details { margin-top: 16px; }
 .master-management form, .master-update-actions { display: grid; gap: 8px; }
 .master-update-actions button.master-update-pending { opacity: 0.7; cursor: wait; outline: 2px solid #8bbdb1; }
