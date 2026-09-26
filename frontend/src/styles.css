@@ -511,6 +511,9 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
   cursor: pointer;
   font-weight: 700;
 }
+.receivable-cleanup { min-width: 0; margin-bottom: 1rem; overflow-wrap: anywhere; }
+.receivable-cleanup > summary { cursor: pointer; font-weight: 700; }
+.receivable-cleanup p, .receivable-cleanup button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
 .receivable-import fieldset {
   display: grid;

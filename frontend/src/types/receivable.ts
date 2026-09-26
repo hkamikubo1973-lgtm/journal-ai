@@ -19,6 +19,12 @@ export type ReceivableSummaryResponse = {
   customers: ReceivableCustomerSummaryItem[];
 };
 
+export type ReceivableCleanupResponse = {
+  current_count: number;
+  cleanup_target_count: number;
+  remaining_count: number;
+};
+
 export type ReceivableDetailItem = {
   code: string;
   receivable_id: string;

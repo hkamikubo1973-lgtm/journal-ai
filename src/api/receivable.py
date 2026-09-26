@@ -11,6 +11,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from journal_master_service import load_journal_masters
+from receivable_cleanup_service import (
+    execute_receivable_cleanup,
+    summarize_receivable_cleanup,
+)
 from receivable_import_application_service import (
     execute_receivable_import,
     preview_receivable_import,
@@ -26,6 +30,7 @@ from receivable_persistence_service import (
     DEFAULT_RECEIVABLES_DIRECTORY,
     ReceivableIdempotencyConflictError,
     ReceivableLedgerConflictError,
+    ReceivableLedgerError,
     ReceivableLedgerLockTimeout,
     ReceivableLedgerMalformedError,
     ReceivableLedgerMissingError,
@@ -105,6 +110,12 @@ class ReceivableSummaryResponse(BaseModel):
     outstanding_count: int
     outstanding_balance: int
     customers: list[ReceivableCustomerSummaryItem]
+
+
+class ReceivableCleanupResponse(BaseModel):
+    current_count: int
+    cleanup_target_count: int
+    remaining_count: int
 
 
 class ReceivableDetailItem(BaseModel):
@@ -426,6 +437,56 @@ def _load_ready_current_snapshot(receivables_directory: Path):
             status_code=500,
             detail="未収処理中にエラーが発生しました。",
         ) from error
+
+
+def _cleanup_response(operation, receivables_directory: Path):
+    try:
+        return operation(receivables_directory)
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。時間をおいて再試行してください。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except (
+        ReceivableLedgerMissingError,
+        ReceivableLedgerMalformedError,
+        ReceivableLedgerSchemaError,
+    ) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳を安全に読み込めません。",
+        ) from error
+    except ReceivableLedgerError as error:
+        logger.exception("Receivable cleanup ledger operation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="未収台帳を整理できませんでした。再読込して確認してください。",
+        ) from error
+    except Exception as error:
+        logger.exception("Unexpected receivable cleanup error")
+        raise HTTPException(
+            status_code=500,
+            detail="未収台帳を整理できませんでした。再読込して確認してください。",
+        ) from error
+
+
+@router.get("/cleanup-summary", response_model=ReceivableCleanupResponse)
+def get_receivable_cleanup_summary(
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
+    return _cleanup_response(summarize_receivable_cleanup, receivables_directory)
+
+
+@router.post("/cleanup", response_model=ReceivableCleanupResponse)
+def post_receivable_cleanup(
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
+    return _cleanup_response(execute_receivable_cleanup, receivables_directory)
 
 
 @router.get(

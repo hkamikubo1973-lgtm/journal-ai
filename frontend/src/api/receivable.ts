@@ -10,6 +10,7 @@ import type {
   ReceivableSettlementExecuteRequest,
   ReceivableSettlementExecuteResponse,
   ReceivableSummaryResponse,
+  ReceivableCleanupResponse,
 } from "../types/receivable";
 
 function importForm(input: ReceivableImportInput): FormData {
@@ -76,6 +77,26 @@ async function requestReceivable<T>(
 
 export function fetchReceivableSummary(): Promise<ReceivableSummaryResponse> {
   return requestReceivable<ReceivableSummaryResponse>("/api/receivables/summary");
+}
+
+export function fetchReceivableCleanupSummary(): Promise<ReceivableCleanupResponse> {
+  return requestCleanup<ReceivableCleanupResponse>("/api/receivables/cleanup-summary");
+}
+
+export function executeReceivableCleanup(): Promise<ReceivableCleanupResponse> {
+  return requestCleanup<ReceivableCleanupResponse>("/api/receivables/cleanup", { method: "POST" });
+}
+
+async function requestCleanup<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await requestReceivable<T>(path, init);
+  } catch (error) {
+    if (error instanceof ReceivableApiError) {
+      throw new ReceivableApiError(error.status,
+        statusFallbacks[error.status] ?? "未収台帳を整理できませんでした。再読込して確認してください。");
+    }
+    throw new Error("未収台帳を確認できませんでした。再読込して確認してください。");
+  }
 }
 
 export function fetchReceivableDetail(

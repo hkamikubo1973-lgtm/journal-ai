@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import ReceivableImport from "./ReceivableImport";
+import ReceivableCleanup, { selectedCustomerAfterRefresh } from "./ReceivableCleanup";
 import {
   ReceivableApiError,
   executeReceivableSettlement,
+  executeReceivableCleanup,
+  fetchReceivableCleanupSummary,
   fetchReceivableDetail,
   fetchReceivableOptions,
   fetchReceivableSummary,
@@ -16,6 +19,7 @@ import type {
 import type { RegistrationCartBatchResult } from "../../registrationCart";
 import type {
   ReceivableCustomerDetailResponse,
+  ReceivableCleanupResponse,
   ReceivableOptionsResponse,
   ReceivablePreviewMode,
   ReceivablePreviewPattern,
@@ -223,6 +227,12 @@ export default function ReceivableWorkspace({
   onRegistrationHandoff,
 }: ReceivableWorkspaceProps) {
   const [summary, setSummary] = useState<ReceivableSummaryResponse | null>(null);
+  const [cleanupSummary, setCleanupSummary] = useState<ReceivableCleanupResponse | null>(null);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupExecuting, setCleanupExecuting] = useState(false);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [cleanupSuccess, setCleanupSuccess] = useState<string | null>(null);
+  const cleanupInFlight = useRef(false);
   const [options, setOptions] = useState<ReceivableOptionsResponse | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReceivableCustomerDetailResponse | null>(null);
@@ -266,8 +276,8 @@ export default function ReceivableWorkspace({
   }, []);
 
   useEffect(() => {
-    onExecutionLockChange?.(executeLoading || pendingOperation !== null);
-  }, [executeLoading, onExecutionLockChange, pendingOperation]);
+    onExecutionLockChange?.(executeLoading || pendingOperation !== null || cleanupExecuting);
+  }, [executeLoading, onExecutionLockChange, pendingOperation, cleanupExecuting]);
 
   useEffect(() => () => onExecutionLockChange?.(false), [onExecutionLockChange]);
 
@@ -373,6 +383,8 @@ export default function ReceivableWorkspace({
     setExecuteSuccess(null);
     setRefreshSuggested(false);
     setSummaryLoading(true);
+    setCleanupLoading(true);
+    setCleanupError(null);
     setOptionsLoading(true);
     setSummaryError(null);
     setOptionsError(null);
@@ -383,10 +395,19 @@ export default function ReceivableWorkspace({
       setPreviewRevision(null);
     }
 
-    const [summaryResult, optionsResult] = await Promise.allSettled([
+    const [summaryResult, optionsResult, cleanupResult] = await Promise.allSettled([
       fetchReceivableSummary(),
       fetchReceivableOptions(),
+      fetchReceivableCleanupSummary(),
     ]);
+
+    if (cleanupResult.status === "fulfilled") {
+      setCleanupSummary(cleanupResult.value);
+    } else {
+      setCleanupSummary(null);
+      setCleanupError(errorMessage(cleanupResult.reason, "整理対象を確認できませんでした。"));
+    }
+    setCleanupLoading(false);
 
     let nextSummary: ReceivableSummaryResponse | null = null;
     if (summaryResult.status === "fulfilled") {
@@ -414,7 +435,7 @@ export default function ReceivableWorkspace({
     setOptionsLoading(false);
 
     if (!customerToRefresh) return;
-    if (!nextSummary?.customers.some((item) => item.customer_name === customerToRefresh)) {
+    if (!selectedCustomerAfterRefresh(customerToRefresh, nextSummary)) {
       setSelectedCustomer(null);
       setDetail(null);
       setDetailLoading(false);
@@ -424,8 +445,28 @@ export default function ReceivableWorkspace({
     await loadDetail(customerToRefresh);
   }
 
+  async function runCleanup(): Promise<void> {
+    if (cleanupInFlight.current || cleanupLoading || cleanupExecuting
+      || !cleanupSummary?.cleanup_target_count || executeLoading || pendingOperation
+      || handoffLoading || pendingRegistrationHandoff) return;
+    cleanupInFlight.current = true;
+    setCleanupExecuting(true);
+    setCleanupError(null);
+    setCleanupSuccess(null);
+    try {
+      const result = await executeReceivableCleanup();
+      await refreshWorkspace();
+      setCleanupSuccess(`未収台帳を整理しました（${result.cleanup_target_count}件）`);
+    } catch (error) {
+      setCleanupError(errorMessage(error, "未収台帳を整理できませんでした。再読込して確認してください。"));
+    } finally {
+      cleanupInFlight.current = false;
+      setCleanupExecuting(false);
+    }
+  }
+
   function selectCustomer(customerName: string): void {
-    if (executeLoading || pendingOperation) return;
+    if (executeLoading || pendingOperation || cleanupExecuting) return;
     if (customerName === selectedCustomer && detail) return;
     setSelectedCustomer(customerName);
     setDetailError(null);
@@ -438,7 +479,7 @@ export default function ReceivableWorkspace({
   }
 
   function changeCoreInput(change: () => void): void {
-    if (executeLoading || pendingOperation) return;
+    if (executeLoading || pendingOperation || cleanupExecuting) return;
     change();
     resetPreviewState();
     setExecuteError(null);
@@ -691,7 +732,7 @@ export default function ReceivableWorkspace({
     && !pendingOperation
     && !pendingRegistrationHandoff,
   );
-  const executionLocked = executeLoading || pendingOperation !== null;
+  const executionLocked = executeLoading || pendingOperation !== null || cleanupExecuting;
 
   return (
     <section className="receivable-workspace" aria-label="未収消込">
@@ -699,6 +740,9 @@ export default function ReceivableWorkspace({
         <div>
         <ReceivableImport masters={masters} disabled={executionLocked || handoffLoading || pendingRegistrationHandoff !== null}
           onImported={() => refreshWorkspace()} />
+        <ReceivableCleanup summary={cleanupSummary} loading={cleanupLoading} executing={cleanupExecuting}
+          disabled={executionLocked || handoffLoading || pendingRegistrationHandoff !== null}
+          error={cleanupError} success={cleanupSuccess} onExecute={() => void runCleanup()} />
         <div className="receivable-panel-heading">
           <div><p className="eyebrow">Receivables</p><h2>未収一覧</h2></div>
           <button type="button" className="receivable-refresh" onClick={() => void refreshWorkspace()}
