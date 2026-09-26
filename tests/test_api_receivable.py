@@ -1211,14 +1211,14 @@ class ReceivableApiTest(unittest.TestCase):
         item = body["items"][0]
         self.assertEqual(item["source_type"], "receivable_settlement")
         self.assertEqual(
-            item["epson_capability"], {"status": "needs_template"}
+            item["epson_capability"], {"status": "ready"}
         )
         self.assertEqual(
             item["provenance"]["receipt_ref"], execution["receipt_ref"]
         )
-        self.assertNotIn("epson_base_row", item)
-        self.assertNotIn("epson_preview_row", item)
-        self.assertNotIn("registration_id", item)
+        self.assertEqual(len(item["epson_base_row"]), 45)
+        self.assertIn("epson_preview_row", item)
+        self.assertEqual(len(item["registration_id"]), 64)
         serialized = json.dumps(body, ensure_ascii=False)
         for private in (
             "idempotency_key", "receipt_path", "workspace", "marker",

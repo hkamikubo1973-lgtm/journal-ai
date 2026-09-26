@@ -9,6 +9,7 @@ import type {
   JournalSearchRequest,
   JournalSearchResponse,
   RegistrationCartItem,
+  ReceivableRegistrationHandoffItem,
 } from "../types/journal";
 
 export function buildEpsonExportRequest(cart: readonly RegistrationCartItem[]): EpsonExportCsvRequest {
@@ -22,12 +23,40 @@ export function buildEpsonExportRequest(cart: readonly RegistrationCartItem[]): 
         row_count: item.provenance.row_count,
         settlement_row_id: item.provenance.settlement_row_id,
       },
+      registration_id: item.registration_id,
+      prepared_journal: item.prepared_journal,
+      epson_base_row: item.epson_base_row,
     } : {
       registration_id: item.registration_id,
       prepared_journal: item.prepared_journal,
       epson_base_row: item.epson_base_row,
     }),
   };
+}
+
+export function buildInputExcelRequest(cart: readonly RegistrationCartItem[]): InputExcelRequest {
+  return { items: cart.map((item) => item.source_type === "searched_journal" ? {
+    source_type: item.source_type,
+    registration_id: item.registration_id,
+    prepared_journal: item.prepared_journal,
+    epson_base_row: item.epson_base_row,
+    print_metadata: item.print_metadata,
+    print_warnings: item.print_warnings,
+  } : {
+    source_type: item.source_type,
+    provenance: item.provenance,
+    registration_id: item.registration_id,
+    prepared_journal: item.prepared_journal,
+    epson_base_row: item.epson_base_row,
+  }) };
+}
+
+export async function editReceivableCartItem(item: ReceivableRegistrationHandoffItem, edits: Record<string, string | number>): Promise<ReceivableRegistrationHandoffItem> {
+  const response = await fetch("/api/journal/receivable-cart/edit", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item, edits }),
+  });
+  if (!response.ok) throw new Error("未収仕訳を更新できません。科目・補助・部門・金額と元データを確認してください。");
+  return response.json() as Promise<ReceivableRegistrationHandoffItem>;
 }
 
 const epsonReasonMessages: Record<string, string> = {

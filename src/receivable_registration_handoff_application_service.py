@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from journal_persistence_service import load_transactions_df
+from receivable_cart_service import make_cart_ready
 
 from receivable_receipt_service import read_receivable_settlement_receipt
 from receivable_registration_handoff_service import (
@@ -17,6 +19,7 @@ def build_receivable_registration_handoff_application_result(
     settlement_id: str,
     receipt_ref: str,
     journal_master_snapshot: Any,
+    transactions_snapshot=None,
 ) -> dict[str, Any]:
     """Load one trusted receipt and convert all rows using current masters."""
 
@@ -32,6 +35,8 @@ def build_receivable_registration_handoff_application_result(
         sub_account_master_snapshot=journal_master_snapshot,
         department_master_snapshot=journal_master_snapshot,
     )
+    transactions = load_transactions_df().to_dict("records") if transactions_snapshot is None else transactions_snapshot
+    items = make_cart_ready(items, receipt.settlement, transactions)
     return {
         "settlement_id": receipt.settlement_id,
         "receipt_ref": receipt.receipt_ref,

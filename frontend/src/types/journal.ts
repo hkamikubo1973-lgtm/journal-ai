@@ -160,11 +160,16 @@ export type ReceivableSettlementProvenance = {
 export type ReceivableRegistrationHandoffItem = {
   source_type: "receivable_settlement";
   prepared_journal: PreparedJournal;
+  registration_id: string;
+  epson_base_row: EpsonBaseRow;
+  epson_preview_row: EpsonPreviewRow;
+  settlement_row_id: string;
+  template_diagnostics: { DB雛形?: string; [key: string]: unknown };
   provenance: ReceivableSettlementProvenance;
   print_metadata: JournalPrintMetadata;
   print_warnings: string[];
   epson_capability: {
-    status: "needs_template";
+    status: "ready";
   };
 };
 
@@ -185,6 +190,9 @@ export type EpsonExportCsvRequest = {
   } | {
     source_type: "receivable_settlement";
     provenance: ReceivableSettlementProvenance;
+    registration_id: string;
+    prepared_journal: PreparedJournal;
+    epson_base_row: EpsonBaseRow;
   }>;
 };
 
@@ -211,6 +219,9 @@ export type InputExcelRequest = {
   } | {
     source_type: "receivable_settlement";
     provenance: ReceivableSettlementProvenance;
+    registration_id: string;
+    prepared_journal: PreparedJournal;
+    epson_base_row: EpsonBaseRow;
   }>;
 };
 

@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import JournalImport from "./components/JournalImport";
+import ReceivableCartEditor from "./components/ReceivableCartEditor";
 import MasterManagement from "./components/MasterManagement";
 import {
   buildEpsonExportRequest,
+  buildInputExcelRequest,
   downloadEpsonCsv,
   downloadInputExcel,
   fetchJournalMasters,
@@ -1090,19 +1092,7 @@ export default function App() {
     setInputExcelDownloadLoading(true);
     setCartStatusMessage(null);
     try {
-      const downloaded = await downloadInputExcel({
-        items: registrationCart.map((item) => item.source_type === "searched_journal" ? {
-          source_type: item.source_type,
-          registration_id: item.registration_id,
-          prepared_journal: item.prepared_journal,
-          epson_base_row: item.epson_base_row,
-          print_metadata: item.print_metadata,
-          print_warnings: item.print_warnings,
-        } : {
-          source_type: item.source_type,
-          provenance: item.provenance,
-        }),
-      });
+      const downloaded = await downloadInputExcel(buildInputExcelRequest(registrationCart));
       const objectUrl = URL.createObjectURL(downloaded.blob);
       try {
         const link = document.createElement("a");
@@ -1128,19 +1118,7 @@ export default function App() {
     setInputExcelSaveLoading(true);
     setCartStatusMessage(null);
     try {
-      const response = await saveInputExcel({
-        items: registrationCart.map((item) => item.source_type === "searched_journal" ? {
-          source_type: item.source_type,
-          registration_id: item.registration_id,
-          prepared_journal: item.prepared_journal,
-          epson_base_row: item.epson_base_row,
-          print_metadata: item.print_metadata,
-          print_warnings: item.print_warnings,
-        } : {
-          source_type: item.source_type,
-          provenance: item.provenance,
-        }),
-      });
+      const response = await saveInputExcel(buildInputExcelRequest(registrationCart));
       setCartStatusMessage(`${response.message} 保存先：${response.saved_path}`);
     } catch (caughtError) {
       setCartStatusMessage(caughtError instanceof Error ? caughtError.message : "入力用Excelを保存できませんでした。検索DBは更新していません。");
@@ -1466,6 +1444,15 @@ export default function App() {
                 <div className="cart-item-amount"><span>金額</span><strong>{formatAmountNumber(getCartAmount(item))}</strong></div>
                 <div className="cart-item-summary"><span>摘要</span><p>{item.prepared_journal.summary || "-"}</p></div>
               </div>
+              {item.source_type === "receivable_settlement" && <>
+                <p className="cart-save-note">DB雛形：{item.template_diagnostics?.DB雛形 === "あり" ? "あり" : "なし（45列の不足項目を確認してください）"}</p>
+                <ReceivableCartEditor key={item.registration_id} item={item} masters={masters} onSaved={next => {
+                  setRegistrationCart(current => current.map(entry => entry.source_type === "receivable_settlement"
+                    && entry.provenance.settlement_row_id === next.provenance.settlement_row_id
+                    ? { ...next, addedAt: entry.addedAt } : entry));
+                  setCartStatusMessage("未収仕訳の編集内容を更新しました。");
+                }} />
+              </>}
               {item.source_type === "searched_journal" && <details className="epson-preview"><summary>エプソンCSVプレビューを表示</summary>
                 <div className="preview-table-wrap"><table className="preview-table"><tbody>
                   {epsonPreviewFields.map((field) => <tr key={field}><th>{field}</th><td>{getPreviewValue(item.epson_preview_row, field)}</td></tr>)}

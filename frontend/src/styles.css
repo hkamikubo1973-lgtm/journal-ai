@@ -560,3 +560,6 @@ pre { max-height: 560px; margin: 13px 0 0; padding: 15px; overflow: auto; border
 .journal-import-table { max-width: 100%; max-height: 280px; overflow: auto; margin: 8px 0; }
 .journal-import-table table { border-collapse: collapse; width: max-content; min-width: 100%; }
 .journal-import-table th, .journal-import-table td { padding: 6px; border-bottom: 1px solid #ddd; text-align: left; max-width: 240px; overflow-wrap: anywhere; }
+.receivable-cart-edit-fields { display: grid; gap: 8px; margin-top: 10px; padding: 10px; border: 1px solid #cbd8d4; border-radius: 8px; }
+.receivable-cart-edit-side { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.receivable-cart-edit-fields label { min-width: 0; }

@@ -28,7 +28,9 @@ from journal_registration_service import (  # noqa: E402
 import receivable_persistence_service as persistence  # noqa: E402
 from receivable_registration_handoff_service import (  # noqa: E402
     build_settlement_row_id,
+    build_receivable_registration_handoff_items,
 )
+from receivable_cart_service import make_cart_ready  # noqa: E402
 
 
 FIXED_DATETIME = datetime(2026, 9, 7, 12, 34)
@@ -137,10 +139,9 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
         persistence.save_settlement_receipt(path, receipt)
         return settlement, receipt_ref, path
 
-    @staticmethod
-    def receivable_item(settlement, receipt_ref, row_index):
+    def receivable_item(self, settlement, receipt_ref, row_index):
         settlement_id = settlement["settlement_id"]
-        return {
+        provenance = {
             "source_type": "receivable_settlement",
             "provenance": {
                 "settlement_id": settlement_id,
@@ -154,6 +155,15 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
                 ),
             },
         }
+        generated = build_receivable_registration_handoff_items(
+            settlement, receipt_ref,
+            account_master_snapshot=self.masters,
+            sub_account_master_snapshot=self.masters,
+            department_master_snapshot=self.masters,
+        )
+        ready = make_cart_ready(generated, settlement, [])
+        self.assertEqual(ready[row_index]["provenance"], provenance["provenance"])
+        return ready[row_index]
 
     @staticmethod
     def searched_item(marker="searched"):
@@ -203,7 +213,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
     def test_legacy_searched_journal_shape_remains_compatible(self):
         with patch.object(
             application,
-            "build_receivable_registration_handoff_application_result",
+            "resolve_cart_item",
         ) as receipt_handoff:
             result = self.export([self.searched_item()])
 
@@ -253,7 +263,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             InputExcelValidationError,
-            "receipt順ではありません",
+            "receiptの参照または行順が不正",
         ):
             self.export(items)
 
@@ -264,7 +274,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             InputExcelValidationError,
-            "settlement_row_idが一致しません",
+            "確認できません",
         ):
             self.export([item])
 
@@ -278,7 +288,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
             1,
         )
 
-        with self.assertRaisesRegex(InputExcelValidationError, "範囲外"):
+        with self.assertRaisesRegex(InputExcelValidationError, "確認できません"):
             self.export([item])
 
     def test_row_count_mismatch_is_blocked(self):
@@ -288,7 +298,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             InputExcelValidationError,
-            "row_countがreceiptと一致しません",
+            "確認できません",
         ):
             self.export([item])
 
@@ -317,11 +327,9 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_missing_receipt_is_404(self):
-        settlement = {
-            "settlement_id": "missing",
-            "rows": [self.row()],
-        }
-        item = self.receivable_item(settlement, "d" * 64, 0)
+        settlement, receipt_ref, path = self.save_receipt(settlement_id="missing")
+        item = self.receivable_item(settlement, receipt_ref, 0)
+        path.unlink()
 
         response = self.client.post(
             "/api/journal/export-input-excel",
@@ -331,27 +339,21 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_corrupt_receipt_is_503(self):
-        receipt_ref = "e" * 64
-        path = persistence.resolve_settlement_receipt_path(
-            self.receivables_directory,
-            receipt_ref,
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
+        settlement, receipt_ref, path = self.save_receipt(settlement_id="corrupt")
+        item = self.receivable_item(settlement, receipt_ref, 0)
         path.write_text("{corrupt", encoding="utf-8")
-        settlement = {"settlement_id": "corrupt", "rows": [self.row()]}
 
         response = self.client.post(
             "/api/journal/export-input-excel",
-            json={"items": [
-                self.receivable_item(settlement, receipt_ref, 0)
-            ]},
+            json={"items": [item]},
         )
 
         self.assertEqual(response.status_code, 503)
         self.assertNotIn(str(path), response.text)
 
-    def test_current_master_resolution_failure_is_422(self):
+    def test_input_uses_confirmed_cart_after_master_change(self):
         settlement, receipt_ref, _ = self.save_receipt()
+        item = self.receivable_item(settlement, receipt_ref, 0)
         self.masters["accounts"] = [
             account for account in self.masters["accounts"]
             if account["name"] != "売掛金"
@@ -359,12 +361,10 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
 
         response = self.client.post(
             "/api/journal/export-input-excel",
-            json={"items": [
-                self.receivable_item(settlement, receipt_ref, 0)
-            ]},
+            json={"items": [item]},
         )
 
-        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.status_code, 200)
 
     def test_frontend_prepared_journal_and_amount_are_not_trusted(self):
         settlement, receipt_ref, _ = self.save_receipt()
@@ -381,11 +381,7 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
             json={"items": [item]},
         )
 
-        self.assertEqual(response.status_code, 200)
-        worksheet = self.worksheet(response.content)
-        self.assertEqual(worksheet["C2"].value, "普通預金")
-        self.assertEqual(worksheet["E2"].value, 1000)
-        self.assertEqual(worksheet["I2"].value, "receipt summary")
+        self.assertEqual(response.status_code, 422)
 
     def test_invalid_item_blocks_workbook_generation_all_or_none(self):
         settlement, receipt_ref, _ = self.save_receipt([
@@ -490,13 +486,13 @@ class InputExcelReceivableApplicationServiceTest(unittest.TestCase):
             (self.receivables_directory / ".transactions").exists()
         )
 
-    def test_union_openapi_exposes_only_receivable_provenance(self):
+    def test_union_openapi_exposes_receivable_content_and_provenance(self):
         schema = self.client.get("/openapi.json").json()
         schemas = schema["components"]["schemas"]
         receivable = schemas["ReceivableSettlementInputExcelItemRequest"]
         self.assertEqual(
             set(receivable["properties"]),
-            {"source_type", "provenance"},
+            {"source_type", "provenance", "registration_id", "prepared_journal", "epson_base_row"},
         )
         provenance = schemas["ReceivableInputExcelProvenanceRequest"]
         self.assertFalse(provenance["additionalProperties"])

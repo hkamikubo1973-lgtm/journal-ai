@@ -384,9 +384,10 @@ def _validate_sub_account(
 
 def _validate_masters(
     edit_form: dict[str, Any],
+    master_snapshot=None,
 ) -> tuple[list[str], list[str], dict[str, str]]:
     try:
-        masters = load_journal_masters()
+        masters = load_journal_masters() if master_snapshot is None else master_snapshot
     except Exception:
         return [MASTER_LOAD_ERROR], [], {}
 
@@ -433,7 +434,7 @@ def _validate_masters(
     return errors, warnings, normalized_sub_names
 
 
-def prepare_registration(payload: dict) -> dict:
+def prepare_registration(payload: dict, *, master_snapshot=None) -> dict:
     """登録予定仕訳を検証・整形する。ファイルやDBへの書き込みは行わない。"""
 
     edit_form = payload.get("edit_form")
@@ -471,7 +472,7 @@ def prepare_registration(payload: dict) -> dict:
     debit_account_code = _text(edit_form.get("debit_account_code"))
     credit_account_code = _text(edit_form.get("credit_account_code"))
     master_errors, master_warnings, normalized_sub_names = _validate_masters(
-        edit_form
+        edit_form, master_snapshot
     )
     errors.extend(master_errors)
     warnings.extend(master_warnings)

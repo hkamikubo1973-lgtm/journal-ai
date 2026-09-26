@@ -35,6 +35,9 @@ class ReceivableRegistrationHandoffApplicationServiceTest(unittest.TestCase):
             "sub_account_relations": [],
         }
         self.items = [{"source_type": "receivable_settlement"}]
+        ready_patcher = patch.object(service, "make_cart_ready", return_value=self.items)
+        self.ready_builder = ready_patcher.start()
+        self.addCleanup(ready_patcher.stop)
 
     def build(self):
         return service.build_receivable_registration_handoff_application_result(
@@ -42,6 +45,7 @@ class ReceivableRegistrationHandoffApplicationServiceTest(unittest.TestCase):
             settlement_id="settlement-001",
             receipt_ref=self.receipt_ref,
             journal_master_snapshot=self.masters,
+            transactions_snapshot=[],
         )
 
     def test_secure_receipt_loader_receives_only_reference_and_expected_id(self):

@@ -27,12 +27,13 @@ const searched = {
   prepared_journal: { amount: 500 }, epson_base_row: { 摘要: "searched" },
 };
 const receivable = {
-  source_type: "receivable_settlement", prepared_journal: { amount: 1000 },
+  source_type: "receivable_settlement", registration_id: "backend-receivable-id",
+  prepared_journal: { amount: 1000 }, epson_base_row: { marker: "backend-base" },
   provenance: {
     settlement_id: "settlement", receipt_ref: "a".repeat(64), row_index: 0,
     row_count: 1, settlement_row_id: "b".repeat(64),
   },
-  epson_capability: { status: "needs_template" },
+  epson_capability: { status: "ready" },
 };
 const searchedPayload = {
   registration_id: searched.registration_id,
@@ -41,6 +42,9 @@ const searchedPayload = {
 };
 const receivablePayload = {
   source_type: "receivable_settlement", provenance: receivable.provenance,
+  registration_id: receivable.registration_id,
+  prepared_journal: receivable.prepared_journal,
+  epson_base_row: receivable.epson_base_row,
 };
 
 for (const [name, cart, expected] of [
@@ -79,14 +83,38 @@ for (const [name, cart, expected] of [
   }
 }
 
-test("receivable allowlist excludes display fields, forged EPSON data and extra provenance fields", () => {
+test("receivable payload includes confirmed content and excludes display fields", () => {
   const untrusted = {
     ...receivable, registration_id: "forged", epson_base_row: { tax: "forged" },
     epson_preview_row: {}, template: {}, tax: "forged", 形式: "forged", 資金区分: "forged",
     provenance: { ...receivable.provenance, private_path: "private" },
   };
-  assert.deepEqual(api.buildEpsonExportRequest([untrusted]), { items: [receivablePayload] });
-  assert.equal(untrusted.epson_capability.status, "needs_template");
+  assert.deepEqual(api.buildEpsonExportRequest([untrusted]), { items: [{
+    ...receivablePayload, registration_id: "forged", epson_base_row: { tax: "forged" },
+  }] });
+  assert.equal(untrusted.epson_capability.status, "ready");
+});
+
+test("Input Excel and EPSON use the same confirmed receivable cart content", () => {
+  const cart = [searched, receivable];
+  const epson = api.buildEpsonExportRequest(cart);
+  const input = api.buildInputExcelRequest(cart);
+  assert.deepEqual(input.items[1], epson.items[1]);
+  assert.equal(input.items[0].prepared_journal, epson.items[0].prepared_journal);
+  assert.equal(input.items[0].epson_base_row, epson.items[0].epson_base_row);
+});
+
+test("receivable edit posts the confirmed item and explicit edits", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    calls.push([url, options]);
+    return Response.json({ ...receivable, registration_id: "updated-backend-id" });
+  });
+  const edits = { amount: 1200, summary: "edited" };
+  const result = await api.editReceivableCartItem(receivable, edits);
+  assert.equal(calls[0][0], "/api/journal/receivable-cart/edit");
+  assert.deepEqual(JSON.parse(calls[0][1].body), { item: receivable, edits });
+  assert.equal(result.registration_id, "updated-backend-id");
 });
 
 for (const [code, message] of Object.entries({

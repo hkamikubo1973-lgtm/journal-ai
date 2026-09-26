@@ -17,7 +17,9 @@ import receivable_registration_handoff_application_service as handoff
 import receivable_persistence_service as persistence
 from columns import EPSON_COLUMNS
 from journal_registration_service import build_registration_id
-from receivable_epson_materialization_service import ReceivableEpsonMaterializationError
+from openpyxl import load_workbook
+import receivable_cart_service as cart_service
+import receivable_epson_materialization_service as strict_materialization
 from receivable_receipt_service import (
     ReceivableReceiptReferenceError,
     ReceivableReceiptSettlementConflictError,
@@ -31,11 +33,13 @@ class EpsonUnionTest(unittest.TestCase):
     tearDown = fixtures.InputExcelReceivableApplicationServiceTest.tearDown
     row = staticmethod(fixtures.InputExcelReceivableApplicationServiceTest.row)
     save_receipt = fixtures.InputExcelReceivableApplicationServiceTest.save_receipt
-    receivable_item = staticmethod(fixtures.InputExcelReceivableApplicationServiceTest.receivable_item)
     searched_item = staticmethod(fixtures.InputExcelReceivableApplicationServiceTest.searched_item)
 
     def setUp(self):
         self.setUp_fixture()
+        for account in self.masters["accounts"]:
+            account["selectable"] = True
+        self.masters["diagnostics"] = {}
         self.template = {column: "" for column in EPSON_COLUMNS}
         self.template.update({
             "借方科目": "100", "貸方科目": "200", "貸方補助": "01",
@@ -70,7 +74,11 @@ class EpsonUnionTest(unittest.TestCase):
 
     def items(self, rows=None, settlement_id="settlement-001"):
         settlement, ref, self.receipt_path = self.save_receipt(rows, settlement_id)
-        return [self.receivable_item(settlement, ref, index) for index in range(len(settlement["rows"]))]
+        return handoff.build_receivable_registration_handoff_application_result(
+            self.receivables_directory, settlement_id=settlement_id,
+            receipt_ref=ref, journal_master_snapshot=self.masters,
+            transactions_snapshot=application.load_transactions_df(self.transactions_path).to_dict(orient="records"),
+        )["items"]
 
     def post(self, items, save=False):
         return self.client.post(
@@ -130,7 +138,7 @@ class EpsonUnionTest(unittest.TestCase):
         self.assertEqual(response.json()["appended_count"], 1)
         rows = application.load_transactions_df(self.transactions_path).to_dict(orient="records")
         self.assertEqual(rows[0]["摘要"], "receipt summary")
-        self.assertEqual(rows[0]["入力マシン"], "TEMPLATE")
+        self.assertNotEqual(rows[0]["入力マシン"], "TEMPLATE")
 
     def test_mixed_download_preserves_reversed_receipt_request_order(self):
         items = self.items([self.row(摘要="one"), self.row(摘要="two")])
@@ -159,35 +167,92 @@ class EpsonUnionTest(unittest.TestCase):
                 items[0]["provenance"][key] = value
                 self.assert_blocked(items, "provenance_mismatch")
 
-    def test_frontend_fields_are_ignored(self):
+    def test_forged_cart_content_is_rejected(self):
         items = self.items()
-        expected = self.resolve(items)
         items[0].update({
             "prepared_journal": {"amount": -999}, "amount": -999, "account": "evil",
             "sub": "evil", "department": "evil", "summary": "evil",
             "epson_base_row": {}, "epson_preview_row": {},
             "registration_id": "frontend-id", "epson_capability": {"status": "blocked"},
         })
-        self.assertEqual(self.resolve(items), expected)
-        self.assertEqual(self.csv_rows(self.post(items))[0]["借方金額"], "1000")
+        self.assert_blocked(items, "prepared_journal_invalid")
 
     def test_registration_id_is_generated_by_backend(self):
         item = self.resolve(self.items())[0]
         self.assertEqual(item["registration_id"], build_registration_id(item["prepared_journal"], item["epson_base_row"]))
 
-    def test_template_not_found(self):
+    def test_template_not_found_uses_empty_base_and_downloads(self):
         self.write_transactions([])
-        self.assert_blocked(self.items(), "template_not_found")
+        items = self.items()
+        self.assertEqual(items[0]["template_diagnostics"]["DB雛形"], "なし")
+        self.assertEqual(len(items[0]["epson_base_row"]), 45)
+        self.assertEqual(self.csv_rows(self.post(items))[0]["摘要"], "receipt summary")
 
-    def test_template_ambiguous(self):
+    def test_template_found_carries_legacy_base_fields(self):
+        self.template.update({"借方科目名": "普通預金", "貸方科目名": "売掛金", "貸方補助科目名": "A商事", "摘要": "receipt summary"})
+        self.write_transactions([self.template])
+        item = self.items()[0]
+        self.assertEqual(item["template_diagnostics"]["DB雛形"], "あり")
+        self.assertEqual(item["epson_base_row"]["形式"], "4")
+        self.assertEqual(item["epson_base_row"]["証番号"], "settlement-001")
+        self.assertEqual(item["settlement_row_id"], item["provenance"]["settlement_row_id"])
+        self.assertEqual(item["registration_id"], build_registration_id(item["prepared_journal"], item["epson_base_row"]))
+
+    def test_backend_edit_updates_both_downloads_from_one_cart(self):
+        item = self.items()[0]
+        response = self.client.post("/api/journal/receivable-cart/edit", json={
+            "item": item, "edits": {"amount": 1200, "summary": "edited summary", "debit_account_code": "101", "debit_dept_code": "10"},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        edited = response.json()
+        self.assertNotEqual(edited["registration_id"], item["registration_id"])
+        self.assertEqual(edited["prepared_journal"]["debit_account_code"], "101")
+        self.assertEqual(edited["prepared_journal"]["debit_dept_code"], "10")
+        self.assertEqual(edited["provenance"], item["provenance"])
+        self.assertEqual(edited["settlement_row_id"], item["settlement_row_id"])
+        epson = self.csv_rows(self.post([edited]))[0]
+        self.assertEqual(epson["借方金額"], "1200")
+        self.assertEqual(epson["摘要"], "edited summary")
+        input_response = self.client.post("/api/journal/export-input-excel", json={"items": [edited]})
+        self.assertEqual(input_response.status_code, 200, input_response.text)
+        sheet = load_workbook(io.BytesIO(input_response.content)).active
+        self.assertEqual(sheet["E2"].value, 1200)
+        self.assertEqual(sheet["I2"].value, "edited summary")
+
+    def test_backend_edit_revalidates_account_and_department(self):
+        item = self.items()[0]
+        for edits in ({"debit_account_code": "missing"}, {"debit_dept_code": "missing"}, {"credit_sub_code": "missing"}):
+            with self.subTest(edits=edits):
+                response = self.client.post("/api/journal/receivable-cart/edit", json={"item": item, "edits": edits})
+                self.assertEqual(response.status_code, 422)
+                self.assertNotIn("C:/", response.text)
+
+    def test_provenance_only_export_cannot_rebuild_original_receipt_row(self):
+        item = self.items()[0]
+        legacy = {"source_type": item["source_type"], "provenance": item["provenance"]}
+        self.assertEqual(self.post([legacy]).status_code, 422)
+        self.assertEqual(self.client.post("/api/journal/export-input-excel", json={"items": [legacy]}).status_code, 422)
+
+    def test_formal_export_does_not_call_strict_materialization(self):
+        items = self.items()
+        with patch.object(strict_materialization, "materialize_receivable_epson_items", side_effect=AssertionError("strict path called")) as strict:
+            self.csv_rows(self.post(items))
+        strict.assert_not_called()
+
+    def test_multiple_templates_do_not_block(self):
         self.write_transactions([self.template, dict(self.template, 形式="9")])
-        self.assert_blocked(self.items(), "template_ambiguous")
+        self.csv_rows(self.post(self.items()))
 
-    def test_template_invalid(self):
+    def test_incomplete_template_snapshot_does_not_block(self):
         invalid = dict(self.template)
         del invalid["形式"]
-        self.snapshot_loader.side_effect = lambda: [invalid]
-        self.assert_blocked(self.items(), "template_invalid")
+        settlement, ref, _ = self.save_receipt()
+        items = handoff.build_receivable_registration_handoff_application_result(
+            self.receivables_directory, settlement_id=settlement["settlement_id"],
+            receipt_ref=ref, journal_master_snapshot=self.masters,
+            transactions_snapshot=[invalid],
+        )["items"]
+        self.csv_rows(self.post(items))
 
     def test_invalid_receipt(self):
         items = self.items()
@@ -195,11 +260,15 @@ class EpsonUnionTest(unittest.TestCase):
         self.assert_blocked(items, status=503)
 
     def test_master_validation_failure(self):
+        items = self.items()
         self.masters["accounts"] = []
-        self.assert_blocked(self.items(), "master_validation_failed")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(self.post(items).status_code, 200)
 
     def test_multi_row_failure_blocks_everything(self):
-        self.assert_blocked(self.items([self.row(), self.row(借方科目="当座預金")]), "template_not_found")
+        items = self.items([self.row(), self.row(借方科目="当座預金")])
+        items[1]["registration_id"] = "forged"
+        self.assert_blocked(items, "prepared_journal_invalid")
 
     def test_missing_or_duplicate_settlement_row_blocks(self):
         items = self.items([self.row(), self.row()])
@@ -233,13 +302,13 @@ class EpsonUnionTest(unittest.TestCase):
 
     def test_save_registers_base_rows_only_after_csv_exists(self):
         items = self.items()
-        expected = [item["epson_base_row"] for item in self.resolve(items)]
+        expected = [item["epson_base_row"] for item in items]
         def register(rows, **kwargs):
             paths = list((self.directory / save_service.EPSON_EXPORT_SUBDIR).glob("*.csv"))
             self.assertEqual(len(paths), 1)
             self.assertEqual(rows, expected)
             exported = list(csv.DictReader(io.StringIO(paths[0].read_bytes().decode("cp932"))))
-            self.assertNotEqual(exported[0]["入力マシン"], rows[0]["入力マシン"])
+            self.assertEqual(exported[0]["摘要"], rows[0]["摘要"])
             return True, len(rows)
         before_history = self.history_path.read_bytes()
         before_receipt = self.receipt_path.read_bytes()
@@ -258,26 +327,26 @@ class EpsonUnionTest(unittest.TestCase):
 
     def test_master_and_transactions_loaded_once_for_multiple_settlements(self):
         items = self.items([self.row(), self.row()]) + self.items(settlement_id="second")
-        with patch.object(handoff, "read_receivable_settlement_receipt", wraps=handoff.read_receivable_settlement_receipt) as reader:
+        with patch.object(cart_service, "read_receivable_settlement_receipt", wraps=cart_service.read_receivable_settlement_receipt) as reader:
             self.csv_rows(self.post(items))
         self.assertEqual(reader.call_count, 2)
         self.master_loader.assert_called_once()
-        self.snapshot_loader.assert_called_once()
+        self.snapshot_loader.assert_not_called()
         export_service.load_journal_masters.assert_not_called()
 
     def test_save_also_shares_master_snapshot(self):
         response = self.post(self.items(), True)
         self.assertEqual(response.status_code, 200, response.text)
         self.master_loader.assert_called_once()
-        self.snapshot_loader.assert_called_once()
+        self.snapshot_loader.assert_not_called()
         export_service.load_journal_masters.assert_not_called()
 
-    def test_each_request_rematerializes_current_transactions(self):
+    def test_export_uses_confirmed_cart_after_transactions_change(self):
         items = self.items()
         self.csv_rows(self.post(items))
         self.write_transactions([])
-        self.assertEqual(self.post(items, True).json()["detail"]["code"], "template_not_found")
-        self.assertEqual(self.snapshot_loader.call_count, 2)
+        self.assertEqual(self.post(items).status_code, 200)
+        self.snapshot_loader.assert_not_called()
 
     def test_error_mapping_hides_internal_paths(self):
         items = self.items()
@@ -292,7 +361,7 @@ class EpsonUnionTest(unittest.TestCase):
         ]
         for error, status in cases:
             for save in (False, True):
-                with self.subTest(error=type(error).__name__, save=save), patch.object(application, "build_receivable_registration_handoff_application_result", side_effect=error):
+                with self.subTest(error=type(error).__name__, save=save), patch.object(cart_service, "read_receivable_settlement_receipt", side_effect=error):
                     response = self.post(items, save)
                     self.assertEqual(response.status_code, status, response.text)
                     self.assertNotIn("PRIVATE_PATH", response.text)
@@ -305,8 +374,8 @@ class EpsonUnionTest(unittest.TestCase):
 
     def test_prepared_journal_invalid_mapping(self):
         items = self.items()
-        with patch.object(application, "materialize_receivable_epson_items", side_effect=ReceivableEpsonMaterializationError("prepared_journal_invalid", "PRIVATE_PATH")):
-            self.assert_blocked(items, "prepared_journal_invalid")
+        items[0]["prepared_journal"]["amount"] = -1
+        self.assert_blocked(items, "prepared_journal_invalid")
 
     def test_missing_receipt_blocks(self):
         items = self.items()
@@ -322,7 +391,7 @@ class EpsonUnionTest(unittest.TestCase):
         items = self.items()
         self.csv_rows(self.post(items))
         self.masters["accounts"] = []
-        self.assert_blocked(items, "master_validation_failed")
+        self.assertEqual(self.post(items).status_code, 200)
 
     def test_union_rejects_invalid_source_and_strict_provenance_types(self):
         self.assert_blocked([dict(self.searched_item(), source_type="unknown")])

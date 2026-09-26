@@ -296,7 +296,7 @@ class ReceivableRegistrationPrintMetadata(BaseModel):
 
 
 class ReceivableRegistrationEpsonCapability(BaseModel):
-    status: Literal["needs_template"]
+    status: Literal["ready"]
 
 
 class ReceivableRegistrationHandoffItem(BaseModel):
@@ -306,6 +306,11 @@ class ReceivableRegistrationHandoffItem(BaseModel):
     print_metadata: ReceivableRegistrationPrintMetadata
     print_warnings: list[str]
     epson_capability: ReceivableRegistrationEpsonCapability
+    registration_id: str
+    settlement_row_id: str
+    epson_base_row: dict[str, Any]
+    epson_preview_row: dict[str, Any]
+    template_diagnostics: dict[str, Any]
 
 
 class ReceivableRegistrationHandoffResponse(BaseModel):

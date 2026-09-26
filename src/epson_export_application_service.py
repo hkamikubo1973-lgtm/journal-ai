@@ -16,9 +16,7 @@ from journal_export_service import (
 from journal_master_service import load_journal_masters
 from journal_persistence_service import load_transactions_df
 from journal_save_service import EpsonSaveResult, save_and_register_epson_csv
-from receivable_epson_materialization_service import (
-    materialize_receivable_epson_items,
-)
+from receivable_cart_service import resolve_cart_item, validate_provenance
 from receivable_registration_handoff_application_service import (
     build_receivable_registration_handoff_application_result,
 )
@@ -154,74 +152,35 @@ def resolve_epson_export_items(
             (settlement_id, receipt_ref), []
         ).append((position, row_index, row_count, settlement_row_id))
 
-    if receivable_groups:
-        if journal_master_snapshot is None:
-            loader = journal_master_loader or load_journal_masters
-            journal_master_snapshot = loader()
-        if transactions_snapshot is None:
-            loader = (
-                transactions_snapshot_loader
-                or load_epson_transactions_snapshot
-            )
-            transactions_snapshot = loader()
-
+    receipt_cache = {}
     for (settlement_id, receipt_ref), requested_rows in receivable_groups.items():
+        first = items[requested_rows[0][0]]
         try:
-            handoff = build_receivable_registration_handoff_application_result(
-                receivables_directory,
-                settlement_id=settlement_id,
-                receipt_ref=receipt_ref,
-                journal_master_snapshot=journal_master_snapshot,
-            )
+            try:
+                receipt = validate_provenance(first, receivables_directory, receipt_cache)
+            except EpsonExportValidationError as exc:
+                raise EpsonExportApplicationValidationError(
+                    PROVENANCE_MISMATCH, "未収消込データを確認できません。"
+                ) from exc
+            count = len(receipt.settlement["rows"])
+            if sorted(row[1] for row in requested_rows) != list(range(count)):
+                raise EpsonExportApplicationValidationError(PROVENANCE_MISMATCH, "未収settlementのrow構成がreceiptと一致しません。")
+            for position, _, _, _ in requested_rows:
+                try:
+                    validate_provenance(items[position], receivables_directory, receipt_cache)
+                except EpsonExportValidationError as exc:
+                    raise EpsonExportApplicationValidationError(
+                        PROVENANCE_MISMATCH, "未収消込データを確認できません。"
+                    ) from exc
+                try:
+                    ready = resolve_cart_item(items[position], receivables_directory, cache=receipt_cache)
+                except EpsonExportValidationError as exc:
+                    raise EpsonExportApplicationValidationError(
+                        "prepared_journal_invalid", "未収仕訳の登録内容を確認できません。"
+                    ) from exc
+                ready_items[position] = _searched_ready_item(ready)
         except ReceivableRegistrationHandoffValidationError as exc:
-            raise EpsonExportApplicationValidationError(
-                MASTER_VALIDATION_FAILED,
-                "未収仕訳を現在のマスターで解決できません。",
-            ) from exc
-
-        trusted_items = handoff["items"]
-        trusted_row_count = handoff["row_count"]
-        requested_indexes = [row[1] for row in requested_rows]
-        if sorted(requested_indexes) != list(range(trusted_row_count)):
-            raise EpsonExportApplicationValidationError(
-                PROVENANCE_MISMATCH,
-                "未収settlementのrow構成がreceiptと一致しません。",
-            )
-
-        for _, row_index, row_count, settlement_row_id in requested_rows:
-            if row_count != trusted_row_count:
-                raise EpsonExportApplicationValidationError(
-                    PROVENANCE_MISMATCH,
-                    "未収settlementのrow_countがreceiptと一致しません。",
-                )
-            expected_row_id = build_settlement_row_id(
-                receipt_ref, settlement_id, row_index
-            )
-            trusted_row_id = trusted_items[row_index]["provenance"][
-                "settlement_row_id"
-            ]
-            if not settlement_row_id.isascii() or not compare_digest(settlement_row_id, expected_row_id) or not (
-                compare_digest(trusted_row_id, expected_row_id)
-            ):
-                raise EpsonExportApplicationValidationError(
-                    PROVENANCE_MISMATCH,
-                    "未収settlementのrow integrityが一致しません。",
-                )
-
-        materialized = materialize_receivable_epson_items(
-            trusted_items,
-            transactions_snapshot,
-            customer_name=handoff["customer_name"],
-            settlement_date=handoff["settlement_date"],
-        )
-        for requested in requested_rows:
-            ready = materialized[requested[1]]
-            ready_items[requested[0]] = {
-                "registration_id": ready["registration_id"],
-                "prepared_journal": ready["prepared_journal"],
-                "epson_base_row": ready["epson_base_row"],
-            }
-
+            raise EpsonExportApplicationValidationError(MASTER_VALIDATION_FAILED, "未収仕訳を現在のマスターで解決できません。") from exc
     normalized = [item for item in ready_items if item is not None]
     if len(normalized) != len(items):
         raise EpsonExportValidationError(
