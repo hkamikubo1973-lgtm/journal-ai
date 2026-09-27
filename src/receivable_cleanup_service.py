@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
 from receivable_persistence_service import (
+    CURRENT_ARCHIVE_PAIR,
     DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
     DEFAULT_LOCK_TIMEOUT_SECONDS,
     LEDGER_HEALTH_READY,
     ReceivableLedgerRecoveryRequired,
     _inspect_receivable_ledger_health_locked,
-    atomic_write_bytes,
+    commit_receivable_ledger_transaction,
     load_current_receivables_read_only,
     read_receivable_current_snapshot_when_ready,
     receivable_ledger_lock,
     resolve_receivable_ledger_paths,
+)
+from receivable_import_archive_service import (
+    append_archive_rows,
+    load_receivable_import_archive,
 )
 from receivable_settlement_service import serialize_receivable_dataframe
 
@@ -69,13 +75,28 @@ def execute_receivable_cleanup(
                 f"Receivable ledger health is {health.status}"
             )
         current_path = resolve_receivable_ledger_paths(receivables_directory).current_path
-        current = load_current_receivables_read_only(current_path).dataframe
+        loaded_current = load_current_receivables_read_only(current_path)
+        current = loaded_current.dataframe
         mask = _cleanup_mask(current)
         counts = _counts(current)
-        if counts["cleanup_target_count"]:
-            remaining = current.loc[~mask].copy()
-            atomic_write_bytes(
-                current_path,
-                serialize_receivable_dataframe(remaining),
-            )
-        return counts
+        if not counts["cleanup_target_count"]:
+            return counts
+        archive, archive_bytes = load_receivable_import_archive(
+            Path(receivables_directory)
+        )
+        archive_after = append_archive_rows(archive, current.loc[mask])
+        remaining = current.loc[~mask].copy()
+
+    commit_receivable_ledger_transaction(
+        receivables_directory,
+        f"import-archive-{uuid4().hex}",
+        current_before_bytes=loaded_current.raw_bytes,
+        current_after_bytes=serialize_receivable_dataframe(remaining),
+        history_before_bytes=archive_bytes if archive_bytes is not None else b"",
+        history_after_bytes=serialize_receivable_dataframe(archive_after),
+        target_pair=CURRENT_ARCHIVE_PAIR,
+        history_before_missing=archive_bytes is None,
+        lock_timeout_seconds=lock_timeout_seconds,
+        lock_poll_interval_seconds=lock_poll_interval_seconds,
+    )
+    return counts

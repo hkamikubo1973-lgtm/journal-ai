@@ -12,6 +12,9 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import receivable_engine as engine
 import receivable_import_application_service as service
+import receivable_cleanup_service as cleanup_service
+import receivable_persistence_service as persistence
+from receivable_import_archive_service import ARCHIVE_COLUMNS
 from api.journal import app
 from api.receivable import get_receivables_directory
 
@@ -22,6 +25,7 @@ class ReceivableImportTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.current = self.directory / "current.csv"
+        self.archive = self.directory / "receivable_import_archive.csv"
         self.arguments = dict(invoice_date="2026-01-15", default_account="未収運賃", receivables_directory=self.directory)
         app.dependency_overrides[get_receivables_directory] = lambda: self.directory
         self.addCleanup(app.dependency_overrides.clear)
@@ -99,6 +103,81 @@ class ReceivableImportTest(unittest.TestCase):
         self.existing()
         result = self.preview()
         self.assertEqual((result["importable_count"], result["duplicate_count"]), (0, 1))
+
+    def write_archive_from_preview(self, data=None):
+        source = self.preview(data)["valid_rows"][0]
+        archived = {column: source.get(column, "") for column in ARCHIVE_COLUMNS}
+        archived["未収ID"] = "previous-import-id"
+        pd.DataFrame([archived], columns=ARCHIVE_COLUMNS).to_csv(
+            self.archive, index=False, encoding="utf-8-sig"
+        )
+
+    def test_archive_duplicate_without_current_and_preview_read_only(self):
+        self.write_archive_from_preview()
+        before = self.archive.read_bytes()
+        result = self.preview()
+        self.assertEqual((result["importable_count"], result["duplicate_count"]), (0, 1))
+        self.assertEqual(result["exclusions"][0]["reason"], "既に取り込み済みの請求です")
+        self.assertEqual(self.archive.read_bytes(), before)
+        self.assertFalse(self.current.exists())
+        executed = self.execute()
+        self.assertEqual((executed["imported_count"], executed["duplicate_count"]), (0, 1))
+        self.assertFalse(self.current.exists())
+
+    def test_execute_rechecks_archive_changed_after_preview(self):
+        data = self.excel()
+        self.assertEqual(self.preview(data)["importable_count"], 1)
+        self.write_archive_from_preview(data)
+        result = self.execute(data)
+        self.assertEqual((result["imported_count"], result["duplicate_count"]), (0, 1))
+
+    def test_new_six_key_is_imported_when_archive_contains_other_key(self):
+        self.write_archive_from_preview(self.excel([[2, "B社", 2000]]))
+        self.assertEqual(self.preview()["importable_count"], 1)
+        self.assertEqual(self.execute()["imported_count"], 1)
+
+    def test_archive_uses_existing_trim_date_and_amount_key_normalization(self):
+        self.write_archive_from_preview()
+        archive = pd.read_csv(self.archive, dtype=str, keep_default_na=False)
+        archive.loc[0, "コード"] = " 1 "
+        archive.loc[0, "得意先名"] = " A社 "
+        archive.loc[0, "請求日"] = "2026/01/15"
+        archive.loc[0, "請求金額"] = "1,200"
+        archive.to_csv(self.archive, index=False, encoding="utf-8-sig")
+        self.assertEqual(self.preview()["duplicate_count"], 1)
+
+    def test_import_cleanup_same_excel_preview_and_execute_cannot_revive(self):
+        data = self.excel()
+        self.assertEqual(self.execute(data)["imported_count"], 1)
+        current = pd.read_csv(self.current, dtype=str, keep_default_na=False)
+        current.loc[0, "残高"] = "0"
+        current.loc[0, "ステータス"] = "完了"
+        self.save_current(current)
+        self.assertEqual(cleanup_service.execute_receivable_cleanup(self.directory)["cleanup_target_count"], 1)
+        self.assertEqual(len(pd.read_csv(self.current)), 0)
+        self.assertEqual(len(pd.read_csv(self.archive)), 1)
+        preview = self.preview(data)
+        self.assertEqual((preview["importable_count"], preview["duplicate_count"]), (0, 1))
+        before = self.current.read_bytes()
+        executed = self.execute(data)
+        self.assertEqual((executed["imported_count"], executed["duplicate_count"]), (0, 1))
+        self.assertEqual(self.current.read_bytes(), before)
+
+    def test_pending_archive_transaction_blocks_preview_and_execute(self):
+        self.execute()
+        before = self.current.read_bytes()
+        persistence.prepare_transaction_artifacts(
+            self.directory, "pending-archive-import-test",
+            current_before_bytes=before, current_after_bytes=before,
+            history_before_bytes=b"", history_after_bytes=b"archive bytes",
+            target_pair=persistence.CURRENT_ARCHIVE_PAIR,
+            history_before_missing=True,
+        )
+        with self.assertRaises(persistence.ReceivableLedgerRecoveryRequired):
+            self.preview()
+        with self.assertRaises(persistence.ReceivableLedgerRecoveryRequired):
+            self.execute()
+        self.assertEqual(self.current.read_bytes(), before)
 
     def test_history_not_used_for_duplicates(self):
         frame = self.existing()

@@ -30,10 +30,13 @@ from receivable_engine import CURRENT_RECEIVABLE_COLUMNS, HISTORY_COLUMNS
 DEFAULT_RECEIVABLES_DIRECTORY = Path("data/receivables")
 CURRENT_FILENAME = "current.csv"
 HISTORY_FILENAME = "receivable_history.csv"
+IMPORT_ARCHIVE_FILENAME = "receivable_import_archive.csv"
 LEDGER_LOCK_FILENAME = ".receivable_ledger.lock"
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_POLL_INTERVAL_SECONDS = 0.05
 TRANSACTIONS_DIRECTORY_NAME = ".transactions"
+CURRENT_HISTORY_PAIR = "current_history"
+CURRENT_ARCHIVE_PAIR = "current_archive"
 SETTLEMENTS_DIRECTORY_NAME = ".settlements"
 TRANSACTION_MARKER_FILENAME = "marker.json"
 SETTLEMENT_RECEIPT_SCHEMA_VERSION = 1
@@ -342,6 +345,24 @@ def resolve_receivable_transaction_paths(
         history_before_artifact=workspace_directory / "history.before.csv",
         history_after_artifact=workspace_directory / "history.after.csv",
     )
+
+
+def _second_target_path(
+    paths: ReceivableTransactionPaths,
+    marker: Mapping[str, Any],
+) -> Path:
+    if marker.get("target_pair", CURRENT_HISTORY_PAIR) == CURRENT_ARCHIVE_PAIR:
+        return paths.receivables_directory / IMPORT_ARCHIVE_FILENAME
+    return resolve_receivable_ledger_paths(paths.receivables_directory).history_path
+
+
+def _second_target_before_bytes(
+    target: Path,
+    marker: Mapping[str, Any],
+) -> bytes | None:
+    if marker.get("history_before_missing", False):
+        return None if not target.exists() else target.read_bytes()
+    return target.read_bytes()
 
 
 def _write_all_and_fsync(file_handle: BinaryIO, content: bytes) -> None:
@@ -947,6 +968,11 @@ def _validate_transaction_marker(marker: Mapping[str, Any]) -> None:
         raise ReceivableLedgerRecoveryError(
             f"Unknown transaction marker decision: {marker['decision']}"
         )
+    pair = marker.get("target_pair", CURRENT_HISTORY_PAIR)
+    if pair not in (CURRENT_HISTORY_PAIR, CURRENT_ARCHIVE_PAIR):
+        raise ReceivableLedgerRecoveryError("Unknown transaction target pair")
+    if marker.get("history_before_missing", False) and pair != CURRENT_ARCHIVE_PAIR:
+        raise ReceivableLedgerRecoveryError("Only archive targets may begin absent")
 
     commit_states = {
         "READY_TO_COMMIT",
@@ -955,7 +981,11 @@ def _validate_transaction_marker(marker: Mapping[str, Any]) -> None:
         "COMMITTED",
     }
     if marker["state"] in commit_states:
-        if marker["decision"] != "COMMIT":
+        if marker["decision"] != "COMMIT" and not (
+            pair == CURRENT_ARCHIVE_PAIR
+            and marker["decision"] == "ROLLBACK"
+            and marker["state"] != "COMMITTED"
+        ):
             raise ReceivableLedgerRecoveryError(
                 f"{marker['state']} requires decision=COMMIT"
             )
@@ -1096,11 +1126,18 @@ def read_transaction_marker(
 def _initial_transaction_marker(
     paths: ReceivableTransactionPaths,
     settlement_id: str | None,
+    *,
+    target_pair: str = CURRENT_HISTORY_PAIR,
+    history_before_missing: bool = False,
 ) -> dict[str, Any]:
     ledger_paths = resolve_receivable_ledger_paths(
         paths.receivables_directory
     )
     now = _utc_now_text()
+    second_target = (
+        paths.receivables_directory / IMPORT_ARCHIVE_FILENAME
+        if target_pair == CURRENT_ARCHIVE_PAIR else ledger_paths.history_path
+    )
     return {
         "transaction_id": paths.workspace_directory.name,
         "settlement_id": settlement_id,
@@ -1109,7 +1146,9 @@ def _initial_transaction_marker(
         "created_at": now,
         "updated_at": now,
         "current_target": str(ledger_paths.current_path.resolve()),
-        "history_target": str(ledger_paths.history_path.resolve()),
+        "history_target": str(second_target.resolve()),
+        "target_pair": target_pair,
+        "history_before_missing": history_before_missing,
         "current_before_hash": None,
         "current_after_hash": None,
         "history_before_hash": None,
@@ -1138,6 +1177,8 @@ def create_transaction_workspace(
     transaction_id: str,
     *,
     settlement_id: str | None = None,
+    target_pair: str = CURRENT_HISTORY_PAIR,
+    history_before_missing: bool = False,
 ) -> tuple[ReceivableTransactionPaths, dict[str, Any]]:
     """Explicitly create a transaction workspace and PREPARING marker."""
 
@@ -1158,7 +1199,10 @@ def create_transaction_workspace(
 
     marker = write_transaction_marker(
         paths.marker_path,
-        _initial_transaction_marker(paths, settlement_id),
+        _initial_transaction_marker(
+            paths, settlement_id, target_pair=target_pair,
+            history_before_missing=history_before_missing,
+        ),
     )
     return paths, marker
 
@@ -1173,6 +1217,8 @@ def prepare_transaction_artifacts(
     history_after_bytes: bytes,
     settlement_id: str | None = None,
     marker_metadata: Mapping[str, Any] | None = None,
+    target_pair: str = CURRENT_HISTORY_PAIR,
+    history_before_missing: bool = False,
 ) -> tuple[ReceivableTransactionPaths, dict[str, Any]]:
     """Durably prepare four artifacts before recording COMMIT decision."""
 
@@ -1197,6 +1243,8 @@ def prepare_transaction_artifacts(
             receivables_directory,
             transaction_id,
             settlement_id=settlement_id,
+            target_pair=target_pair,
+            history_before_missing=history_before_missing,
         )
 
     artifacts = (
@@ -1286,7 +1334,10 @@ def classify_recovery_state(
 
     current_before = current_hash == marker["current_before_hash"]
     current_after = current_hash == marker["current_after_hash"]
-    history_before = history_hash == marker["history_before_hash"]
+    history_before = (
+        history_hash is None if marker.get("history_before_missing", False)
+        else history_hash == marker["history_before_hash"]
+    )
     history_after = history_hash == marker["history_after_hash"]
 
     if current_before and history_before:
@@ -1328,6 +1379,17 @@ def plan_recovery_actions(
         and marker["state"] != "PREPARING"
     )
     if not commit_decided:
+        if (
+            marker.get("target_pair") == CURRENT_ARCHIVE_PAIR
+            and marker["decision"] == "ROLLBACK"
+            and marker["state"] != "PREPARING"
+        ):
+            return {
+                RECOVERY_BOTH_BEFORE: ("ABORT",),
+                RECOVERY_CURRENT_AFTER_HISTORY_BEFORE: ("ROLL_BACK_CURRENT",),
+                RECOVERY_CURRENT_BEFORE_HISTORY_AFTER: ("ROLL_BACK_HISTORY",),
+                RECOVERY_BOTH_AFTER: ("ROLL_BACK_CURRENT", "ROLL_BACK_HISTORY"),
+            }[classification]
         if classification == RECOVERY_BOTH_BEFORE:
             return ("ABORT",)
         raise ReceivableLedgerRecoveryRequired(
@@ -1423,6 +1485,17 @@ def cleanup_transaction_workspace(
         marker["state"] == "PREPARING"
         and marker["decision"] == "ROLLBACK"
     )
+    if (
+        not cleanup_allowed
+        and marker.get("target_pair") == CURRENT_ARCHIVE_PAIR
+        and marker["decision"] == "ROLLBACK"
+    ):
+        paths = resolve_receivable_transaction_paths(workspace.parent.parent, workspace.name)
+        _validate_transaction_recovery_paths(paths, marker)
+        cleanup_allowed = classify_recovery_state(
+            paths.receivables_directory / CURRENT_FILENAME,
+            _second_target_path(paths, marker), marker,
+        ) == RECOVERY_BOTH_BEFORE
     if not cleanup_allowed:
         raise ReceivableLedgerRecoveryError(
             f"Transaction workspace is not safe to clean up: {workspace}"
@@ -1448,7 +1521,7 @@ def _validate_transaction_recovery_paths(
     )
     expected_targets = {
         "current_target": ledger_paths.current_path,
-        "history_target": ledger_paths.history_path,
+        "history_target": _second_target_path(paths, marker),
     }
     try:
         for field, expected_path in expected_targets.items():
@@ -1494,12 +1567,15 @@ def _validate_transaction_recovery_paths(
 def _recovery_required_message(
     paths: ReceivableTransactionPaths,
     detail: str,
+    marker: Mapping[str, Any] | None = None,
 ) -> str:
     ledger_paths = resolve_receivable_ledger_paths(
         paths.receivables_directory
     )
     current_hash = _file_hash_or_none(ledger_paths.current_path)
-    history_hash = _file_hash_or_none(ledger_paths.history_path)
+    history_hash = _file_hash_or_none(
+        _second_target_path(paths, marker or {})
+    )
     return (
         f"transaction_id={paths.workspace_directory.name}; "
         f"current_hash={current_hash}; history_hash={history_hash}; "
@@ -1512,7 +1588,7 @@ def _raise_transaction_recovery_required(
     marker: Mapping[str, Any] | None,
     detail: str,
 ) -> None:
-    message = _recovery_required_message(paths, detail)
+    message = _recovery_required_message(paths, detail, marker)
     if marker is not None and marker.get("state") != "RECOVERY_REQUIRED":
         try:
             mark_transaction_recovery_required(paths.marker_path, message)
@@ -1557,7 +1633,7 @@ def _verify_final_after_hashes(
     )
     classification = classify_recovery_state(
         ledger_paths.current_path,
-        ledger_paths.history_path,
+        _second_target_path(paths, marker),
         marker,
     )
     if classification != RECOVERY_BOTH_AFTER:
@@ -1607,7 +1683,9 @@ def _abort_preparing_transaction_locked(
         current_before = paths.current_before_artifact.read_bytes()
         history_before = paths.history_before_artifact.read_bytes()
         current_target = ledger_paths.current_path.read_bytes()
-        history_target = ledger_paths.history_path.read_bytes()
+        history_target = _second_target_before_bytes(
+            _second_target_path(paths, marker), marker
+        )
     except OSError:
         _raise_transaction_recovery_required(
             paths,
@@ -1615,7 +1693,11 @@ def _abort_preparing_transaction_locked(
             "PREPARING transaction cannot prove both targets are before",
         )
 
-    if current_target != current_before or history_target != history_before:
+    expected_history_before = (
+        None if marker.get("history_before_missing", False)
+        else history_before
+    )
+    if current_target != current_before or history_target != expected_history_before:
         _raise_transaction_recovery_required(
             paths,
             marker,
@@ -1679,6 +1761,8 @@ def _abort_failed_prepare_in_same_call(
             paths.receivables_directory,
             current_before_bytes,
             history_before_bytes,
+            target_pair=marker.get("target_pair", CURRENT_HISTORY_PAIR),
+            history_before_missing=marker.get("history_before_missing", False),
         )
     except ReceivableLedgerError as exc:
         _raise_transaction_recovery_required(paths, marker, str(exc))
@@ -1800,7 +1884,7 @@ def _recover_transaction_workspace_locked(
     )
     classification = classify_recovery_state(
         ledger_paths.current_path,
-        ledger_paths.history_path,
+        _second_target_path(paths, marker),
         marker,
     )
     if classification == RECOVERY_UNKNOWN:
@@ -1809,6 +1893,31 @@ def _recover_transaction_workspace_locked(
         )
 
     actions = plan_recovery_actions(marker, classification)
+    if "ROLL_BACK_CURRENT" in actions:
+        rollback_from_artifact(
+            paths.current_before_artifact,
+            marker["current_before_hash"],
+            ledger_paths.current_path,
+        )
+    if "ROLL_BACK_HISTORY" in actions:
+        second_target = _second_target_path(paths, marker)
+        if marker.get("history_before_missing", False):
+            try:
+                second_target.unlink(missing_ok=True)
+            except OSError as exc:
+                _raise_transaction_recovery_required(paths, marker, str(exc))
+        else:
+            rollback_from_artifact(
+                paths.history_before_artifact,
+                marker["history_before_hash"], second_target,
+            )
+    if "ABORT" in actions or any(action.startswith("ROLL_BACK_") for action in actions):
+        if classify_recovery_state(
+            ledger_paths.current_path, _second_target_path(paths, marker), marker
+        ) != RECOVERY_BOTH_BEFORE:
+            _raise_transaction_recovery_required(paths, marker, "rollback did not restore both targets")
+        cleanup_transaction_workspace(paths.workspace_directory)
+        return _transaction_result(marker, state="ABORTED", workspace_cleaned=True, recovered=True)
     if "ROLL_FORWARD_CURRENT" in actions:
         roll_forward_from_artifact(
             paths.current_after_artifact,
@@ -1822,7 +1931,7 @@ def _recover_transaction_workspace_locked(
         roll_forward_from_artifact(
             paths.history_after_artifact,
             marker["history_after_hash"],
-            ledger_paths.history_path,
+            _second_target_path(paths, marker),
         )
         marker = transition_transaction_marker(
             paths.marker_path, "HISTORY_REPLACED"
@@ -1854,11 +1963,17 @@ def _preparing_workspace_is_recoverable_read_only(
         current_before = paths.current_before_artifact.read_bytes()
         history_before = paths.history_before_artifact.read_bytes()
         current_target = ledger_paths.current_path.read_bytes()
-        history_target = ledger_paths.history_path.read_bytes()
+        history_target = _second_target_before_bytes(
+            _second_target_path(paths, marker), marker
+        )
     except OSError:
         return False
 
-    if current_target != current_before or history_target != history_before:
+    expected_history_before = (
+        None if marker.get("history_before_missing", False)
+        else history_before
+    )
+    if current_target != current_before or history_target != expected_history_before:
         return False
 
     for artifact_path, hash_field in (
@@ -1895,7 +2010,7 @@ def _commit_workspace_is_recoverable_read_only(
     )
     classification = classify_recovery_state(
         ledger_paths.current_path,
-        ledger_paths.history_path,
+        _second_target_path(paths, marker),
         marker,
     )
     if classification == RECOVERY_UNKNOWN:
@@ -2275,11 +2390,21 @@ def _read_and_verify_transaction_before_targets(
     receivables_directory: str | os.PathLike[str],
     current_before_bytes: bytes,
     history_before_bytes: bytes,
+    *,
+    target_pair: str = CURRENT_HISTORY_PAIR,
+    history_before_missing: bool = False,
 ) -> None:
     ledger_paths = resolve_receivable_ledger_paths(receivables_directory)
+    second_target = (
+        ledger_paths.receivables_directory / IMPORT_ARCHIVE_FILENAME
+        if target_pair == CURRENT_ARCHIVE_PAIR else ledger_paths.history_path
+    )
     try:
         actual_current = ledger_paths.current_path.read_bytes()
-        actual_history = ledger_paths.history_path.read_bytes()
+        actual_history = (
+            None if history_before_missing and not second_target.exists()
+            else second_target.read_bytes()
+        )
     except FileNotFoundError as exc:
         raise ReceivableLedgerConflictError(
             f"A required ledger target is missing: {exc.filename}"
@@ -2293,9 +2418,11 @@ def _read_and_verify_transaction_before_targets(
         raise ReceivableLedgerConflictError(
             "current.csv no longer matches supplied before bytes"
         )
-    if actual_history != history_before_bytes:
+    if actual_history != (None if history_before_missing else history_before_bytes):
         raise ReceivableLedgerConflictError(
             "receivable_history.csv no longer matches supplied before bytes"
+            if target_pair == CURRENT_HISTORY_PAIR else
+            "receivable_import_archive.csv no longer matches supplied before bytes"
         )
 
 
@@ -2334,6 +2461,13 @@ def _commit_transaction_targets_locked(
     ledger_paths = resolve_receivable_ledger_paths(
         paths.receivables_directory
     )
+    second_target = _second_target_path(paths, marker)
+    if marker.get("target_pair") == CURRENT_ARCHIVE_PAIR:
+        roll_forward_from_artifact(
+            paths.history_after_artifact,
+            marker["history_after_hash"], second_target,
+        )
+        marker = transition_transaction_marker(paths.marker_path, "HISTORY_REPLACED")
     roll_forward_from_artifact(
         paths.current_after_artifact,
         marker["current_after_hash"],
@@ -2343,14 +2477,14 @@ def _commit_transaction_targets_locked(
         paths.marker_path, "CURRENT_REPLACED"
     )
 
-    roll_forward_from_artifact(
-        paths.history_after_artifact,
-        marker["history_after_hash"],
-        ledger_paths.history_path,
-    )
-    marker = transition_transaction_marker(
-        paths.marker_path, "HISTORY_REPLACED"
-    )
+    if marker.get("target_pair") != CURRENT_ARCHIVE_PAIR:
+        roll_forward_from_artifact(
+            paths.history_after_artifact,
+            marker["history_after_hash"], second_target,
+        )
+        marker = transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED"
+        )
 
     _verify_final_after_hashes(paths, marker)
     marker = transition_transaction_marker(paths.marker_path, "COMMITTED")
@@ -2372,10 +2506,17 @@ def commit_receivable_ledger_transaction(
     history_before_bytes: bytes,
     history_after_bytes: bytes,
     settlement_id: str | None = None,
+    target_pair: str = CURRENT_HISTORY_PAIR,
+    history_before_missing: bool = False,
     lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
 ) -> ReceivableLedgerTransactionResult:
-    """Commit exact current/history bytes as one recoverable transaction."""
+    """Commit exact current/second-target bytes as one recoverable transaction."""
+
+    if target_pair not in (CURRENT_HISTORY_PAIR, CURRENT_ARCHIVE_PAIR):
+        raise ValueError("unknown transaction target pair")
+    if history_before_missing and target_pair != CURRENT_ARCHIVE_PAIR:
+        raise ValueError("only archive targets may begin absent")
 
     byte_values = (
         current_before_bytes,
@@ -2397,6 +2538,8 @@ def commit_receivable_ledger_transaction(
             receivables_directory,
             current_before_bytes,
             history_before_bytes,
+            target_pair=target_pair,
+            history_before_missing=history_before_missing,
         )
 
         paths = resolve_receivable_transaction_paths(
@@ -2411,6 +2554,8 @@ def commit_receivable_ledger_transaction(
                 history_before_bytes=history_before_bytes,
                 history_after_bytes=history_after_bytes,
                 settlement_id=settlement_id,
+                target_pair=target_pair,
+                history_before_missing=history_before_missing,
             )
         except ReceivableLedgerError:
             if paths.workspace_directory.exists():
@@ -2429,6 +2574,18 @@ def commit_receivable_ledger_transaction(
         try:
             return _commit_transaction_targets_locked(paths, marker)
         except ReceivableLedgerError as original_error:
+            if target_pair == CURRENT_ARCHIVE_PAIR:
+                try:
+                    failed_marker = read_transaction_marker(paths.marker_path)
+                    transition_transaction_marker(
+                        paths.marker_path, failed_marker["state"], decision="ROLLBACK"
+                    )
+                    _recover_transaction_workspace_locked(paths)
+                except ReceivableLedgerError as rollback_error:
+                    raise ReceivableLedgerRecoveryRequired(
+                        "Archive transaction rollback requires recovery"
+                    ) from rollback_error
+                raise original_error
             try:
                 return _recover_transaction_workspace_locked(paths)
             except ReceivableLedgerRecoveryRequired:

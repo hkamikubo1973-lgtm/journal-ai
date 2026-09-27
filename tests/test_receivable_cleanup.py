@@ -12,6 +12,8 @@ sys.path.insert(0, str(SRC_DIR))
 
 import api.receivable as api  # noqa: E402
 import receivable_cleanup_service as service  # noqa: E402
+import receivable_persistence_service as persistence  # noqa: E402
+from receivable_import_archive_service import ARCHIVE_COLUMNS  # noqa: E402
 from api.journal import app  # noqa: E402
 from receivable_engine import CURRENT_RECEIVABLE_COLUMNS  # noqa: E402
 from receivable_persistence_service import (  # noqa: E402
@@ -38,6 +40,7 @@ class ReceivableCleanupTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.current = self.directory / "current.csv"
+        self.archive = self.directory / "receivable_import_archive.csv"
         self.history = self.directory / "receivable_history.csv"
         self.history.write_bytes(b"history sentinel")
         self.receipt = self.directory / ".settlements" / "receipt.json"
@@ -84,10 +87,174 @@ class ReceivableCleanupTest(unittest.TestCase):
     def test_zero_target_does_not_write_current(self):
         self.write_current([row("keep")])
         before = self.current.read_bytes()
-        with patch.object(service, "atomic_write_bytes") as writer:
+        with patch.object(service, "commit_receivable_ledger_transaction") as writer:
             self.assertEqual(service.execute_receivable_cleanup(self.directory)["cleanup_target_count"], 0)
         writer.assert_not_called()
         self.assertEqual(self.current.read_bytes(), before)
+        self.assertFalse(self.archive.exists())
+
+    def test_cleanup_creates_archive_from_target_rows_only(self):
+        self.write_current([row("done", status="完了"), row("keep")])
+        self.assertEqual(service.execute_receivable_cleanup(self.directory)["cleanup_target_count"], 1)
+        archived = pd.read_csv(self.archive, dtype=str, keep_default_na=False)
+        self.assertEqual(archived.columns.tolist(), ARCHIVE_COLUMNS)
+        self.assertEqual(archived.iloc[0]["未収ID"], "done")
+        self.assertEqual(archived.iloc[0]["コード"], "done")
+        self.assertEqual(pd.read_csv(self.current, dtype=str)["コード"].tolist(), ["keep"])
+
+    def test_existing_archive_order_values_and_keys_are_preserved(self):
+        first = row("first", status="完了", balance="0", 摘要="old")
+        second = row("second", status="完了", balance="0")
+        self.write_current([first, second])
+        columns = ARCHIVE_COLUMNS + ["追加列"]
+        archived_first = {column: first.get(column, "") for column in columns}
+        archived_first["未収ID"] = "prior-id"
+        archived_first["追加列"] = " original  "
+        pd.DataFrame([archived_first], columns=columns).to_csv(
+            self.archive, index=False, encoding="utf-8-sig"
+        )
+        service.execute_receivable_cleanup(self.directory)
+        archived = pd.read_csv(self.archive, dtype=str, keep_default_na=False)
+        self.assertEqual(archived.columns.tolist(), columns)
+        self.assertEqual(archived["コード"].tolist(), ["first", "second"])
+        self.assertEqual(archived.iloc[0].to_dict(), archived_first)
+        self.assertEqual(archived.iloc[1]["追加列"], "")
+
+    def test_existing_archive_is_not_written_for_zero_target(self):
+        self.write_current([row("keep")])
+        pd.DataFrame([row("old")], columns=ARCHIVE_COLUMNS).to_csv(
+            self.archive, index=False, encoding="utf-8-sig"
+        )
+        before = self.archive.read_bytes()
+        service.execute_receivable_cleanup(self.directory)
+        self.assertEqual(self.archive.read_bytes(), before)
+
+    def test_archive_target_write_failure_leaves_current_and_archive_absent(self):
+        self.write_current([row("done", status="完了")])
+        before = self.current.read_bytes()
+        real_write = persistence.atomic_write_bytes
+
+        def fail_archive(path, content):
+            if Path(path) == self.archive:
+                raise ReceivableLedgerWriteError("archive target write failed")
+            return real_write(path, content)
+
+        with patch.object(persistence, "atomic_write_bytes", side_effect=fail_archive):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.execute_receivable_cleanup(self.directory)
+        self.assertEqual(self.current.read_bytes(), before)
+        self.assertFalse(self.archive.exists())
+
+    def test_current_target_write_failure_removes_new_archive(self):
+        self.write_current([row("done", status="完了")])
+        before = self.current.read_bytes()
+        real_write = persistence.atomic_write_bytes
+
+        def fail_current(path, content):
+            if Path(path) == self.current:
+                raise ReceivableLedgerWriteError("current target write failed")
+            return real_write(path, content)
+
+        with patch.object(persistence, "atomic_write_bytes", side_effect=fail_current):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.execute_receivable_cleanup(self.directory)
+        self.assertEqual(self.current.read_bytes(), before)
+        self.assertFalse(self.archive.exists())
+
+    def test_current_target_write_failure_restores_existing_archive(self):
+        self.write_current([row("done", status="完了")])
+        current_before = self.current.read_bytes()
+        pd.DataFrame([row("old")], columns=ARCHIVE_COLUMNS).to_csv(
+            self.archive, index=False, encoding="utf-8-sig"
+        )
+        archive_before = self.archive.read_bytes()
+        real_write = persistence.atomic_write_bytes
+
+        def fail_current(path, content):
+            if Path(path) == self.current:
+                raise ReceivableLedgerWriteError("current target write failed")
+            return real_write(path, content)
+
+        with patch.object(persistence, "atomic_write_bytes", side_effect=fail_current):
+            with self.assertRaises(ReceivableLedgerWriteError):
+                service.execute_receivable_cleanup(self.directory)
+        self.assertEqual(self.current.read_bytes(), current_before)
+        self.assertEqual(self.archive.read_bytes(), archive_before)
+
+    def test_invalid_archive_blocks_cleanup_without_removing_current(self):
+        self.write_current([row("done", status="完了")])
+        before = self.current.read_bytes()
+        self.archive.write_bytes(b"bad\nvalue\n")
+        response = self.client.post("/api/receivables/cleanup")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.current.read_bytes(), before)
+
+    def test_changed_current_between_snapshot_and_commit_fails_closed(self):
+        self.write_current([row("done", status="完了")])
+        real_commit = service.commit_receivable_ledger_transaction
+
+        def change_then_commit(*args, **kwargs):
+            self.write_current([row("changed")])
+            return real_commit(*args, **kwargs)
+
+        with patch.object(service, "commit_receivable_ledger_transaction", side_effect=change_then_commit):
+            response = self.client.post("/api/receivables/cleanup")
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(self.archive.exists())
+        self.assertEqual(pd.read_csv(self.current, dtype=str)["コード"].tolist(), ["changed"])
+
+    def test_recovery_rolls_forward_archive_first_workspace(self):
+        self.write_current([row("done", status="完了")])
+        current_before = self.current.read_bytes()
+        current_after = service.serialize_receivable_dataframe(
+            pd.DataFrame(columns=CURRENT_RECEIVABLE_COLUMNS)
+        )
+        archive_after = service.serialize_receivable_dataframe(
+            pd.DataFrame([{column: row("done").get(column, "") for column in ARCHIVE_COLUMNS}])
+        )
+        paths, marker = persistence.prepare_transaction_artifacts(
+            self.directory, "archive-recovery-test",
+            current_before_bytes=current_before, current_after_bytes=current_after,
+            history_before_bytes=b"", history_after_bytes=archive_after,
+            target_pair=persistence.CURRENT_ARCHIVE_PAIR,
+            history_before_missing=True,
+        )
+        persistence.roll_forward_from_artifact(
+            paths.history_after_artifact, marker["history_after_hash"], self.archive,
+        )
+        persistence.transition_transaction_marker(paths.marker_path, "HISTORY_REPLACED")
+        recovered = persistence.recover_receivable_ledger_transactions(self.directory)
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(self.current.read_bytes(), current_after)
+        self.assertEqual(self.archive.read_bytes(), archive_after)
+        self.assertEqual(self.history.read_bytes(), b"history sentinel")
+        self.assertFalse(paths.workspace_directory.exists())
+
+    def test_recovery_finishes_durable_archive_rollback(self):
+        self.write_current([row("done", status="完了")])
+        before = self.current.read_bytes()
+        archive_after = service.serialize_receivable_dataframe(
+            pd.DataFrame([{column: row("done").get(column, "") for column in ARCHIVE_COLUMNS}])
+        )
+        paths, marker = persistence.prepare_transaction_artifacts(
+            self.directory, "archive-rollback-recovery-test",
+            current_before_bytes=before, current_after_bytes=before,
+            history_before_bytes=b"", history_after_bytes=archive_after,
+            target_pair=persistence.CURRENT_ARCHIVE_PAIR,
+            history_before_missing=True,
+        )
+        persistence.roll_forward_from_artifact(
+            paths.history_after_artifact, marker["history_after_hash"], self.archive,
+        )
+        persistence.transition_transaction_marker(paths.marker_path, "HISTORY_REPLACED")
+        persistence.transition_transaction_marker(
+            paths.marker_path, "HISTORY_REPLACED", decision="ROLLBACK"
+        )
+        recovered = persistence.recover_receivable_ledger_transactions(self.directory)
+        self.assertEqual(recovered[0].state, "ABORTED")
+        self.assertEqual(self.current.read_bytes(), before)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(paths.workspace_directory.exists())
 
     def test_execute_rechecks_after_summary(self):
         self.write_current([row("keep")])
@@ -125,7 +292,7 @@ class ReceivableCleanupTest(unittest.TestCase):
     def test_atomic_write_failure_preserves_current_and_private_errors(self):
         self.write_current([row("done", status="完了")])
         before = self.current.read_bytes()
-        with patch.object(service, "atomic_write_bytes", side_effect=ReceivableLedgerWriteError("PRIVATE_PATH")):
+        with patch.object(service, "commit_receivable_ledger_transaction", side_effect=ReceivableLedgerWriteError("PRIVATE_PATH")):
             response = self.client.post("/api/receivables/cleanup")
         self.assertEqual(response.status_code, 500)
         self.assertNotIn("PRIVATE_PATH", response.text)

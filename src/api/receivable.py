@@ -353,6 +353,12 @@ def _run_excel_import(operation, file, invoice_date, default_account, department
     except ValueError as error:
         message = "見出し行にコード・得意先名１・繰越しがありません"
         raise HTTPException(status_code=422, detail=message if str(error) == message else "Excelファイルまたは入力条件を確認してください。") from error
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(status_code=423, detail="未収台帳をほかの処理が使用中です。") from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(status_code=503, detail="未収台帳の復旧確認が必要です。") from error
+    except (ReceivableLedgerMalformedError, ReceivableLedgerSchemaError) as error:
+        raise HTTPException(status_code=503, detail="未収取込履歴を安全に読み込めません。") from error
     except Exception as error:
         logger.exception("Receivable Excel import failed")
         raise HTTPException(status_code=500, detail="未収Excelの処理に失敗しました。未収一覧を再読込して確認してください。") from error
@@ -442,6 +448,11 @@ def _load_ready_current_snapshot(receivables_directory: Path):
 def _cleanup_response(operation, receivables_directory: Path):
     try:
         return operation(receivables_directory)
+    except ReceivableLedgerConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="未収台帳が更新されました。再読込して整理対象を確認してください。",
+        ) from error
     except ReceivableLedgerLockTimeout as error:
         raise HTTPException(
             status_code=423,

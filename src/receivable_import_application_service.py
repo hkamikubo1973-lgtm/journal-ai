@@ -12,14 +12,44 @@ from receivable_engine import (
     exclude_duplicate_receivables,
     normalize_standard_receivable_csv,
 )
+from receivable_duplicate_key_service import BILLING_DUPLICATE_COLUMNS
+from receivable_import_archive_service import load_receivable_import_archive
+from receivable_persistence_service import (
+    LEDGER_HEALTH_READY,
+    ReceivableLedgerRecoveryRequired,
+    _inspect_receivable_ledger_health_locked,
+    receivable_ledger_lock,
+)
 
 
-BILLING_DUPLICATE_COLUMNS = [
-    "コード", "得意先名", "請求日", "請求金額", "未収科目", "未収補助",
-]
+def _exclude_import_duplicates(normalized, current_path, *, ledger_lock_held=False):
+    directory = Path(current_path).parent
+    def inspect_and_exclude():
+        health = _inspect_receivable_ledger_health_locked(directory)
+        if health.status != LEDGER_HEALTH_READY:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Receivable ledger health is {health.status}"
+            )
+        archive, _ = load_receivable_import_archive(directory)
+        return exclude_duplicate_receivables(
+            normalized, BILLING_DUPLICATE_COLUMNS, current_path=current_path,
+            archive_df=archive,
+        )
+
+    if ledger_lock_held:
+        return inspect_and_exclude()
+    # Preserve the legacy absent-current Preview behavior: no file is created.
+    if not any((directory / name).exists() for name in (
+        "current.csv", "receivable_import_archive.csv", ".transactions"
+    )):
+        return exclude_duplicate_receivables(
+            normalized, BILLING_DUPLICATE_COLUMNS, current_path=current_path,
+        )
+    with receivable_ledger_lock(directory):
+        return inspect_and_exclude()
 
 
-def _prepare(file_bytes, invoice_date, payment_due_date, default_account, department, current_path):
+def _prepare(file_bytes, invoice_date, payment_due_date, default_account, department, current_path, *, ledger_lock_held=False):
     with pd.ExcelFile(io.BytesIO(file_bytes)) as workbook:
         sheet_name = "プリント用" if "プリント用" in workbook.sheet_names else workbook.sheet_names[0]
         raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None, dtype=object)
@@ -27,8 +57,8 @@ def _prepare(file_bytes, invoice_date, payment_due_date, default_account, depart
         raw, invoice_date, payment_due_date, default_account, department,
     )
     normalized, validation_errors = normalize_standard_receivable_csv(source)
-    valid, duplicates = exclude_duplicate_receivables(
-        normalized, BILLING_DUPLICATE_COLUMNS, current_path=current_path,
+    valid, duplicates = _exclude_import_duplicates(
+        normalized, current_path, ledger_lock_held=ledger_lock_held,
     )
     errors = pd.concat([
         conversion_errors, validation_errors,
@@ -72,12 +102,21 @@ def execute_receivable_import(
     receivables_directory=Path("data/receivables"),
 ):
     current_path = Path(receivables_directory) / "current.csv"
-    valid, result = _prepare(
-        file_bytes, invoice_date, payment_due_date, default_account, department, current_path,
-    )
-    imported, duplicates = append_standard_receivables(
-        valid, duplicate_columns=BILLING_DUPLICATE_COLUMNS, current_path=current_path,
-    )
+    with receivable_ledger_lock(receivables_directory):
+        health = _inspect_receivable_ledger_health_locked(receivables_directory)
+        if health.status != LEDGER_HEALTH_READY:
+            raise ReceivableLedgerRecoveryRequired(
+                f"Receivable ledger health is {health.status}"
+            )
+        valid, result = _prepare(
+            file_bytes, invoice_date, payment_due_date, default_account, department, current_path,
+            ledger_lock_held=True,
+        )
+        latest_archive, _ = load_receivable_import_archive(Path(receivables_directory))
+        imported, duplicates = append_standard_receivables(
+            valid, duplicate_columns=BILLING_DUPLICATE_COLUMNS,
+            current_path=current_path, archive_df=latest_archive,
+        )
     duplicate_count = result["duplicate_count"] + duplicates
     message = f"未収一覧へ{imported}件取り込みました" if imported else "追加対象の未収明細はありません"
     if duplicate_count:

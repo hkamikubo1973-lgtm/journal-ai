@@ -2,6 +2,11 @@ import pandas as pd
 import shutil
 import os
 import uuid
+from pathlib import Path
+from receivable_duplicate_key_service import (
+    BILLING_DUPLICATE_COLUMNS,
+    receivable_duplicate_key,
+)
 
 from datetime import datetime
 
@@ -613,62 +618,31 @@ def exclude_duplicate_receivables(
     duplicate_columns,
     *,
     current_path="data/receivables/current.csv",
+    archive_df=None,
 ):
 
     current_df = load_receivables(current_path)
 
-    def row_key(row):
-
-        values = []
-
-        for column in duplicate_columns:
-            value = str(row.get(column, "")).strip()
-
-            if column in ["請求日", "入金予定日"]:
-                normalized_date = None
-
-                try:
-                    if len(value) == 8 and value.isdigit():
-                        normalized_date = datetime.strptime(
-                            value,
-                            "%Y%m%d"
-                        )
-                    else:
-                        date_parts = value.replace(
-                            "/",
-                            "-"
-                        ).split("-")
-
-                        if len(date_parts) == 3:
-                            normalized_date = datetime(
-                                int(date_parts[0]),
-                                int(date_parts[1]),
-                                int(date_parts[2])
-                            )
-                except ValueError:
-                    normalized_date = None
-
-                if normalized_date is not None:
-                    value = normalized_date.strftime(
-                        "%Y-%m-%d"
-                    )
-
-            if column in ["請求金額", "残高"]:
-                value = value.replace(",", "")
-            values.append(value)
-
-        return tuple(values)
-
     registered_keys = {
-        row_key(row)
+        receivable_duplicate_key(row, duplicate_columns)
         for _, row in current_df.iterrows()
     }
+    if archive_df is None and list(duplicate_columns) == BILLING_DUPLICATE_COLUMNS:
+        from receivable_import_archive_service import load_receivable_import_archive
+        archive_df, _ = load_receivable_import_archive(
+            Path(current_path).parent
+        )
+    if archive_df is not None:
+        registered_keys.update(
+            receivable_duplicate_key(row, duplicate_columns)
+            for _, row in archive_df.iterrows()
+        )
     append_indexes = []
     duplicate_indexes = []
 
     for index, row in standard_df.iterrows():
 
-        key = row_key(row)
+        key = receivable_duplicate_key(row, duplicate_columns)
 
         if key in registered_keys:
             duplicate_indexes.append(index)
@@ -693,6 +667,7 @@ def append_standard_receivables(
     duplicate_columns=None,
     *,
     current_path="data/receivables/current.csv",
+    archive_df=None,
 ):
 
     current_df = load_receivables(current_path)
@@ -714,6 +689,7 @@ def append_standard_receivables(
         standard_df,
         duplicate_columns,
         current_path=current_path,
+        archive_df=archive_df,
     )
     duplicate_count = len(duplicate_df)
 
