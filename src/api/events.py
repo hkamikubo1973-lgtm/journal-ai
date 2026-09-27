@@ -18,6 +18,7 @@ from events_application_service import (
     list_events_for_web,
 )
 from events_engine import EVENTS_PATH, InvalidEventsCsv
+from schedule_ai_context_provider import build_schedule_ai_context
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,11 @@ def _safe_response(operation):
 @router.get("")
 def list_events(path: Path = Depends(get_events_path)):
     return _safe_response(lambda: list_events_for_web(path))
+
+
+@router.get("/ai-context")
+def get_schedule_ai_context(path: Path = Depends(get_events_path)):
+    return _safe_response(lambda: build_schedule_ai_context(path))
 
 
 @router.post("")
