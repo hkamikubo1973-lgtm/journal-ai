@@ -26,33 +26,14 @@ import type {
   SubAccountRelation,
 } from "./types/journal";
 import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
+import ScheduleWorkspace from "./components/ScheduleWorkspace";
+import WorkspaceTabs, { type Workspace } from "./components/WorkspaceTabs";
 import {
   addReceivableSettlementToCart,
   getRegistrationCartItemIdentity,
   removeRegistrationCartGroup,
   type RegistrationCartBatchResult,
 } from "./registrationCart";
-
-type Workspace = "journal" | "receivable";
-
-function WorkspaceTabs({ active, onChange, journalDisabled = false }: {
-  active: Workspace;
-  onChange: (workspace: Workspace) => void;
-  journalDisabled?: boolean;
-}) {
-  return (
-    <nav className="workspace-tabs" aria-label="業務画面" role="tablist">
-      <button type="button" role="tab" aria-selected={active === "journal"} disabled={journalDisabled}
-        className={active === "journal" ? "active" : ""} onClick={() => onChange("journal")}>
-        通常仕訳
-      </button>
-      <button type="button" role="tab" aria-selected={active === "receivable"}
-        className={active === "receivable" ? "active" : ""} onClick={() => onChange("receivable")}>
-        未収消込
-      </button>
-    </nav>
-  );
-}
 
 const blockRowFields = [
   { key: "date", label: "日付", amount: false },
@@ -1163,6 +1144,16 @@ export default function App() {
           onRegistrationHandoff={addReceivableHandoffItems} />
       </main>
     );
+  }
+
+  if (activeWorkspace === "schedule") {
+    return <main className="app-shell schedule-shell">
+      <header className="page-header">
+        <div className="page-title"><h1>journal-ai</h1><span>スケジュール</span></div>
+        <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
+      </header>
+      <ScheduleWorkspace />
+    </main>;
   }
 
   return (
