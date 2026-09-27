@@ -38,6 +38,7 @@ from journal_export_service import (
     EpsonExportValidationError,
     export_epson_csv,
 )
+from journal_ai_context_provider import build_journal_ai_context
 from journal_master_service import load_journal_masters
 from journal_registration_service import prepare_registration
 from journal_save_service import EpsonSaveError, save_and_register_epson_csv
@@ -96,6 +97,37 @@ class JournalSearchResponse(BaseModel):
     query: JournalSearchQuery
     count: int
     candidates: list[JournalSearchCandidate]
+
+
+class JournalAiDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    voucherDate: StrictStr
+    voucherNo: StrictStr
+    voucherSummary: StrictStr
+    debitAccountCode: StrictStr
+    debitAccountName: StrictStr
+    debitSubCode: StrictStr
+    debitSubName: StrictStr
+    debitDeptCode: StrictStr
+    debitDeptName: StrictStr
+    creditAccountCode: StrictStr
+    creditAccountName: StrictStr
+    creditSubCode: StrictStr
+    creditSubName: StrictStr
+    creditDeptCode: StrictStr
+    creditDeptName: StrictStr
+    amount: StrictStr
+    debitAmount: StrictStr
+    creditAmount: StrictStr
+    summary: StrictStr
+
+
+class JournalAiContextRequest(JournalSearchRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    keyword: StrictStr = Field(min_length=1)
+    draft: Optional[JournalAiDraftRequest] = None
 
 
 class JournalEditFormRequest(BaseModel):
@@ -390,6 +422,24 @@ def post_journal_search(request: JournalSearchRequest):
         raise HTTPException(
             status_code=500,
             detail="仕訳を検索できませんでした",
+        ) from error
+
+
+@app.post("/api/journal/ai-context")
+def post_journal_ai_context(request: JournalAiContextRequest):
+    try:
+        draft = request.draft.model_dump() if request.draft is not None else None
+        return build_journal_ai_context(
+            keyword=request.keyword,
+            department=request.department,
+            amount=request.amount,
+            limit=request.limit,
+            draft=draft,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="仕訳のContextを生成できませんでした",
         ) from error
 
 
