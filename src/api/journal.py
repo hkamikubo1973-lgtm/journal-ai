@@ -15,7 +15,7 @@ from engine import load_data
 from api.journal_import import router as journal_import_router
 from api.journal_master_update import router as master_update_router
 from api.output_settings import router as output_settings_router
-from api.events import router as events_router
+from api.events import get_events_path, router as events_router
 from api.receivable_cart import router as receivable_cart_router
 from epson_export_application_service import (
     EpsonExportApplicationValidationError,
@@ -40,6 +40,7 @@ from journal_export_service import (
 )
 from journal_ai_context_provider import build_journal_ai_context
 from journal_master_service import load_journal_masters
+from maintenance_ai_context_provider import build_maintenance_ai_context
 from journal_registration_service import prepare_registration
 from journal_save_service import EpsonSaveError, save_and_register_epson_csv
 from journal_search_service import search_journals
@@ -440,6 +441,23 @@ def post_journal_ai_context(request: JournalAiContextRequest):
         raise HTTPException(
             status_code=500,
             detail="仕訳のContextを生成できませんでした",
+        ) from error
+
+
+@app.get("/api/maintenance/ai-context")
+def get_maintenance_ai_context(
+    receivables_directory: Path = Depends(get_receivables_directory),
+    events_path: Path = Depends(get_events_path),
+):
+    try:
+        return build_maintenance_ai_context(
+            receivables_directory=receivables_directory,
+            events_path=events_path,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="保守情報のContextを生成できませんでした",
         ) from error
 
 

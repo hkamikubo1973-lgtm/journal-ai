@@ -49,11 +49,16 @@ def _counts(current: pd.DataFrame) -> dict[str, int]:
     }
 
 
+def summarize_receivable_cleanup_rows(current: pd.DataFrame) -> dict[str, int]:
+    """Apply the existing cleanup predicate to an already-read ledger snapshot."""
+    return _counts(current)
+
+
 def summarize_receivable_cleanup(receivables_directory: Path) -> dict[str, int]:
     """Inspect a ready ledger without changing current.csv."""
 
     snapshot = read_receivable_current_snapshot_when_ready(receivables_directory)
-    return _counts(snapshot.current_df)
+    return summarize_receivable_cleanup_rows(snapshot.current_df)
 
 
 def execute_receivable_cleanup(
