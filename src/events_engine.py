@@ -2,6 +2,7 @@
 
 import calendar
 import csv
+import io
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -74,6 +75,10 @@ EVENT_TYPES = {"tax", "payment", "card", "other"}
 EVENT_CYCLES = {"monthly", "yearly"}
 EVENT_STATUSES = {"pending", "notified", "done", "skip"}
 EVENTS_PATH = Path(__file__).resolve().parent.parent / "data" / "events.csv"
+
+
+class InvalidEventsCsv(ValueError):
+    """An existing events CSV cannot be safely read for the Web UI."""
 
 
 def ensure_events_csv(path=EVENTS_PATH):
@@ -167,6 +172,37 @@ def load_events(path=EVENTS_PATH):
     ):
         save_events(events, path)
     return events
+
+
+def parse_events_csv_read_only(raw_bytes):
+    """Parse either supported header format without creating or migrating a CSV."""
+    try:
+        reader = csv.DictReader(io.StringIO(raw_bytes.decode("utf-8-sig"), newline=""), strict=True)
+        fieldnames = reader.fieldnames or []
+        mapped = [CSV_TO_INTERNAL_COLUMN.get(str(name or "").strip()) for name in fieldnames]
+        if len(mapped) != len(EVENT_COLUMNS) or set(mapped) != set(EVENT_COLUMNS):
+            raise InvalidEventsCsv("イベントCSVの列を確認してください")
+        events = []
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                raise InvalidEventsCsv("イベントCSVの行を確認してください")
+            event = _normalize_event({
+                mapped[index]: row[name] for index, name in enumerate(fieldnames)
+            })
+            validate_event(event)
+            events.append(event)
+        return events
+    except (UnicodeError, csv.Error, ValueError) as error:
+        raise InvalidEventsCsv("イベントCSVを読み込めません") from error
+
+
+def load_events_read_only(path=EVENTS_PATH):
+    """Return an empty list for a missing file and never write to disk."""
+    try:
+        raw_bytes = Path(path).read_bytes()
+    except FileNotFoundError:
+        return []
+    return parse_events_csv_read_only(raw_bytes)
 
 
 def save_events(events, path=EVENTS_PATH):

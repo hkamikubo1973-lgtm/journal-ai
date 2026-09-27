@@ -15,6 +15,7 @@ from engine import load_data
 from api.journal_import import router as journal_import_router
 from api.journal_master_update import router as master_update_router
 from api.output_settings import router as output_settings_router
+from api.events import router as events_router
 from api.receivable_cart import router as receivable_cart_router
 from epson_export_application_service import (
     EpsonExportApplicationValidationError,
@@ -342,6 +343,7 @@ app = FastAPI(title="journal-ai API")
 app.include_router(journal_import_router)
 app.include_router(master_update_router)
 app.include_router(output_settings_router)
+app.include_router(events_router)
 app.include_router(receivable_cart_router)
 app.include_router(receivable_router)
 
