@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { actOnEvent, createEvent, deleteEvent, editEvent, EventsApiError, fetchEvents, resolveScheduleOperation } from "../api/events";
+import { useRef, useState, type FormEvent } from "react";
+import { actOnEvent, createEvent, deleteEvent, editEvent, EventsApiError, resolveScheduleOperation } from "../api/events";
 import type { EventAction, EventInput, EventsResponse, ScheduleEvent } from "../types/events";
 
 const cycleNames: Record<string, string> = { monthly: "月次", yearly: "年次" };
@@ -129,23 +129,18 @@ export function ScheduleConfirmDialog({ event, action, pending, onClose, onConfi
   </div></div>;
 }
 
-export default function ScheduleWorkspace() {
-  const [data, setData] = useState<EventsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+export default function ScheduleWorkspace({ data, loading, loadError, onRefresh }: {
+  data: EventsResponse | null;
+  loading: boolean;
+  loadError: string | null;
+  onRefresh: () => Promise<EventsResponse>;
+}) {
   const [pending, setPending] = useState<string | null>(null);
   const pendingRef = useRef(false);
   const [editing, setEditing] = useState<{ event: ScheduleEvent | null } | null>(null);
   const [confirmation, setConfirmation] = useState<{ event: ScheduleEvent; action: "complete" | "skip" | "delete" } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    fetchEvents().then((result) => { if (active) setData(result); }).catch((failure: unknown) => {
-      if (active) setError(failure instanceof EventsApiError ? failure.message : "イベント一覧を読み込めませんでした。");
-    }).finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, []);
 
   const mutate = async (key: string, operation: () => Promise<unknown>, message: string) => {
     if (pendingRef.current) return;
@@ -155,7 +150,7 @@ export default function ScheduleWorkspace() {
       const outcome = await resolveScheduleOperation(operation);
       setEditing(null); setConfirmation(null);
       try {
-        setData(await fetchEvents());
+        await onRefresh();
         if (outcome === "conflict") setError("イベント一覧が更新されています。再読み込みしました。");
         else setSuccess(message);
       } catch {
@@ -185,12 +180,12 @@ export default function ScheduleWorkspace() {
   };
 
   return <section className="schedule-workspace">
-    {error && <p role="alert" className="schedule-message schedule-error">{error}</p>}
+    {(error || loadError) && <p role="alert" className="schedule-message schedule-error">{error || loadError}</p>}
     {success && <p role="status" className="schedule-message schedule-success">{success}</p>}
-    {loading ? <p className="schedule-loading">スケジュールを読み込み中...</p> : data ?
+    {loading && !data ? <p className="schedule-loading">スケジュールを読み込み中...</p> : data ?
       <SchedulePanel data={data} pending={pending} onAction={onAction} onEdit={(event) => setEditing({ event })}
         onConfirm={(event, action) => setConfirmation({ event, action })} onNew={() => setEditing({ event: null })} /> :
-      <button type="button" onClick={() => { setLoading(true); setError(null); fetchEvents().then(setData).catch(() => setError("イベント一覧を読み込めませんでした。")).finally(() => setLoading(false)); }}>再読み込み</button>}
+      <button type="button" onClick={() => { setError(null); void onRefresh().catch(() => {}); }}>再読み込み</button>}
     {editing && <ScheduleEditorDialog key={editing.event ? `edit:${editing.event.index}` : "new"} event={editing.event}
       pending={pending === "editor"} onClose={() => setEditing(null)} onSave={save} />}
     {confirmation && <ScheduleConfirmDialog event={confirmation.event} action={confirmation.action}

@@ -76,6 +76,100 @@ test("third tab switches to schedule", () => {
   tabs.props.children[2].props.onClick();
   assert.deepEqual(selected, ["schedule"]);
 });
+test("zero notifications omit the schedule badge", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkspaceTabs, { active: "journal", onChange: noop, notificationCount: 0 }));
+  assert.doesNotMatch(html, /schedule-tab-badge/);
+});
+test("one notification displays a small badge", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkspaceTabs, { active: "journal", onChange: noop, notificationCount: 1 }));
+  assert.match(html, /class="schedule-tab-badge"[^>]*>1<\/span>/);
+});
+test("multiple notifications display backend count", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkspaceTabs, { active: "journal", onChange: noop, notificationCount: 12 }));
+  assert.match(html, /通知12件/);
+  assert.match(html, />12<\/span>/);
+});
+for (const active of ["journal", "receivable", "schedule"]) {
+  test(`badge is visible while ${active} is active`, () => {
+    const html = renderToStaticMarkup(React.createElement(WorkspaceTabs, { active, onChange: noop, notificationCount: 3 }));
+    assert.match(html, /class="schedule-tab-badge"[^>]*>3<\/span>/);
+    assert.equal((html.match(/aria-selected="true"/g) ?? []).length, 1);
+  });
+}
+test("new GET result updates badge after a mutation", async (t) => {
+  let count = 1;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    if (options?.method === "POST") {
+      count = 4;
+      return Response.json({ event: snapshot });
+    }
+    return Response.json({ ...data, notification_count: count });
+  });
+  let feed = { data: null, loading: true, error: null };
+  const load = api.createScheduleFeed((patch) => { feed = { ...feed, ...patch }; });
+  await load();
+  const before = feed.data;
+  await api.resolveScheduleOperation(() => api.actOnEvent(event, "complete"));
+  await load(true);
+  const after = feed.data;
+  const renderBadge = (response) => renderToStaticMarkup(React.createElement(WorkspaceTabs, {
+    active: "schedule", onChange: noop, notificationCount: response.notification_count,
+  }));
+  assert.match(renderBadge(before), />1<\/span>/);
+  assert.match(renderBadge(after), />4<\/span>/);
+});
+test("initial load and immediate tab switch share one GET", async () => {
+  let finish;
+  let calls = 0;
+  const load = api.createScheduleFeed(() => {}, () => {
+    calls += 1;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  const initial = load();
+  const switched = load();
+  assert.equal(initial, switched);
+  assert.equal(calls, 1);
+  finish(data);
+  await Promise.all([initial, switched]);
+});
+test("post-mutation forced GET wins over older in-flight response", async () => {
+  const finishes = [];
+  let feed = { data: null, loading: true, error: null };
+  const load = api.createScheduleFeed((patch) => { feed = { ...feed, ...patch }; }, () =>
+    new Promise((resolve) => { finishes.push(resolve); }));
+  const older = load();
+  const newer = load(true);
+  finishes[1]({ ...data, notification_count: 4 });
+  await newer;
+  finishes[0]({ ...data, notification_count: 1 });
+  await older;
+  assert.equal(feed.data.notification_count, 4);
+  assert.equal(feed.loading, false);
+});
+test("failed GET clears badge data with safe error", async () => {
+  let feed = { data, loading: false, error: null };
+  const load = api.createScheduleFeed((patch) => { feed = { ...feed, ...patch }; }, async () => {
+    throw new api.EventsApiError(503, "イベント一覧を読み込めません。");
+  });
+  await assert.rejects(load());
+  assert.equal(feed.data, null);
+  assert.match(feed.error, /読み込めません/);
+  assert.equal(feed.loading, false);
+});
+test("failed badge GET leaves journal tab available", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ detail: "private path" }, { status: 500 }));
+  await assert.rejects(api.fetchEvents());
+  const html = renderToStaticMarkup(React.createElement(WorkspaceTabs, { active: "journal", onChange: noop }));
+  assert.match(html, /通常仕訳/);
+  assert.doesNotMatch(html, /schedule-tab-badge/);
+});
+test("schedule workspace displays shared GET data and a safe load error", () => {
+  const html = renderToStaticMarkup(React.createElement(ui.default, {
+    data, loading: false, loadError: "イベント一覧を読み込めませんでした。", onRefresh: async () => data,
+  }));
+  assert.match(html, /通知対象 1件/);
+  assert.match(html, /イベント一覧を読み込めませんでした/);
+});
 
 test("GET uses schedule endpoint", async (t) => {
   const calls = mockFetch(t);

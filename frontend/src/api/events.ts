@@ -51,3 +51,35 @@ export async function resolveScheduleOperation(operation: () => Promise<unknown>
     throw failure;
   }
 }
+
+export type ScheduleFeedState = { data: EventsResponse | null; loading: boolean; error: string | null };
+
+export function createScheduleFeed(
+  publish: (patch: Partial<ScheduleFeedState>) => void,
+  getEvents: () => Promise<EventsResponse> = fetchEvents,
+): (forceNew?: boolean) => Promise<EventsResponse> {
+  let inFlight: Promise<EventsResponse> | null = null;
+  let requestId = 0;
+  return (forceNew = false) => {
+    if (!forceNew && inFlight) return inFlight;
+    const currentId = ++requestId;
+    publish({ loading: true, error: null });
+    const request = getEvents().then((response) => {
+      if (requestId === currentId) publish({ data: response, error: null });
+      return response;
+    }).catch((failure: unknown) => {
+      if (requestId === currentId) publish({
+        data: null,
+        error: failure instanceof EventsApiError ? failure.message : "イベント一覧を読み込めませんでした。",
+      });
+      throw failure;
+    }).finally(() => {
+      if (requestId === currentId) {
+        inFlight = null;
+        publish({ loading: false });
+      }
+    });
+    inFlight = request;
+    return request;
+  };
+}

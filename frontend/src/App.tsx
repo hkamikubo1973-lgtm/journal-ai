@@ -28,6 +28,7 @@ import type {
 import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
 import ScheduleWorkspace from "./components/ScheduleWorkspace";
 import WorkspaceTabs, { type Workspace } from "./components/WorkspaceTabs";
+import { createScheduleFeed, type ScheduleFeedState } from "./api/events";
 import {
   addReceivableSettlementToCart,
   getRegistrationCartItemIdentity,
@@ -743,6 +744,8 @@ function BlockRowsTable({ candidate }: { candidate: JournalCandidate }) {
 
 export default function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace>("journal");
+  const [eventsFeed, setEventsFeed] = useState<ScheduleFeedState>({ data: null, loading: true, error: null });
+  const [refreshEvents] = useState(() => createScheduleFeed((patch) => setEventsFeed((current) => ({ ...current, ...patch }))));
   const [receivableExecutionLocked, setReceivableExecutionLocked] = useState(false);
   const [keyword, setKeyword] = useState("りそな銀行");
   const [department, setDepartment] = useState("");
@@ -769,6 +772,13 @@ export default function App() {
   const [masters, setMasters] = useState<JournalMastersResponse | null>(null);
   const [mastersLoading, setMastersLoading] = useState(false);
   const [mastersError, setMastersError] = useState<string | null>(null);
+
+  function changeWorkspace(workspace: Workspace) {
+    if (workspace === "schedule") void refreshEvents().catch(() => {});
+    setActiveWorkspace(workspace);
+  }
+
+  useEffect(() => { void refreshEvents().catch(() => {}); }, [refreshEvents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1129,8 +1139,8 @@ export default function App() {
       <main className="app-shell receivable-shell">
         <header className="page-header">
           <div className="page-title"><h1>journal-ai</h1><span>未収消込</span></div>
-          <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace}
-            journalDisabled={receivableExecutionLocked} />
+          <WorkspaceTabs active={activeWorkspace} onChange={changeWorkspace}
+            journalDisabled={receivableExecutionLocked} notificationCount={eventsFeed.data?.notification_count} />
           <div className="page-header-meta">
             {masters?.system && <span className="fiscal-year-status">
               会計年度：{masters.system.current_fiscal_year}年度
@@ -1150,9 +1160,10 @@ export default function App() {
     return <main className="app-shell schedule-shell">
       <header className="page-header">
         <div className="page-title"><h1>journal-ai</h1><span>スケジュール</span></div>
-        <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
+        <WorkspaceTabs active={activeWorkspace} onChange={changeWorkspace} notificationCount={eventsFeed.data?.notification_count} />
+        <div className="page-header-meta" aria-hidden="true" />
       </header>
-      <ScheduleWorkspace />
+      <ScheduleWorkspace data={eventsFeed.data} loading={eventsFeed.loading} loadError={eventsFeed.error} onRefresh={() => refreshEvents(true)} />
     </main>;
   }
 
@@ -1160,7 +1171,7 @@ export default function App() {
     <main className="app-shell" onKeyDown={handleAppTabKeyDown}>
       <header className="page-header">
         <div className="page-title"><h1>journal-ai</h1><span>通常仕訳</span></div>
-        <WorkspaceTabs active={activeWorkspace} onChange={setActiveWorkspace} />
+        <WorkspaceTabs active={activeWorkspace} onChange={changeWorkspace} notificationCount={eventsFeed.data?.notification_count} />
         <div className="page-header-meta">
           {masters?.system && <span className="fiscal-year-status">
             会計年度：{masters.system.current_fiscal_year}年度
