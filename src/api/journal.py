@@ -6,6 +6,7 @@ from typing import Any, Literal, Optional
 from fastapi import Depends, FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
+from api.ai import router as ai_router
 from api.receivable import (
     get_receivable_account_master_snapshot,
     get_receivables_directory,
@@ -373,6 +374,7 @@ class JournalMastersResponse(BaseModel):
 
 
 app = FastAPI(title="journal-ai API")
+app.include_router(ai_router)
 app.include_router(journal_import_router)
 app.include_router(master_update_router)
 app.include_router(output_settings_router)
