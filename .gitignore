@@ -9,3 +9,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# 開発端末ごとのVite API転送先
+frontend/.env.local
