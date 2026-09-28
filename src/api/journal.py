@@ -7,6 +7,16 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from api.ai import router as ai_router
+from ai_job_client import (
+    AIJobConfigurationError,
+    AIJobConnectionError,
+    AIJobHTTPError,
+    AIJobMalformedResponseError,
+    AIJobMissingJobIdError,
+    AIJobRequestError,
+    AIJobTimeoutError,
+    AIJobUnknownStatusError,
+)
 from api.receivable import (
     get_receivable_account_master_snapshot,
     get_receivables_directory,
@@ -40,6 +50,13 @@ from journal_export_service import (
     export_epson_csv,
 )
 from journal_ai_context_provider import build_journal_ai_context
+from journal_ai_assist_application_service import (
+    JournalAIAssistApplicationService,
+    JournalAIAssistFailed,
+    JournalAIAssistForeignJob,
+    JournalAIAssistInvalidResult,
+    JournalAIAssistNoCandidates,
+)
 from journal_master_service import load_journal_masters
 from maintenance_ai_context_provider import build_maintenance_ai_context
 from journal_registration_service import prepare_registration
@@ -130,6 +147,12 @@ class JournalAiContextRequest(JournalSearchRequest):
 
     keyword: StrictStr = Field(min_length=1)
     draft: Optional[JournalAiDraftRequest] = None
+
+
+class JournalAiAssistResponse(BaseModel):
+    job_id: str
+    state: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
+    content: Optional[str] = None
 
 
 class JournalEditFormRequest(BaseModel):
@@ -444,6 +467,66 @@ def post_journal_ai_context(request: JournalAiContextRequest):
             status_code=500,
             detail="仕訳のContextを生成できませんでした",
         ) from error
+
+
+def get_journal_ai_assist_service() -> JournalAIAssistApplicationService:
+    return JournalAIAssistApplicationService()
+
+
+def _journal_ai_assist_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, JournalAIAssistNoCandidates):
+        return HTTPException(status_code=422, detail="検索候補がありません。")
+    if isinstance(error, JournalAIAssistForeignJob):
+        return HTTPException(status_code=404, detail="AI Jobを確認できません。")
+    if isinstance(error, AIJobRequestError):
+        return HTTPException(status_code=422, detail="AI Job IDが正しくありません。")
+    if isinstance(error, (AIJobConfigurationError, AIJobConnectionError)):
+        return HTTPException(status_code=503, detail="AI補助を利用できません。")
+    if isinstance(error, AIJobTimeoutError):
+        return HTTPException(status_code=504, detail="AI補助の応答がタイムアウトしました。")
+    if isinstance(error, AIJobHTTPError) and error.status_code == 404:
+        return HTTPException(status_code=404, detail="AI Jobを確認できません。")
+    if isinstance(error, (AIJobHTTPError, AIJobMalformedResponseError,
+                          AIJobMissingJobIdError, AIJobUnknownStatusError,
+                          JournalAIAssistFailed, JournalAIAssistInvalidResult)):
+        return HTTPException(status_code=502, detail="AI補助の結果を取得できません。")
+    return HTTPException(status_code=500, detail="AI補助を処理できませんでした。")
+
+
+@app.post(
+    "/api/journal/ai-assist",
+    response_model=JournalAiAssistResponse,
+    response_model_exclude_none=True,
+)
+def post_journal_ai_assist(
+    request: JournalAiContextRequest,
+    service: JournalAIAssistApplicationService = Depends(get_journal_ai_assist_service),
+):
+    try:
+        return service.submit(
+            keyword=request.keyword,
+            department=request.department,
+            amount=request.amount,
+            limit=request.limit,
+            draft=request.draft.model_dump() if request.draft is not None else None,
+        )
+    except Exception as error:
+        raise _journal_ai_assist_http_error(error) from error
+
+
+@app.get(
+    "/api/journal/ai-assist/{job_id}",
+    response_model=JournalAiAssistResponse,
+    response_model_exclude_none=True,
+)
+def get_journal_ai_assist(
+    job_id: str,
+    service: JournalAIAssistApplicationService = Depends(get_journal_ai_assist_service),
+):
+    try:
+        return service.get(job_id)
+    except Exception as error:
+        raise _journal_ai_assist_http_error(error) from error
 
 
 @app.get("/api/maintenance/ai-context")
