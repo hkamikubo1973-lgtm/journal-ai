@@ -2035,6 +2035,8 @@ def _commit_workspace_is_recoverable_read_only(
 
 def _inspect_receivable_ledger_health_locked(
     receivables_directory: str | os.PathLike[str],
+    *,
+    inspect_recovery_artifacts: bool = True,
 ) -> ReceivableLedgerHealth:
     """Inspect transaction health while the caller holds the ledger lock."""
 
@@ -2087,6 +2089,12 @@ def _inspect_receivable_ledger_health_locked(
             status=LEDGER_HEALTH_READY,
             transaction_count=len(records),
             nonterminal_count=0,
+        )
+    if not inspect_recovery_artifacts:
+        return ReceivableLedgerHealth(
+            status=LEDGER_HEALTH_RECOVERY_REQUIRED,
+            transaction_count=len(records),
+            nonterminal_count=len(nonterminal),
         )
     if (
         len(nonterminal) > 1
@@ -2211,6 +2219,44 @@ def read_settlement_receipt_when_ready(
         return loaded
 
 
+def _load_current_when_ready_locked(
+    receivables_directory: str | os.PathLike[str],
+    *,
+    inspect_recovery_artifacts: bool = True,
+) -> LoadedReceivableCsv:
+    health = _inspect_receivable_ledger_health_locked(
+        receivables_directory,
+        inspect_recovery_artifacts=inspect_recovery_artifacts,
+    )
+    if health.status != LEDGER_HEALTH_READY:
+        raise ReceivableLedgerRecoveryRequired(
+            f"Receivable ledger health is {health.status}"
+        )
+    paths = resolve_receivable_ledger_paths(receivables_directory)
+    return load_current_receivables_read_only(paths.current_path)
+
+
+def read_receivable_current_when_ready(
+    receivables_directory: str | os.PathLike[str] = (
+        DEFAULT_RECEIVABLES_DIRECTORY
+    ),
+    *,
+    lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+    lock_poll_interval_seconds: float = DEFAULT_LOCK_POLL_INTERVAL_SECONDS,
+) -> LoadedReceivableCsv:
+    """Read current under the Web readiness gate, without loading history."""
+
+    with receivable_ledger_lock(
+        receivables_directory,
+        timeout_seconds=lock_timeout_seconds,
+        poll_interval_seconds=lock_poll_interval_seconds,
+    ):
+        return _load_current_when_ready_locked(
+            receivables_directory,
+            inspect_recovery_artifacts=False,
+        )
+
+
 def read_receivable_current_snapshot_when_ready(
     receivables_directory: str | os.PathLike[str] = (
         DEFAULT_RECEIVABLES_DIRECTORY
@@ -2226,15 +2272,8 @@ def read_receivable_current_snapshot_when_ready(
         timeout_seconds=lock_timeout_seconds,
         poll_interval_seconds=lock_poll_interval_seconds,
     ):
-        health = _inspect_receivable_ledger_health_locked(
-            receivables_directory
-        )
-        if health.status != LEDGER_HEALTH_READY:
-            raise ReceivableLedgerRecoveryRequired(
-                f"Receivable ledger health is {health.status}"
-            )
+        current = _load_current_when_ready_locked(receivables_directory)
         paths = resolve_receivable_ledger_paths(receivables_directory)
-        current = load_current_receivables_read_only(paths.current_path)
         try:
             load_receivable_history_read_only(paths.history_path)
             settlement_available = True

@@ -138,6 +138,11 @@ def _receivable_item(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def serialize_receivable_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Use the Web detail's existing text and numeric conversion for one row."""
+    return _receivable_item(row)
+
+
 def build_receivable_customer_detail(
     current_snapshot: pd.DataFrame | Sequence[Mapping[str, Any]],
     customer_name: str,
@@ -152,7 +157,7 @@ def build_receivable_customer_detail(
         raise ReceivableCustomerNotFoundError(customer_name)
 
     receivables = [
-        _receivable_item(row)
+        serialize_receivable_item(row)
         for row in customer_rows.to_dict("records")
     ]
     return {

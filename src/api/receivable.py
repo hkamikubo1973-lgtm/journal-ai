@@ -19,6 +19,7 @@ from receivable_import_application_service import (
     execute_receivable_import,
     preview_receivable_import,
 )
+from receivable_ai_context_provider import build_receivable_ai_context
 from receivable_account_validation_service import (
     ReceivableSettlementMasterValidationError,
 )
@@ -491,6 +492,34 @@ def get_receivable_cleanup_summary(
     receivables_directory: Path = Depends(get_receivables_directory),
 ):
     return _cleanup_response(summarize_receivable_cleanup, receivables_directory)
+
+
+@router.get("/ai-context")
+def get_receivable_ai_context(
+    receivables_directory: Path = Depends(get_receivables_directory),
+):
+    try:
+        return build_receivable_ai_context(receivables_directory)
+    except ReceivableLedgerLockTimeout as error:
+        raise HTTPException(
+            status_code=423,
+            detail="未収台帳をほかの処理が使用中です。時間をおいて再試行してください。",
+        ) from error
+    except ReceivableLedgerRecoveryRequired as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳の復旧確認が必要です。",
+        ) from error
+    except ReceivableLedgerError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="未収台帳を安全に読み込めません。",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="未収情報のContextを生成できませんでした。",
+        ) from error
 
 
 @router.post("/cleanup", response_model=ReceivableCleanupResponse)

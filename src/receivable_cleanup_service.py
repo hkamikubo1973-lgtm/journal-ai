@@ -54,6 +54,14 @@ def summarize_receivable_cleanup_rows(current: pd.DataFrame) -> dict[str, int]:
     return _counts(current)
 
 
+def partition_receivable_cleanup_rows(
+    current: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Separate retained and cleanup rows using the existing cleanup mask."""
+    mask = _cleanup_mask(current)
+    return current.loc[~mask].copy(), current.loc[mask].copy()
+
+
 def summarize_receivable_cleanup(receivables_directory: Path) -> dict[str, int]:
     """Inspect a ready ledger without changing current.csv."""
 
