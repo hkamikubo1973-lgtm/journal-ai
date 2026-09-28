@@ -43,6 +43,12 @@ def client_for(handler, *, base_url=BASE_URL):
     return AIJobClient(base_url, transport=httpx.MockTransport(handler))
 
 
+def job_response(job_id="job-123", state="QUEUED", *, result=None, **fields):
+    return {"ok": True, "job": {
+        "job_id": job_id, "state": state, "result": result, **fields,
+    }}
+
+
 class AIJobClientTest(unittest.TestCase):
     def test_base_url_normalizes_whitespace_and_trailing_slashes(self):
         self.assertEqual(
@@ -73,13 +79,17 @@ class AIJobClientTest(unittest.TestCase):
 
         def handle(request):
             calls.append(request)
-            return httpx.Response(202, json={"job_id": "job-123", "status": "QUEUED"})
+            return httpx.Response(200, json=job_response(
+                profile={"name": "journal_normal", "target_model": "4b"},
+            ))
 
         payload = {"context": {"source": "journal"}, "question": "候補を説明"}
         result = client_for(handle).submit_job(
             profile="journal_normal", execution_mode="interactive", payload=payload,
         )
-        self.assertEqual(result["job_id"], "job-123")
+        self.assertEqual(result["job"]["job_id"], "job-123")
+        self.assertEqual(result["job"]["state"], "QUEUED")
+        self.assertEqual(result["job"]["profile"]["target_model"], "4b")
         self.assertEqual(len(calls), 1)
         self.assertEqual((calls[0].method, str(calls[0].url)),
                          ("POST", BASE_URL + "/ai/jobs"))
@@ -94,22 +104,35 @@ class AIJobClientTest(unittest.TestCase):
 
         def handle(request):
             calls.append(request.url.path)
-            return httpx.Response(202, json={"job_id": "later"})
+            return httpx.Response(200, json=job_response(job_id="later"))
 
         self.assertEqual(client_for(handle).submit_job(
             profile="journal_normal", execution_mode="interactive", payload={},
-        )["job_id"], "later")
+        )["job"]["job_id"], "later")
         self.assertEqual(calls, ["/ai/jobs"])
 
     def test_submitted_job_id_must_be_a_nonempty_string(self):
-        for response in ({}, {"job_id": ""}, {"job_id": 123}):
+        for response in (job_response(job_id=""), job_response(job_id=123),
+                         {"ok": True, "job": {"state": "QUEUED"}}):
             with self.subTest(response=response):
-                client = client_for(lambda request: httpx.Response(202, json=response))
+                client = client_for(lambda request: httpx.Response(200, json=response))
                 with self.assertRaises(AIJobMissingJobIdError):
                     client.submit_job(
                         profile="journal_normal", execution_mode="interactive",
                         payload={},
                     )
+
+    def test_job_wrapper_must_be_an_object_for_submit_and_get(self):
+        for response in ({}, {"job_id": "old-shape"}, {"job": None}, {"job": []}):
+            with self.subTest(response=response):
+                client = client_for(lambda request: httpx.Response(200, json=response))
+                with self.assertRaises(AIJobMalformedResponseError):
+                    client.submit_job(
+                        profile="journal_normal", execution_mode="interactive",
+                        payload={},
+                    )
+                with self.assertRaises(AIJobMalformedResponseError):
+                    client.get_job("job-123")
 
     def test_request_shape_is_checked_before_http(self):
         client = client_for(lambda request: self.fail("unexpected HTTP request"))
@@ -123,17 +146,20 @@ class AIJobClientTest(unittest.TestCase):
         with self.assertRaises(AIJobRequestError):
             client.get_job("")
 
-    def test_get_job_keeps_each_documented_status_unchanged(self):
-        for status in ("QUEUED", "RUNNING", "COMPLETED", "FAILED"):
-            with self.subTest(status=status):
+    def test_get_job_keeps_each_documented_state_and_wrapper_unchanged(self):
+        for state in ("QUEUED", "RUNNING", "COMPLETED", "FAILED"):
+            with self.subTest(state=state):
                 calls = []
+                result_data = {"content": "three points"} if state == "COMPLETED" else None
+                response_data = job_response(state=state, result=result_data,
+                                             profile={"name": "journal_normal"})
 
                 def handle(request):
                     calls.append((request.method, str(request.url)))
-                    return httpx.Response(200, json={"status": status, "extra": 1})
+                    return httpx.Response(200, json=response_data)
 
                 result = client_for(handle).get_job("job-123")
-                self.assertEqual(result, {"status": status, "extra": 1})
+                self.assertEqual(result, response_data)
                 self.assertEqual(calls, [("GET", BASE_URL + "/ai/jobs/job-123")])
 
     def test_job_id_is_encoded_as_one_path_component(self):
@@ -141,17 +167,71 @@ class AIJobClientTest(unittest.TestCase):
 
         def handle(request):
             paths.append(request.url.raw_path)
-            return httpx.Response(200, json={"status": "QUEUED"})
+            return httpx.Response(200, json=job_response())
 
         client_for(handle).get_job("id?part=1")
         self.assertEqual(paths, [b"/ai/jobs/id%3Fpart%3D1"])
 
-    def test_unknown_or_missing_job_status_is_rejected(self):
-        for status in ("PENDING", "done", None, []):
-            with self.subTest(status=status):
-                client = client_for(lambda request: httpx.Response(200, json={"status": status}))
+    def test_unknown_or_missing_job_state_is_rejected(self):
+        for state in ("PENDING", "done", None, []):
+            with self.subTest(state=state):
+                client = client_for(lambda request: httpx.Response(
+                    200, json=job_response(state=state),
+                ))
                 with self.assertRaises(AIJobUnknownStatusError):
                     client.get_job("job-123")
+        client = client_for(lambda request: httpx.Response(
+            200, json={"job": {"job_id": "job-123"}},
+        ))
+        with self.assertRaises(AIJobUnknownStatusError):
+            client.get_job("job-123")
+        with self.assertRaises(AIJobUnknownStatusError):
+            client.submit_job(
+                profile="journal_normal", execution_mode="interactive", payload={},
+            )
+
+    def test_get_job_requires_wrapped_job_id(self):
+        client = client_for(lambda request: httpx.Response(
+            200, json={"job": {"state": "RUNNING"}},
+        ))
+        with self.assertRaises(AIJobMissingJobIdError):
+            client.get_job("job-123")
+
+    def test_completed_content_is_preserved_and_malformed_result_is_rejected(self):
+        response = job_response(state="COMPLETED", result={
+            "content": "three points", "usage": {"tokens": 12},
+        })
+        self.assertEqual(client_for(lambda request: httpx.Response(
+            200, json=response,
+        )).get_job("job-123"), response)
+        for result in (None, "text", [], {}, {"content": 123}):
+            with self.subTest(result=result):
+                client = client_for(lambda request: httpx.Response(
+                    200, json=job_response(state="COMPLETED", result=result),
+                ))
+                with self.assertRaises(AIJobMalformedResponseError):
+                    client.get_job("job-123")
+
+    def test_profile_metadata_is_retained_without_client_model_decision(self):
+        profile = {"name": "journal_normal", "target_model": "4b",
+                   "vision_required": False, "priority": 1}
+        response = job_response(profile=profile)
+        self.assertEqual(client_for(lambda request: httpx.Response(
+            200, json=response,
+        )).get_job("job-123")["job"]["profile"], profile)
+
+    def test_submit_timeout_does_not_retry_post(self):
+        calls = []
+
+        def handle(request):
+            calls.append(request.method)
+            raise httpx.ReadTimeout("response unavailable")
+
+        with self.assertRaises(AIJobTimeoutError):
+            client_for(handle).submit_job(
+                profile="journal_normal", execution_mode="interactive", payload={},
+            )
+        self.assertEqual(calls, ["POST"])
 
     def test_status_endpoint_returns_server_object_without_model_interpretation(self):
         calls = []
@@ -211,12 +291,12 @@ class AIJobApplicationServiceTest(unittest.TestCase):
 
         def handle(request):
             calls.append(json.loads(request.content))
-            return httpx.Response(202, json={"job_id": "one"})
+            return httpx.Response(200, json=job_response(job_id="one"))
 
         service = AIJobApplicationService(client_for(handle))
         self.assertEqual(service.submit_job(
             profile="journal_normal", execution_mode="interactive", payload={"x": 1},
-        )["job_id"], "one")
+        )["job"]["job_id"], "one")
         self.assertEqual(calls, [{"profile": "journal_normal",
                                   "execution_mode": "interactive", "payload": {"x": 1}}])
 
@@ -240,18 +320,23 @@ class AIJobApplicationServiceTest(unittest.TestCase):
 
     def test_failed_job_has_a_distinct_error_with_original_status(self):
         service = AIJobApplicationService(client_for(
-            lambda request: httpx.Response(200, json={"status": "FAILED", "detail": "x"}),
+            lambda request: httpx.Response(200, json=job_response(
+                job_id="job-1", state="FAILED", error={"message": "worker failed"},
+            )),
         ))
         with self.assertRaises(AIJobFailed) as caught:
             service.get_job("job-1")
-        self.assertEqual(caught.exception.job["status"], "FAILED")
+        self.assertEqual(caught.exception.job["state"], "FAILED")
+        self.assertEqual(caught.exception.job["error"], {"message": "worker failed"})
         self.assertEqual(str(caught.exception), "AI Job failed")
 
     def test_running_job_is_returned_without_waiting(self):
         service = AIJobApplicationService(client_for(
-            lambda request: httpx.Response(200, json={"status": "RUNNING"}),
+            lambda request: httpx.Response(200, json=job_response(
+                job_id="job-1", state="RUNNING",
+            )),
         ))
-        self.assertEqual(service.get_job("job-1")["status"], "RUNNING")
+        self.assertEqual(service.get_job("job-1")["job"]["state"], "RUNNING")
 
 
 class AIStatusApiTest(unittest.TestCase):

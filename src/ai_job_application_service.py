@@ -24,7 +24,7 @@ class AIJobExecutionModeNotAllowed(AIJobServiceError):
 
 
 class AIJobFailed(AIJobServiceError):
-    """The AI Server reported a FAILED Job; the original response is retained."""
+    """The AI Server reported a FAILED Job; its Job object is retained."""
 
     def __init__(self, job: dict[str, Any]):
         super().__init__("AI Job failed")
@@ -62,10 +62,11 @@ class AIJobApplicationService:
         )
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        job = self.client.get_job(job_id)
-        if job["status"] == "FAILED":
+        response = self.client.get_job(job_id)
+        job = response["job"]
+        if job["state"] == "FAILED":
             raise AIJobFailed(job)
-        return job
+        return response
 
     def get_status(self) -> dict[str, Any]:
         return self.client.get_status()

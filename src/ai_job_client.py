@@ -15,7 +15,7 @@ import httpx
 
 AI_SERVER_URL_ENV = "JOURNAL_AI_SERVER_URL"
 DEFAULT_TIMEOUT_SECONDS = 30.0
-JOB_STATUSES = frozenset({"QUEUED", "RUNNING", "COMPLETED", "FAILED"})
+JOB_STATES = frozenset({"QUEUED", "RUNNING", "COMPLETED", "FAILED"})
 
 
 class AIJobClientError(Exception):
@@ -51,11 +51,11 @@ class AIJobMalformedResponseError(AIJobClientError):
 
 
 class AIJobMissingJobIdError(AIJobClientError):
-    """A submitted Job response did not contain a usable job_id."""
+    """A Job response did not contain a usable job_id."""
 
 
 class AIJobUnknownStatusError(AIJobClientError):
-    """A Job response used a status outside the documented Job states."""
+    """A Job response used a state outside the documented Job states."""
 
 
 def normalize_ai_server_base_url(value: str) -> str:
@@ -134,6 +134,27 @@ class AIJobClient:
             raise AIJobMalformedResponseError("AI Server response is invalid")
         return data
 
+    @staticmethod
+    def _validate_job_response(response: dict[str, Any]) -> dict[str, Any]:
+        job = response.get("job")
+        if not isinstance(job, dict):
+            raise AIJobMalformedResponseError("AI Server Job response is invalid")
+        job_id = job.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise AIJobMissingJobIdError("AI Server did not return a job_id")
+        state = job.get("state")
+        if not isinstance(state, str) or state not in JOB_STATES:
+            raise AIJobUnknownStatusError("AI Server returned an unknown Job state")
+        result = job.get("result")
+        if result is not None and not isinstance(result, dict):
+            raise AIJobMalformedResponseError("AI Server Job result is invalid")
+        if state == "COMPLETED" and (
+            not isinstance(result, dict)
+            or not isinstance(result.get("content"), str)
+        ):
+            raise AIJobMalformedResponseError("AI Server Job result is invalid")
+        return job
+
     def submit_job(
         self,
         *,
@@ -154,18 +175,14 @@ class AIJobClient:
             "execution_mode": execution_mode,
             "payload": payload,
         })
-        job_id = result.get("job_id")
-        if not isinstance(job_id, str) or not job_id.strip():
-            raise AIJobMissingJobIdError("AI Server did not return a job_id")
+        self._validate_job_response(result)
         return result
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         if not isinstance(job_id, str) or not job_id.strip():
             raise AIJobRequestError("AI Job identifier is invalid")
         result = self._request("GET", f"/ai/jobs/{quote(job_id, safe='')}")
-        status = result.get("status")
-        if not isinstance(status, str) or status not in JOB_STATUSES:
-            raise AIJobUnknownStatusError("AI Server returned an unknown Job status")
+        self._validate_job_response(result)
         return result
 
     def get_status(self) -> dict[str, Any]:
