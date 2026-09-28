@@ -28,6 +28,14 @@ export type JournalSearchResponse = {
   candidates: JournalCandidate[];
 };
 
+export type JournalAiAssistState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export type JournalAiAssistResponse = {
+  job_id: string;
+  state: JournalAiAssistState;
+  content?: string;
+};
+
 export type JournalEditForm = {
   voucherDate: string;
   debitAccountCode: string;

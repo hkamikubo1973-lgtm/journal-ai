@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import JournalImport from "./components/JournalImport";
+import JournalAiAssist from "./components/JournalAiAssist";
 import ReceivableCartEditor from "./components/ReceivableCartEditor";
 import MasterManagement from "./components/MasterManagement";
 import {
@@ -29,6 +30,7 @@ import ReceivableWorkspace from "./components/receivable/ReceivableWorkspace";
 import ScheduleWorkspace from "./components/ScheduleWorkspace";
 import WorkspaceTabs, { type Workspace } from "./components/WorkspaceTabs";
 import { createScheduleFeed, type ScheduleFeedState } from "./api/events";
+import { matchesJournalAiSearch } from "./journalAiAssistController";
 import {
   addReceivableSettlementToCart,
   getRegistrationCartItemIdentity,
@@ -752,6 +754,8 @@ export default function App() {
   const [amount, setAmount] = useState("");
   const [limit, setLimit] = useState<5 | 10 | 20>(5);
   const [result, setResult] = useState<JournalSearchResponse | null>(null);
+  const [searchedRequest, setSearchedRequest] = useState<JournalSearchRequest | null>(null);
+  const [searchSerial, setSearchSerial] = useState(0);
   const [selectedCandidate, setSelectedCandidate] = useState<JournalCandidate | null>(null);
   const [editForm, setEditForm] = useState<JournalEditForm | null>(null);
   const [initialEditForm, setInitialEditForm] = useState<JournalEditForm | null>(null);
@@ -802,6 +806,8 @@ export default function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setSearchSerial((current) => current + 1);
+    setSearchedRequest(null);
     setLoading(true);
     setError(null);
     setStatusMessage(null);
@@ -817,10 +823,12 @@ export default function App() {
     };
     try {
       setResult(await searchJournals(request));
+      setSearchedRequest(request);
       setStatusMessage("検索結果を更新しました。候補を選択してください。");
     }
     catch (caughtError) {
       setResult(null);
+      setSearchedRequest(null);
       setError(caughtError instanceof Error ? caughtError.message : "検索中に不明なエラーが発生しました。");
     } finally { setLoading(false); }
   }
@@ -1133,6 +1141,12 @@ export default function App() {
     error: masterCheckMessages.filter((message) => message.level === "error").length,
   };
   const hasMasterErrors = masterCheckCounts.error > 0;
+  const currentSearchRequest: JournalSearchRequest = {
+    keyword, department: department.trim() || null, amount: amount === "" ? null : Number(amount), limit,
+  };
+  const aiRequest = !loading && result && searchedRequest
+    && matchesJournalAiSearch(currentSearchRequest, searchedRequest)
+    ? searchedRequest : null;
 
   if (activeWorkspace === "receivable") {
     return (
@@ -1229,7 +1243,11 @@ export default function App() {
 
           <div className="candidate-panel" aria-live="polite">
             <div className="pane-heading candidate-list-heading"><h2>候補一覧</h2>
-              {result && <span className="muted">検索結果: {result.count}件</span>}
+              <div className="candidate-heading-actions">
+                {result && <span className="muted">検索結果: {result.count}件</span>}
+                <JournalAiAssist key={`${searchSerial}:${keyword}:${department}:${amount}:${limit}`}
+                  request={aiRequest} candidateCount={result?.candidates.length ?? 0} />
+              </div>
             </div>
             {result ? <div className="candidate-list">
               {result.candidates.map((candidate) => <CandidateCard
