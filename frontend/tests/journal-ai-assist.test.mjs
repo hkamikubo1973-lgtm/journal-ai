@@ -222,16 +222,58 @@ test("closing or unmounting ignores an old in-flight GET", async () => {
   instance.dispose();
 });
 
-test("panel displays status, safe plain text, and a close label without touching candidates", () => {
+test("idle panel explains its purpose without starting a Job", () => {
+  const html = render({ ...state.initialJournalAiAssistView, open: true });
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /journal-ai-trigger is-open"[^>]*disabled=""/);
+  assert.match(html, /journal-ai-state--idle">未実行/);
+  assert.match(html, /検索候補についてAIの説明を表示できます/);
+  assert.match(html, /AIは検索候補の整理・説明を補助します。最終判断は人が行ってください/);
+  assert.match(html, /aria-label="AI補助を閉じる"/);
+  assert.doesNotMatch(html, /journal-ai-loading|journal-ai-error|journal-ai-content/);
+});
+
+test("QUEUED and RUNNING show distinct progress without duplicate actions", () => {
   const queuedHtml = render({ ...state.initialJournalAiAssistView, open: true, jobId: "job-1", state: "QUEUED" });
+  assert.match(queuedHtml, /journal-ai-state--processing">準備中/);
   assert.match(queuedHtml, /AI補助を準備しています/);
-  assert.match(queuedHtml, /aria-label="AI補助を閉じる"/);
+  assert.match(queuedHtml, /aria-busy="true"/);
   assert.match(queuedHtml, /disabled=""/);
   const runningHtml = render({ ...state.initialJournalAiAssistView, open: true, jobId: "job-1", state: "RUNNING" });
-  assert.match(runningHtml, /AIが候補を整理しています/);
-  const content = "候補1 <script>alert(1)</script>\n最終判断は人";
-  const doneHtml = render({ ...state.initialJournalAiAssistView, open: true, jobId: "job-1", state: "COMPLETED", content });
-  assert.match(doneHtml, /候補1 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.doesNotMatch(doneHtml, /<script>/);
-  assert.match(doneHtml, /最終判断は人/);
+  assert.match(runningHtml, /journal-ai-state--processing">処理中/);
+  assert.match(runningHtml, /AIが検索候補を整理しています/);
+  assert.doesNotMatch(runningHtml, /AI補助を準備しています/);
+});
+
+test("COMPLETED displays long plain text and keeps candidate and cart controls out of the panel", () => {
+  const content = `候補1 <script>alert(1)</script>\n\n${"説明が続きます。".repeat(400)}\n最終判断は人`;
+  const html = render({ ...state.initialJournalAiAssistView, open: true, jobId: "job-1", state: "COMPLETED", content });
+  assert.match(html, /journal-ai-state--complete">完了/);
+  assert.match(html, /journal-ai-trigger is-open"[^>]*disabled=""/);
+  assert.match(html, /候補1 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /最終判断は人/);
+  assert.doesNotMatch(html, /<script>|カートに追加|候補を選択/);
+  assert.doesNotMatch(html, /journal-ai-loading|journal-ai-error/);
+});
+
+test("FAILED, timeout, and connection errors show safe messages in the panel", () => {
+  const failed = render({ ...state.initialJournalAiAssistView, open: true, jobId: "job-1", state: "FAILED" });
+  assert.match(failed, /journal-ai-state--error">失敗/);
+  assert.match(failed, /AI補助の処理に失敗しました/);
+  for (const message of [
+    "AI補助の応答がタイムアウトしました。",
+    "AI補助に接続できませんでした。通常の検索機能はそのまま利用できます。",
+  ]) {
+    const html = render({ ...state.initialJournalAiAssistView, open: true, error: message });
+    assert.match(html, /role="alert"/);
+    assert.ok(html.includes(message));
+    assert.doesNotMatch(html, /journal-ai-loading|journal-ai-content/);
+  }
+});
+
+test("closing the panel hides its content and leaves the AI button available", () => {
+  const html = render({ ...state.initialJournalAiAssistView, state: "COMPLETED", content: "説明" });
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /journal-ai-panel-heading|説明<\/p>/);
+  assert.doesNotMatch(html, /disabled=""/);
 });
