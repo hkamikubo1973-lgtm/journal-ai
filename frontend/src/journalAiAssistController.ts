@@ -8,10 +8,12 @@ export type JournalAiAssistViewState = {
   state: JournalAiAssistState | null;
   content: string | null;
   error: string | null;
+  pollRetryAvailable: boolean;
 };
 
 export const initialJournalAiAssistView: JournalAiAssistViewState = {
   open: false, submitting: false, jobId: null, state: null, content: null, error: null,
+  pollRetryAvailable: false,
 };
 
 export function matchesJournalAiSearch(current: JournalSearchRequest, searched: JournalSearchRequest | null): boolean {
@@ -28,6 +30,8 @@ const browserTimer: Timer = {
 
 const safeError = (error: unknown): string => error instanceof JournalAiAssistApiError
   ? error.message : "AI補助の結果を取得できませんでした。";
+const isPollTimeout = (error: unknown): boolean => error instanceof JournalAiAssistApiError
+  && error.code === "AI_JOB_POLL_TIMEOUT";
 
 export class JournalAiAssistController {
   private view: JournalAiAssistViewState = { ...initialJournalAiAssistView };
@@ -68,17 +72,17 @@ export class JournalAiAssistController {
         if (this.disposed || pollGeneration !== this.pollGeneration || this.view.jobId !== jobId || !this.view.open) return;
         if (response.job_id !== jobId) throw new Error("AI補助の結果を取得できませんでした。");
         if (response.state === "FAILED") {
-          this.update({ state: "FAILED", error: "AI補助の処理に失敗しました。" });
+          this.update({ state: "FAILED", error: "AI補助の処理に失敗しました。", pollRetryAvailable: false });
         } else if (response.state === "COMPLETED") {
           if (!response.content?.trim()) throw new Error("AI補助の結果を取得できませんでした。");
-          this.update({ state: "COMPLETED", content: response.content });
+          this.update({ state: "COMPLETED", content: response.content, error: null, pollRetryAvailable: false });
         } else {
-          this.update({ state: response.state });
+          this.update({ state: response.state, error: null, pollRetryAvailable: false });
           this.schedulePoll(1500);
         }
       }).catch((error: unknown) => {
         if (this.disposed || pollGeneration !== this.pollGeneration || this.view.jobId !== jobId || !this.view.open) return;
-        this.update({ error: safeError(error) });
+        this.update({ error: safeError(error), pollRetryAvailable: isPollTimeout(error) });
       });
     }, delay);
   }
@@ -96,11 +100,13 @@ export class JournalAiAssistController {
     try {
       const response = await this.submit(request);
       if (this.disposed || generation !== this.generation) return;
-      this.update({ jobId: response.job_id, state: response.state });
-      if (response.state === "FAILED") this.update({ error: "AI補助の処理に失敗しました。" });
+      this.update({ jobId: response.job_id, state: response.state, pollRetryAvailable: false });
+      if (response.state === "FAILED") this.update({ error: "AI補助の処理に失敗しました。", pollRetryAvailable: false });
       else this.schedulePoll(1500);
     } catch (error) {
-      if (!this.disposed && generation === this.generation) this.update({ error: safeError(error) });
+      if (!this.disposed && generation === this.generation) {
+        this.update({ error: safeError(error), pollRetryAvailable: false });
+      }
     } finally {
       if (!this.disposed && generation === this.generation) this.update({ submitting: false });
     }
@@ -109,6 +115,12 @@ export class JournalAiAssistController {
   close(): void {
     this.stopPolling();
     this.update({ open: false });
+  }
+
+  retryPoll(): void {
+    if (this.disposed || !this.view.jobId || !this.view.pollRetryAvailable) return;
+    this.update({ error: null, pollRetryAvailable: false });
+    this.schedulePoll(0);
   }
 
   dispose(): void {

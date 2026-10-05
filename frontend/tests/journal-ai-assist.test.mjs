@@ -66,7 +66,9 @@ function controller({ submit = async () => queued, get = async () => completed }
 }
 
 const render = (view = state.initialJournalAiAssistView, available = true) => renderToStaticMarkup(
-  React.createElement(ui.JournalAiAssistView, { view, available, onOpen: () => {}, onClose: () => {} }));
+  React.createElement(ui.JournalAiAssistView, {
+    view, available, onOpen: () => {}, onClose: () => {}, onRetryPoll: () => {},
+  }));
 
 test("AI button is disabled without a current candidate", () => {
   assert.match(render(state.initialJournalAiAssistView, false), /AI補助<\/button>/);
@@ -113,6 +115,22 @@ for (const [status, message] of [[503, "接続できません"], [504, "タイ�
   });
 }
 
+test("submit and poll timeout codes have distinct safe messages", async (t) => {
+  const cases = [
+    ["AI_JOB_SUBMIT_TIMEOUT", "受付確認", api.submitJournalAiAssist, request],
+    ["AI_JOB_POLL_TIMEOUT", "状態確認", api.getJournalAiAssist, "job-1"],
+  ];
+  for (const [code, message, call, argument] of cases) {
+    t.mock.method(globalThis, "fetch", async () => Response.json({
+      detail: { code, message: "C:/private/server-message" },
+    }, { status: 504 }));
+    await assert.rejects(call(argument), (error) =>
+      error instanceof api.JournalAiAssistApiError && error.code === code
+      && error.message.includes(message) && !error.message.includes("private"));
+    t.mock.restoreAll();
+  }
+});
+
 test("network and malformed response errors never reveal raw bodies", async (t) => {
   t.mock.method(globalThis, "fetch", async () => { throw new Error("C:/private/host"); });
   await assert.rejects(api.submitJournalAiAssist(request), (error) =>
@@ -141,11 +159,15 @@ test("POST failure is shown safely and never retried automatically", async () =>
   let posts = 0;
   const { instance, timer } = controller({ submit: async () => {
     posts += 1;
-    throw new api.JournalAiAssistApiError("AI補助の応答がタイムアウトしました。");
+    throw new api.JournalAiAssistApiError(
+      "AI Jobの受付確認がタイムアウトしました。新しいJobは自動送信していません。",
+      "AI_JOB_SUBMIT_TIMEOUT",
+    );
   } });
   await instance.open(request);
   assert.equal(posts, 1);
   assert.match(instance.snapshot().error, /タイムアウト/);
+  assert.equal(instance.snapshot().pollRetryAvailable, false);
   assert.equal(timer.tasks.size, 0);
   await instance.open(request);
   assert.equal(posts, 1);
@@ -173,11 +195,72 @@ test("FAILED and GET failure stop polling with safe errors", async () => {
   assert.equal(failed.instance.snapshot().state, "FAILED");
   assert.match(failed.instance.snapshot().error, /失敗/);
   assert.equal(failed.timer.tasks.size, 0);
-  const timeout = controller({ get: async () => { throw new api.JournalAiAssistApiError("AI補助の応答がタイムアウトしました。"); } });
+  const timeout = controller({ get: async () => { throw new api.JournalAiAssistApiError(
+    "AI Jobの状態確認が一時的にタイムアウトしました。", "AI_JOB_POLL_TIMEOUT",
+  ); } });
   await timeout.instance.open(request);
   await timeout.timer.run();
   assert.match(timeout.instance.snapshot().error, /タイムアウト/);
+  assert.equal(timeout.instance.snapshot().jobId, "job-1");
+  assert.equal(timeout.instance.snapshot().pollRetryAvailable, true);
   assert.equal(timeout.timer.tasks.size, 0);
+});
+
+test("poll timeout retry uses only the same Job GET and resumes through completion", async () => {
+  let posts = 0;
+  const getCalls = [];
+  const responses = [
+    new api.JournalAiAssistApiError("AI Jobの状態確認が一時的にタイムアウトしました。", "AI_JOB_POLL_TIMEOUT"),
+    queued,
+    running,
+    completed,
+  ];
+  const { instance, timer } = controller({
+    submit: async () => { posts += 1; return queued; },
+    get: async (jobId) => {
+      getCalls.push(jobId);
+      const response = responses.shift();
+      if (response instanceof Error) throw response;
+      return response;
+    },
+  });
+  await instance.open(request);
+  await timer.run();
+  assert.equal(instance.snapshot().jobId, "job-1");
+  assert.equal(instance.snapshot().pollRetryAvailable, true);
+  instance.retryPoll();
+  assert.equal([...timer.tasks.values()][0].delay, 0);
+  await timer.run();
+  assert.equal(instance.snapshot().state, "QUEUED");
+  assert.equal([...timer.tasks.values()][0].delay, 1500);
+  await timer.run();
+  assert.equal(instance.snapshot().state, "RUNNING");
+  await timer.run();
+  assert.equal(instance.snapshot().state, "COMPLETED");
+  assert.equal(instance.snapshot().content, completed.content);
+  assert.equal(instance.snapshot().pollRetryAvailable, false);
+  assert.equal(posts, 1);
+  assert.deepEqual(getCalls, ["job-1", "job-1", "job-1", "job-1"]);
+});
+
+test("a second poll timeout keeps the same Job retryable without POST", async () => {
+  let posts = 0;
+  let gets = 0;
+  const timeout = () => new api.JournalAiAssistApiError(
+    "AI Jobの状態確認が一時的にタイムアウトしました。", "AI_JOB_POLL_TIMEOUT",
+  );
+  const { instance, timer } = controller({
+    submit: async () => { posts += 1; return queued; },
+    get: async () => { gets += 1; throw timeout(); },
+  });
+  await instance.open(request);
+  await timer.run();
+  instance.retryPoll();
+  await timer.run();
+  assert.equal(instance.snapshot().jobId, "job-1");
+  assert.equal(instance.snapshot().pollRetryAvailable, true);
+  assert.equal(posts, 1);
+  assert.equal(gets, 2);
 });
 
 test("closing stops polling and reopening the same Job never repeats POST", async () => {
@@ -269,6 +352,25 @@ test("FAILED, timeout, and connection errors show safe messages in the panel", (
     assert.ok(html.includes(message));
     assert.doesNotMatch(html, /journal-ai-loading|journal-ai-content/);
   }
+});
+
+test("only poll timeout shows the same Job retry action", () => {
+  const pollTimeout = render({
+    ...state.initialJournalAiAssistView,
+    open: true,
+    jobId: "job-1",
+    state: "RUNNING",
+    error: "AI Jobの状態確認が一時的にタイムアウトしました。",
+    pollRetryAvailable: true,
+  });
+  assert.match(pollTimeout, /同じJobを再確認/);
+  assert.match(pollTimeout, /journal-ai-retry/);
+  const submitTimeout = render({
+    ...state.initialJournalAiAssistView,
+    open: true,
+    error: "AI Jobの受付確認がタイムアウトしました。",
+  });
+  assert.doesNotMatch(submitTimeout, /同じJobを再確認|journal-ai-retry/);
 });
 
 test("closing the panel hides its content and leaves the AI button available", () => {

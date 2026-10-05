@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import os
 import math
+import logging
+import time
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+
+logger = logging.getLogger(__name__)
 
 AI_SERVER_URL_ENV = "JOURNAL_AI_SERVER_URL"
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -36,6 +40,14 @@ class AIJobConnectionError(AIJobClientError):
 
 class AIJobTimeoutError(AIJobClientError):
     """The AI Server request timed out."""
+
+
+class AIJobSubmitTimeoutError(AIJobTimeoutError):
+    """The AI Server did not acknowledge a Job submission in time."""
+
+
+class AIJobPollTimeoutError(AIJobTimeoutError):
+    """The AI Server did not return an existing Job state in time."""
 
 
 class AIJobHTTPError(AIJobClientError):
@@ -108,8 +120,15 @@ class AIJobClient:
         self.transport = transport
 
     def _request(
-        self, method: str, path: str, *, body: dict[str, Any] | None = None,
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        operation: str,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
+        started_at = time.monotonic()
         try:
             with httpx.Client(
                 transport=self.transport,
@@ -120,6 +139,27 @@ class AIJobClient:
                     method, f"{self.base_url}{path}", json=body,
                 )
         except httpx.TimeoutException as error:
+            elapsed_seconds = time.monotonic() - started_at
+            timeout_subtype = type(error).__name__
+            if job_id is None:
+                logger.warning(
+                    "AI Job request timed out operation=%s timeout_subtype=%s elapsed_seconds=%.3f",
+                    operation,
+                    timeout_subtype,
+                    elapsed_seconds,
+                )
+            else:
+                logger.warning(
+                    "AI Job request timed out operation=%s timeout_subtype=%s elapsed_seconds=%.3f job_id=%r",
+                    operation,
+                    timeout_subtype,
+                    elapsed_seconds,
+                    job_id,
+                )
+            if operation == "submit":
+                raise AIJobSubmitTimeoutError("AI Job submission timed out") from error
+            if operation == "get":
+                raise AIJobPollTimeoutError("AI Job polling timed out") from error
             raise AIJobTimeoutError("AI Server request timed out") from error
         except httpx.RequestError as error:
             raise AIJobConnectionError("AI Server is unavailable") from error
@@ -170,7 +210,7 @@ class AIJobClient:
             raise AIJobRequestError("AI Job execution mode is invalid")
         if not isinstance(payload, dict):
             raise AIJobRequestError("AI Job payload is invalid")
-        result = self._request("POST", "/ai/jobs", body={
+        result = self._request("POST", "/ai/jobs", operation="submit", body={
             "profile": profile,
             "execution_mode": execution_mode,
             "payload": payload,
@@ -181,11 +221,16 @@ class AIJobClient:
     def get_job(self, job_id: str) -> dict[str, Any]:
         if not isinstance(job_id, str) or not job_id.strip():
             raise AIJobRequestError("AI Job identifier is invalid")
-        result = self._request("GET", f"/ai/jobs/{quote(job_id, safe='')}")
+        result = self._request(
+            "GET",
+            f"/ai/jobs/{quote(job_id, safe='')}",
+            operation="get",
+            job_id=job_id,
+        )
         self._validate_job_response(result)
         return result
 
     def get_status(self) -> dict[str, Any]:
         """Return the server's status object without interpreting model state."""
 
-        return self._request("GET", "/ai/status")
+        return self._request("GET", "/ai/status", operation="status")

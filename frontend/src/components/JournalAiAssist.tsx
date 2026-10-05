@@ -7,9 +7,10 @@ type ViewProps = {
   view: JournalAiAssistViewState;
   onOpen: () => void;
   onClose: () => void;
+  onRetryPoll: () => void;
 };
 
-export function JournalAiAssistView({ available, view, onOpen, onClose }: ViewProps) {
+export function JournalAiAssistView({ available, view, onOpen, onClose, onRetryPoll }: ViewProps) {
   const error = view.error || (view.state === "FAILED" ? "AI補助の処理に失敗しました。" : null);
   const processing = !error && (view.submitting || view.state === "QUEUED" || view.state === "RUNNING");
   const idle = !view.submitting && view.state === null && !error;
@@ -30,6 +31,7 @@ export function JournalAiAssistView({ available, view, onOpen, onClose }: ViewPr
         {processing && (view.submitting || view.state === "QUEUED") ? <p className="journal-ai-loading">AI補助を準備しています…</p> : null}
         {processing && !view.submitting && view.state === "RUNNING" ? <p className="journal-ai-loading">AIが検索候補を整理しています…</p> : null}
         {error && <p className="journal-ai-error" role="alert">{error}</p>}
+        {view.pollRetryAvailable && view.jobId && <button type="button" className="journal-ai-retry" onClick={onRetryPoll}>同じJobを再確認</button>}
         {view.state === "COMPLETED" && view.content && <p className="journal-ai-content">{view.content}</p>}
       </div>
     </aside>}
@@ -52,5 +54,6 @@ export default function JournalAiAssist({ request, candidateCount }: {
   }, []);
   return <JournalAiAssistView available={Boolean(request && candidateCount > 0)} view={view}
     onOpen={() => { void controller.current?.open(request); }}
-    onClose={() => controller.current?.close()} />;
+    onClose={() => controller.current?.close()}
+    onRetryPoll={() => controller.current?.retryPoll()} />;
 }

@@ -2,10 +2,22 @@ import type { JournalAiAssistResponse, JournalAiAssistState, JournalSearchReques
 
 const states: JournalAiAssistState[] = ["QUEUED", "RUNNING", "COMPLETED", "FAILED"];
 
-export class JournalAiAssistApiError extends Error {}
+export type JournalAiAssistErrorCode = "AI_JOB_SUBMIT_TIMEOUT" | "AI_JOB_POLL_TIMEOUT";
 
-function responseError(status: number): JournalAiAssistApiError {
+export class JournalAiAssistApiError extends Error {
+  constructor(message: string, readonly code: JournalAiAssistErrorCode | null = null) {
+    super(message);
+  }
+}
+
+function responseError(status: number, code: JournalAiAssistErrorCode | null = null): JournalAiAssistApiError {
   if (status === 503) return new JournalAiAssistApiError("AI補助に接続できませんでした。通常の検索機能はそのまま利用できます。");
+  if (status === 504 && code === "AI_JOB_SUBMIT_TIMEOUT") {
+    return new JournalAiAssistApiError("AI Jobの受付確認がタイムアウトしました。新しいJobは自動送信していません。", code);
+  }
+  if (status === 504 && code === "AI_JOB_POLL_TIMEOUT") {
+    return new JournalAiAssistApiError("AI Jobの状態確認が一時的にタイムアウトしました。", code);
+  }
   if (status === 504) return new JournalAiAssistApiError("AI補助の応答がタイムアウトしました。");
   if (status === 502) return new JournalAiAssistApiError("AI補助の結果を取得できませんでした。");
   return new JournalAiAssistApiError("AI補助の結果を取得できませんでした。");
@@ -25,7 +37,15 @@ function parseResponse(value: unknown, completedContentRequired: boolean): Journ
 }
 
 async function getJson(response: Response, completedContentRequired: boolean): Promise<JournalAiAssistResponse> {
-  if (!response.ok) throw responseError(response.status);
+  if (!response.ok) {
+    let code: JournalAiAssistErrorCode | null = null;
+    try {
+      const body = await response.json() as { detail?: { code?: unknown } };
+      const value = body?.detail?.code;
+      if (value === "AI_JOB_SUBMIT_TIMEOUT" || value === "AI_JOB_POLL_TIMEOUT") code = value;
+    } catch { /* Keep the status-only safe fallback. */ }
+    throw responseError(response.status, code);
+  }
   let body: unknown;
   try { body = await response.json(); }
   catch { throw responseError(0); }

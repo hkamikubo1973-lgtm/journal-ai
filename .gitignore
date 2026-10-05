@@ -1,5 +1,6 @@
 # 実データ
 data/transactions.csv
+data/company_knowledge/
 config/settings.json
 
 # Python

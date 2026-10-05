@@ -13,7 +13,9 @@ from ai_job_client import (
     AIJobHTTPError,
     AIJobMalformedResponseError,
     AIJobMissingJobIdError,
+    AIJobPollTimeoutError,
     AIJobRequestError,
+    AIJobSubmitTimeoutError,
     AIJobTimeoutError,
     AIJobUnknownStatusError,
 )
@@ -482,6 +484,16 @@ def _journal_ai_assist_http_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=422, detail="AI Job IDが正しくありません。")
     if isinstance(error, (AIJobConfigurationError, AIJobConnectionError)):
         return HTTPException(status_code=503, detail="AI補助を利用できません。")
+    if isinstance(error, AIJobSubmitTimeoutError):
+        return HTTPException(status_code=504, detail={
+            "code": "AI_JOB_SUBMIT_TIMEOUT",
+            "message": "AI Jobの受付確認がタイムアウトしました。",
+        })
+    if isinstance(error, AIJobPollTimeoutError):
+        return HTTPException(status_code=504, detail={
+            "code": "AI_JOB_POLL_TIMEOUT",
+            "message": "AI Jobの状態確認が一時的にタイムアウトしました。",
+        })
     if isinstance(error, AIJobTimeoutError):
         return HTTPException(status_code=504, detail="AI補助の応答がタイムアウトしました。")
     if isinstance(error, AIJobHTTPError) and error.status_code == 404:

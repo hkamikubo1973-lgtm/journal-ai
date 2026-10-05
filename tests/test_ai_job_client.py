@@ -28,7 +28,9 @@ from ai_job_client import (  # noqa: E402
     AIJobHTTPError,
     AIJobMalformedResponseError,
     AIJobMissingJobIdError,
+    AIJobPollTimeoutError,
     AIJobRequestError,
+    AIJobSubmitTimeoutError,
     AIJobTimeoutError,
     AIJobUnknownStatusError,
     normalize_ai_server_base_url,
@@ -227,11 +229,50 @@ class AIJobClientTest(unittest.TestCase):
             calls.append(request.method)
             raise httpx.ReadTimeout("response unavailable")
 
-        with self.assertRaises(AIJobTimeoutError):
+        with self.assertRaises(AIJobSubmitTimeoutError):
             client_for(handle).submit_job(
                 profile="journal_normal", execution_mode="interactive", payload={},
             )
         self.assertEqual(calls, ["POST"])
+
+    def test_timeout_operation_subtype_elapsed_and_get_job_id_are_logged_safely(self):
+        cases = (
+            (
+                lambda client: client.submit_job(
+                    profile="journal_normal",
+                    execution_mode="interactive",
+                    payload={"prompt": "PRIVATE_PROMPT"},
+                ),
+                httpx.ReadTimeout("PRIVATE_EXCEPTION"),
+                AIJobSubmitTimeoutError,
+                "operation=submit",
+                None,
+            ),
+            (
+                lambda client: client.get_job("job-safe-1"),
+                httpx.ConnectTimeout("PRIVATE_EXCEPTION"),
+                AIJobPollTimeoutError,
+                "operation=get",
+                "job_id='job-safe-1'",
+            ),
+        )
+        for call, timeout, expected, operation, job_log in cases:
+            with self.subTest(operation=operation), self.assertLogs(
+                "ai_job_client", level="WARNING",
+            ) as captured:
+                client = client_for(lambda request: (_ for _ in ()).throw(timeout))
+                with self.assertRaises(expected):
+                    call(client)
+            log = "\n".join(captured.output)
+            self.assertIn(operation, log)
+            self.assertIn(f"timeout_subtype={type(timeout).__name__}", log)
+            self.assertRegex(log, r"elapsed_seconds=\d+\.\d{3}")
+            if job_log is None:
+                self.assertNotIn("job_id=", log)
+            else:
+                self.assertIn(job_log, log)
+            for private in ("PRIVATE_PROMPT", "PRIVATE_EXCEPTION", BASE_URL):
+                self.assertNotIn(private, log)
 
     def test_status_endpoint_returns_server_object_without_model_interpretation(self):
         calls = []
