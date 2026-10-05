@@ -17,6 +17,26 @@ from journal_ai_context_provider import build_journal_ai_context
 PROFILE = "journal_normal"
 EXECUTION_MODE = "interactive"
 
+_AI_ASSIST_CANDIDATE_FIELDS = (
+    "is_multi_line",
+    "is_complex",
+    "has_fukugo",
+    "has_sundry",
+)
+_AI_ASSIST_ROW_FIELDS = (
+    "date",
+    "debit_account_name",
+    "debit_sub_name",
+    "debit_department_name",
+    "credit_account_name",
+    "credit_sub_name",
+    "credit_department_name",
+    "debit_amount",
+    "credit_amount",
+    "summary",
+    "voucher_summary",
+)
+
 
 class JournalAIAssistNoCandidates(Exception):
     """The formal search found nothing to explain."""
@@ -32,6 +52,45 @@ class JournalAIAssistFailed(Exception):
 
 class JournalAIAssistInvalidResult(Exception):
     """A completed Job has no usable explanation."""
+
+
+def _project_journal_context_for_ai_assist(
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep candidate facts needed for explanation, without changing search."""
+
+    data = context["data"]
+    projected = {
+        key: context[key]
+        for key in ("schema_version", "source", "generated_at", "as_of")
+    }
+    projected["data"] = {
+        "query": dict(data["query"]),
+        "current_draft": (
+            dict(data["current_draft"])
+            if isinstance(data["current_draft"], Mapping)
+            else data["current_draft"]
+        ),
+        "candidate_count": data["candidate_count"],
+        "candidates": [
+            {
+                "rank": candidate["rank"],
+                **{
+                    field: candidate[field]
+                    for field in _AI_ASSIST_CANDIDATE_FIELDS
+                },
+                "rows": [
+                    {
+                        field: row.get(field, "")
+                        for field in _AI_ASSIST_ROW_FIELDS
+                    }
+                    for row in candidate["rows"]
+                ],
+            }
+            for candidate in data["candidates"]
+        ],
+    }
+    return projected
 
 
 def build_journal_ai_assist_prompt(
@@ -158,10 +217,16 @@ class JournalAIAssistApplicationService:
         knowledge_context = build_company_knowledge_context(
             context, path=self.knowledge_path,
         )
+        assist_context = _project_journal_context_for_ai_assist(context)
         response = self.job_service.submit_job(
             profile=PROFILE,
             execution_mode=EXECUTION_MODE,
-            payload={"prompt": build_journal_ai_assist_prompt(context, knowledge_context)},
+            payload={
+                "prompt": build_journal_ai_assist_prompt(
+                    assist_context,
+                    knowledge_context,
+                ),
+            },
         )
         job = response["job"]
         return {"job_id": job["job_id"], "state": job["state"]}

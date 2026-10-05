@@ -94,7 +94,7 @@ class JournalAiAssistTest(unittest.TestCase):
         ] = lambda: self.service
         self.addCleanup(journal_api.app.dependency_overrides.clear)
 
-    def test_submit_reuses_context_and_keeps_candidate_order_score_and_reason(self):
+    def test_submit_uses_compact_context_without_changing_formal_context(self):
         before = self.csv_path.read_bytes()
         response = self.api.post("/api/journal/ai-assist", json={
             "keyword": "AI接続確認", "limit": 5,
@@ -112,17 +112,45 @@ class JournalAiAssistTest(unittest.TestCase):
         )[0]
         context = json.loads(encoded)
         expected = provider.build_journal_ai_context(keyword="AI接続確認", limit=5)
-        self.assertEqual(context["data"], expected["data"])
         self.assertGreater(context["data"]["candidate_count"], 0)
         self.assertEqual(
-            [(item["rank"], item["score"], item["search_reason"])
-             for item in context["data"]["candidates"]],
-            [(item["rank"], item["score"], item["search_reason"])
-             for item in expected["data"]["candidates"]],
+            [item["rank"] for item in context["data"]["candidates"]],
+            [item["rank"] for item in expected["data"]["candidates"]],
         )
+        self.assertEqual(context["data"]["query"], expected["data"]["query"])
+        self.assertEqual(context["data"]["current_draft"],
+                         expected["data"]["current_draft"])
+        self.assertTrue(all(
+            "score" in item and "search_reason" in item
+            for item in expected["data"]["candidates"]
+        ))
+        candidate_fields = {
+            "rank", "is_multi_line", "is_complex", "has_fukugo",
+            "has_sundry", "rows",
+        }
+        row_fields = {
+            "date", "debit_account_name", "debit_sub_name",
+            "debit_department_name", "credit_account_name",
+            "credit_sub_name", "credit_department_name", "debit_amount",
+            "credit_amount", "summary", "voucher_summary",
+        }
+        for candidate in context["data"]["candidates"]:
+            self.assertEqual(set(candidate), candidate_fields)
+            for row in candidate["rows"]:
+                self.assertEqual(set(row), row_fields)
+        compact_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        full_json = json.dumps(expected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(compact_json.encode()), len(full_json.encode()))
         for forbidden in ("PRIVATE_METADATA", "source_rows", "editable_rows",
                           "block_rows", "registrationCart", "入力ユーザ"):
             self.assertNotIn(forbidden, prompt)
+        for excluded in (
+            "score", "search_reason", "matched_amount", "row_count",
+            "debit_account_code", "credit_account_code", "debit_sub_code",
+            "credit_sub_code", "debit_department_code",
+            "credit_department_code",
+        ):
+            self.assertNotIn(excluded, encoded)
         count = context["data"]["candidate_count"]
         self.assertIn(f"候補は{count}件", prompt)
         self.assertIn("仕訳判断支援", prompt)
@@ -144,6 +172,80 @@ class JournalAiAssistTest(unittest.TestCase):
         self.assertNotIn("【主な違い】", prompt)
         self.assertNotIn("理由：search_reasonの要点", prompt)
         self.assertNotIn("りそな銀行", prompt)
+
+    def test_compact_projection_keeps_twenty_candidates_and_all_rows_in_order(self):
+        candidates = []
+        for rank in range(1, 21):
+            rows = [{
+                "date": f"2026/09/{rank:02d}",
+                "debit_account_code": str(100 + rank),
+                "debit_account_name": f"借方{rank}",
+                "debit_sub_code": "D",
+                "debit_sub_name": "借方補助",
+                "debit_department_code": "10",
+                "debit_department_name": "営業部",
+                "credit_account_code": str(600 + rank),
+                "credit_account_name": f"貸方{rank}",
+                "credit_sub_code": "C",
+                "credit_sub_name": "貸方補助",
+                "credit_department_code": "20",
+                "credit_department_name": "経理部",
+                "debit_amount": str(rank * 100),
+                "credit_amount": str(rank * 100),
+                "amount": str(rank * 100),
+                "summary": f"摘要{rank}-{row_number}",
+                "voucher_summary": f"伝票{rank}",
+            } for row_number in range(1, 3 if rank == 1 else 2)]
+            candidates.append({
+                "rank": rank, "score": 100 - rank,
+                "search_reason": ["詳細な検索理由"],
+                "is_multi_line": rank == 1, "is_complex": rank == 1,
+                "has_fukugo": rank == 1, "has_sundry": False,
+                "row_count": len(rows), "rows": rows,
+                "matched_amount": {"amount": rank * 100},
+            })
+        full = {
+            "schema_version": 1, "source": "journal",
+            "generated_at": "2026-10-05T00:00:00+00:00",
+            "as_of": "2026-10-05",
+            "data": {
+                "query": {"keyword": "fixture", "limit": 20},
+                "current_draft": None,
+                "candidate_count": 20,
+                "candidates": candidates,
+            },
+        }
+        before = json.dumps(full, ensure_ascii=False, sort_keys=True)
+
+        compact = assist._project_journal_context_for_ai_assist(full)
+
+        self.assertEqual(json.dumps(full, ensure_ascii=False, sort_keys=True), before)
+        self.assertEqual(compact["data"]["candidate_count"], 20)
+        self.assertEqual(
+            [item["rank"] for item in compact["data"]["candidates"]],
+            list(range(1, 21)),
+        )
+        self.assertEqual(len(compact["data"]["candidates"][0]["rows"]), 2)
+        self.assertEqual(
+            [row["summary"] for row in compact["data"]["candidates"][0]["rows"]],
+            ["摘要1-1", "摘要1-2"],
+        )
+        encoded = json.dumps(compact, ensure_ascii=False)
+        for excluded in (
+            "score", "search_reason", "matched_amount", "row_count",
+            "debit_account_code", "credit_account_code", "debit_sub_code",
+            "credit_sub_code", "debit_department_code",
+            "credit_department_code",
+        ):
+            self.assertNotIn(excluded, encoded)
+        for retained in (
+            "debit_account_name", "debit_sub_name", "debit_department_name",
+            "credit_account_name", "credit_sub_name",
+            "credit_department_name", "debit_amount", "credit_amount",
+            "summary", "voucher_summary", "is_multi_line", "is_complex",
+            "has_fukugo", "has_sundry",
+        ):
+            self.assertIn(retained, encoded)
 
     def test_prompt_uses_actual_candidate_count_without_changing_context(self):
         context = {"data": {"candidate_count": 3, "candidates": [
@@ -308,8 +410,12 @@ class JournalAiAssistTest(unittest.TestCase):
             [item["candidate_rank"] for item in company["data"]["matches"]],
             [item["rank"] for item in journal["data"]["candidates"]],
         )
-        self.assertEqual(journal["data"],
-                         provider.build_journal_ai_context(keyword="AI接続確認")["data"])
+        full_context = provider.build_journal_ai_context(keyword="AI接続確認")
+        expected_journal = assist._project_journal_context_for_ai_assist(full_context)
+        self.assertEqual(journal["schema_version"], expected_journal["schema_version"])
+        self.assertEqual(journal["source"], expected_journal["source"])
+        self.assertEqual(journal["as_of"], expected_journal["as_of"])
+        self.assertEqual(journal["data"], expected_journal["data"])
         for forbidden in ("送信禁止の情報", "秘密", str(self.service.knowledge_path),
                           "source_rows", "editable_rows"):
             self.assertNotIn(forbidden, prompt)
@@ -317,6 +423,59 @@ class JournalAiAssistTest(unittest.TestCase):
         self.assertIn("Journal Contextの仕訳構造と人が確認すべき判断材料を優先", prompt)
         self.assertIn("登録されていない意味を補完せず", prompt)
         self.assertIn("Knowledgeだけで候補を正解扱いせず", prompt)
+
+    def test_company_knowledge_matches_full_context_before_code_is_removed(self):
+        self.service.knowledge_path = self.root / "private" / "entries.csv"
+        self.service.knowledge_path.parent.mkdir()
+        with self.service.knowledge_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=knowledge.KNOWLEDGE_COLUMNS)
+            writer.writeheader()
+            writer.writerow({
+                "namespace": "account_note",
+                "match_field": "debit_account_code",
+                "key": "114",
+                "label": "コード照合済み",
+                "description": "full Contextだけに存在するcodeで照合",
+                "source": "テスト資料",
+                "active": "true",
+            })
+
+        response = self.api.post("/api/journal/ai-assist", json={
+            "keyword": "AI接続確認", "limit": 5,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.fake.calls), 1)
+        prompt = self.fake.calls[0]["payload"]["prompt"]
+        journal_json = prompt.split("--- CONTEXT START ---\n", 1)[1].split(
+            "\n--- CONTEXT END ---", 1,
+        )[0]
+        company_json = prompt.split("--- COMPANY KNOWLEDGE START ---\n", 1)[1].split(
+            "\n--- COMPANY KNOWLEDGE END ---", 1,
+        )[0]
+        journal = json.loads(journal_json)
+        company = json.loads(company_json)
+        self.assertNotIn("debit_account_code", journal_json)
+        self.assertEqual(
+            [item["key"] for item in company["data"]["matches"]],
+            ["114"],
+        )
+        full_context = provider.build_journal_ai_context(
+            keyword="AI接続確認", limit=5,
+        )
+        matched_rank = next(
+            candidate["rank"]
+            for candidate in full_context["data"]["candidates"]
+            if any(
+                row["debit_account_code"] == "114"
+                for row in candidate["rows"]
+            )
+        )
+        self.assertEqual(company["data"]["matches"][0]["candidate_rank"],
+                         matched_rank)
+        self.assertIn(matched_rank, [
+            candidate["rank"] for candidate in journal["data"]["candidates"]
+        ])
 
     def test_empty_or_unmatched_company_knowledge_keeps_prompt_compatible(self):
         self.service.knowledge_path = self.root / "private" / "entries.csv"
