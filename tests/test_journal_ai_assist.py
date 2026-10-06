@@ -419,6 +419,43 @@ class JournalAiAssistTest(unittest.TestCase):
         self.assertNotIn("受付", final_instruction)
         self.assertIn("借方から貸方への移動や科目の増減を説明しません", final_instruction)
 
+    def test_prompt_requires_direction_neutral_confirmation_language(self):
+        context = {"data": {"candidate_count": 3, "candidates": [
+            {"rank": 1, "rows": [{
+                "debit_account_name": "普通預金", "credit_account_name": "未収運賃",
+            }]},
+            {"rank": 2, "rows": [{
+                "debit_account_name": "長期借入金", "credit_account_name": "普通預金",
+            }]},
+            {"rank": 3, "rows": [{
+                "debit_account_name": "資金複合", "credit_account_name": "普通預金",
+            }]},
+        ]}}
+        prompt = assist.build_journal_ai_assist_prompt(context)
+        instructions = prompt.split("--- CONTEXT START ---", 1)[0]
+        final_instruction = prompt.split("--- CONTEXT END ---", 1)[1]
+
+        for phrase in (
+            "確認事項でも、ContextまたはCompany Knowledgeに明記されていない方向付き・目的付きの業務動作",
+            "仕訳科目だけから作りません",
+            "『入金元』『支払先』『返済先』『借入先』『使用目的』『受領先』『振込先』",
+            "預金科目が借方か貸方かにかかわらず",
+            "銀行明細・通帳摘要の相手先、日付、金額、摘要を照合",
+            "借入契約・返済予定表・銀行明細の該当する日付・金額・相手先を照合",
+            "資金複合は仕訳構造上の名称として扱い",
+            "同一取引の関連行・摘要・日付・金額を照合",
+            "確認では『入金元』と断定せず",
+            "銀行明細・未収一覧・請求明細の日付・金額・相手先を照合",
+        ):
+            self.assertIn(phrase, instructions)
+        self.assertIn("借方が預金・貸方が未収債権", final_instruction)
+        self.assertIn("未収債権が預金へ入金された場合という可能性", final_instruction)
+        self.assertIn("確認文は方向に中立な照合表現", final_instruction)
+        self.assertIn(
+            "Company Knowledgeに具体的な業務動作が明記されている場合だけその用語を使います",
+            final_instruction,
+        )
+
     def test_prompt_names_all_ten_candidates_without_mutating_their_order(self):
         ranks = list(range(1, 11))
         context = {"data": {"candidate_count": 10, "candidates": [
