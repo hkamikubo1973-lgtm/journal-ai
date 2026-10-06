@@ -105,13 +105,21 @@ class JournalAiAssistTest(unittest.TestCase):
         self.assertEqual(len(self.fake.calls), 1)
         self.assertEqual(self.fake.calls[0]["profile"], "journal_normal")
         self.assertEqual(self.fake.calls[0]["execution_mode"], "interactive")
-        self.assertEqual(set(self.fake.calls[0]["payload"]), {"prompt"})
+        self.assertEqual(
+            set(self.fake.calls[0]["payload"]),
+            {"prompt", "policy_context"},
+        )
+        self.assertNotIn("max_tokens", self.fake.calls[0]["payload"])
         prompt = self.fake.calls[0]["payload"]["prompt"]
         encoded = prompt.split("--- CONTEXT START ---\n", 1)[1].split(
             "\n--- CONTEXT END ---", 1,
         )[0]
         context = json.loads(encoded)
         expected = provider.build_journal_ai_context(keyword="AI接続確認", limit=5)
+        self.assertEqual(
+            self.fake.calls[0]["payload"]["policy_context"],
+            {"candidate_count": len(expected["data"]["candidates"])},
+        )
         self.assertGreater(context["data"]["candidate_count"], 0)
         self.assertEqual(
             [item["rank"] for item in context["data"]["candidates"]],
@@ -172,6 +180,67 @@ class JournalAiAssistTest(unittest.TestCase):
         self.assertNotIn("【主な違い】", prompt)
         self.assertNotIn("理由：search_reasonの要点", prompt)
         self.assertNotIn("りそな銀行", prompt)
+
+    def test_submit_sends_backend_candidate_count_for_policy_without_max_tokens(self):
+        row = {
+            field: ""
+            for field in assist._AI_ASSIST_ROW_FIELDS
+        }
+        for candidate_count in (5, 10, 20):
+            with self.subTest(candidate_count=candidate_count):
+                context = {
+                    "schema_version": 1,
+                    "source": "journal",
+                    "generated_at": "2026-10-05T00:00:00+09:00",
+                    "as_of": "2026-10-05",
+                    "data": {
+                        "query": {"keyword": "fixture", "limit": 99},
+                        "current_draft": None,
+                        "candidate_count": candidate_count,
+                        "candidates": [
+                            {
+                                "rank": rank,
+                                "is_multi_line": False,
+                                "is_complex": False,
+                                "has_fukugo": False,
+                                "has_sundry": False,
+                                "rows": [{**row, "summary": f"candidate-{rank}"}],
+                            }
+                            for rank in range(1, candidate_count + 1)
+                        ],
+                    },
+                }
+                empty_knowledge = {"data": {"matches": []}}
+                self.fake.calls.clear()
+                with (
+                    patch.object(
+                        assist,
+                        "build_journal_ai_context",
+                        return_value=context,
+                    ),
+                    patch.object(
+                        assist,
+                        "build_company_knowledge_context",
+                        return_value=empty_knowledge,
+                    ),
+                ):
+                    self.service.submit(keyword="fixture", limit=99)
+
+                self.assertEqual(len(self.fake.calls), 1)
+                payload = self.fake.calls[0]["payload"]
+                self.assertEqual(
+                    payload["policy_context"],
+                    {"candidate_count": candidate_count},
+                )
+                self.assertNotIn("max_tokens", payload)
+                encoded = payload["prompt"].split(
+                    "--- CONTEXT START ---\n", 1,
+                )[1].split("\n--- CONTEXT END ---", 1)[0]
+                prompt_context = json.loads(encoded)
+                self.assertEqual(
+                    [candidate["rank"] for candidate in prompt_context["data"]["candidates"]],
+                    list(range(1, candidate_count + 1)),
+                )
 
     def test_compact_projection_keeps_twenty_candidates_and_all_rows_in_order(self):
         candidates = []

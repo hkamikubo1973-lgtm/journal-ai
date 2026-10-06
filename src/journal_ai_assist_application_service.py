@@ -218,6 +218,7 @@ class JournalAIAssistApplicationService:
             context, path=self.knowledge_path,
         )
         assist_context = _project_journal_context_for_ai_assist(context)
+        candidate_count = len(assist_context["data"]["candidates"])
         response = self.job_service.submit_job(
             profile=PROFILE,
             execution_mode=EXECUTION_MODE,
@@ -226,6 +227,9 @@ class JournalAIAssistApplicationService:
                     assist_context,
                     knowledge_context,
                 ),
+                "policy_context": {
+                    "candidate_count": candidate_count,
+                },
             },
         )
         job = response["job"]
